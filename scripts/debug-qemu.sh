@@ -14,31 +14,13 @@ KERNEL_ELF="$BUILD_DIR/kernel.elf"
 : "${SMP:=1}"
 : "${MACHINE:=q35}"
 : "${ACCEL:=}"
-: "${SERIAL:=stdio}"
+: "${SERIAL:=telnet:127.0.0.1:8086,server,nowait}"
 : "${EXTRA_ARGS:=}"
-: "${NO_GDB:=no}"   # If yes, only start QEMU waiting for gdb
+: "${NO_GDB:=no}"
 
 usage() {
   cat <<EOF
 Usage: $0 [--img path] [--no-gdb]
-
-Starts QEMU with gdb stub (-s -S) and launches gdb preloaded with debug.gdb
-
-Environment overrides:
-  QEMU        QEMU system emulator (default qemu-system-x86_64)
-  GDB_BIN     GDB executable (default gdb)
-  RAM         Memory in MB (default 512)
-  SMP         vCPU count (default 1)
-  MACHINE     Machine type (default q35)
-  ACCEL       kvm|tcg (auto-detect if unset)
-  SERIAL      Serial backend (default stdio)
-  EXTRA_ARGS  Extra QEMU arguments
-  NO_GDB      yes to skip launching gdb automatically
-
-Options:
-  --img PATH  Use custom disk image (default build/disk.img)
-  --no-gdb    Do not auto launch gdb (wait for manual attach)
-  -h --help   Show this help
 EOF
 }
 
@@ -69,37 +51,62 @@ else
   ACCEL_ARG+=( -accel "$ACCEL" )
 fi
 
-# Launch QEMU paused, gdb stub on :1234
-"$QEMU" \
+#
+# ────────────────────────────────────────────────
+#   Launch QEMU in its own process group (setsid)
+#   → prevents Ctrl-C from killing QEMU
+# ────────────────────────────────────────────────
+#
+
+setsid "$QEMU" \
+  -cpu qemu64 \
+  -d cpu_reset \
+  -no-reboot \
+  -no-shutdown \
   -machine "$MACHINE" \
   "${ACCEL_ARG[@]}" \
   -m "$RAM" \
   -smp "$SMP" \
+  -boot d \
   -drive if=pflash,format=raw,unit=0,readonly=on,file="$CODE_FD" \
   -drive if=pflash,format=raw,unit=1,file="$VARS_FD" \
   -drive file="$IMG",format=raw,if=virtio \
   -serial "$SERIAL" \
   -s -S \
   $EXTRA_ARGS &
+
 QEMU_PID=$!
 
 echo "QEMU started (pid=$QEMU_PID) with gdb stub on :1234 and is paused waiting for 'continue'"
 
 cleanup() {
-  if kill -0 $QEMU_PID 2>/dev/null; then
+  if kill -0 "$QEMU_PID" 2>/dev/null; then
     echo "Stopping QEMU (pid=$QEMU_PID)" >&2
-    kill $QEMU_PID
-    wait $QEMU_PID || true
+    kill "$QEMU_PID"
+    wait "$QEMU_PID" || true
   fi
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT TERM   # INT removed—handled separately below
 
 if [[ "$NO_GDB" == yes ]]; then
   echo "NO_GDB=yes: Not launching gdb. Attach manually with:"
   echo "  $GDB_BIN -ex 'target remote :1234' $KERNEL_ELF"
-  wait $QEMU_PID
+  wait "$QEMU_PID"
   exit 0
 fi
 
-# Launch gdb
-exec "$GDB_BIN" -q -x "$GDB_SCRIPT" "$KERNEL_ELF"
+#
+# ────────────────────────────────────────────────
+#   Ignore Ctrl-C in THIS script
+#   → ensures only GDB receives the SIGINT
+# ────────────────────────────────────────────────
+#
+trap '' INT
+
+# Launch GDB (exec replaces shell → no double handlers)
+"$GDB_BIN" -q --nx --command="$GDB_SCRIPT" "$KERNEL_ELF"
+
+echo "GDB exited. Stopping QEMU..."
+cleanup
+
+exit 0

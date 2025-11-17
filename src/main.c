@@ -1,4 +1,12 @@
-void _start() {
-    // Initialization code here
-    while (1);
+#include <krnl/boot/boot.h>
+
+__attribute__((noreturn)) void _halt() {
+    while (1) {
+        __asm__("hlt");
+    }
+}
+
+__attribute__((noreturn)) void _start() {
+    boot_startup();
+    _halt();
 }

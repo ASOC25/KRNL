@@ -9,6 +9,7 @@ override CFLAGS +=       \
 	-I$(INCDIR)          \
     -std=c11             \
     -ffreestanding       \
+    -g                   \
     -fno-pie             \
     -fno-pic             \
     -m64                 \
