@@ -1,4 +1,5 @@
 
+#include "krnl/mem/pmm.h"
 #include <krnl/boot/bootloaders/bootloader.h>
 #include <krnl/drivers/serial/serial.h>
 #include <krnl/devices/devices.h>
@@ -52,5 +53,15 @@ void boot_startup() {
 
     kprintf("ASOC KERNEL BOOTED SUCCESSFULLY!\n");
     kprintf("Using bootloader: %s version: %s\n", get_bootloader_name(), get_bootloader_version());
+    pmm_init();
+    void* mem3 = pmm_alloc_pages(8);
+    void* mem1 = pmm_alloc_pages(9);
+    void* mem2 = pmm_alloc_pages(7);
+    pmm_free_pages(mem1, 9);
+    void* mem4 = pmm_alloc_pages(10);
+    kprintf("mem3 %x\n",mem3);
+    kprintf("mem1 %x\n",mem1);
+    kprintf("mem2 %x\n",mem2);
+    kprintf("mem4 %x\n",mem4);
     while (1);
 }
