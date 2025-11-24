@@ -41,3 +41,4 @@ core.*
 # NOTE: The firmware blobs in OVMFbin/ and the Limine binaries in limine/ are
 # currently tracked. Remove them from version control or add entries here if
 # you prefer to fetch them dynamically.
+.vscode/

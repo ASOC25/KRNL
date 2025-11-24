@@ -60,6 +60,7 @@ fi
 
 setsid "$QEMU" \
   -cpu qemu64 \
+  -nographic \
   -d cpu_reset \
   -no-reboot \
   -no-shutdown \
