@@ -1,6 +1,7 @@
 #include <krnl/devices/devices.h>
 #include <krnl/libraries/std/stddef.h>
 #include <krnl/libraries/std/stdint.h>
+#include <krnl/debug/debug.h>
 
 struct device_subsystem device_s = {0};
 
@@ -17,7 +18,7 @@ void devices_init(void) {
 
 device_minor_t devices_new_device(device_major_t major_number, device_addr_t internal_address) {
     if (device_s.drivers[major_number].initialize == 0x0) {
-        return NOT_FOUND;
+        silent_panic();
     }
 
     for (device_minor_t i = 0; i < DEVICES_MAX_DEVICES; i++) {
@@ -33,18 +34,18 @@ device_minor_t devices_new_device(device_major_t major_number, device_addr_t int
         }
     }
 
-    return OUT_OF_MEMORY; // No available minor number
-
+    silent_panic();
+    return FAILURE;
 }
 
 status_t devices_remove_device(device_major_t major_number, device_minor_t minor_number) {
     if (device_s.drivers[major_number].initialize == 0x0) {
-        return NOT_FOUND;
+        silent_panic();
     }
 
     device_addr_t addr = device_s.devices[major_number][minor_number];
     if (addr == -1) {
-        return NOT_FOUND;
+        silent_panic();
     }
 
     if (device_s.drivers[major_number].shutdown) {
@@ -59,7 +60,7 @@ status_t devices_remove_device(device_major_t major_number, device_minor_t minor
 
 status_t devices_new_driver(device_major_t major_number, struct device_driver ops) {
     if (device_s.drivers[major_number].initialize != 0x0) {
-        return ALREADY_EXISTS;
+        silent_panic();
     }
 
     device_s.drivers[major_number] = ops;
@@ -68,7 +69,7 @@ status_t devices_new_driver(device_major_t major_number, struct device_driver op
 
 status_t devices_remove_driver(device_major_t major_number) {
     if (device_s.drivers[major_number].initialize == 0x0) {
-        return NOT_FOUND;
+        silent_panic();
     }
 
     // We want to shutdown all devices managed by this driver here.
@@ -91,51 +92,54 @@ status_t devices_remove_driver(device_major_t major_number) {
 
 int64_t devices_read(device_major_t major, device_minor_t minor, uint64_t offset, uint64_t size, uint8_t* buffer) {
     if (device_s.drivers[major].initialize == 0x0) {
-        return NOT_FOUND;
+        silent_panic();
     }
 
     device_addr_t addr = device_s.devices[major][minor];
     if (addr == -1) {
-        return NOT_FOUND;
+        silent_panic();
     }
 
     if (device_s.drivers[major].read) {
         return device_s.drivers[major].read(addr, offset, size, buffer);
     }
 
-    return NOT_IMPLEMENTED;
+    silent_panic();
+    return FAILURE;
 }
 
 int64_t devices_write(device_major_t major, device_minor_t minor, uint64_t offset, uint64_t size, const uint8_t* buffer) {
     if (device_s.drivers[major].initialize == 0x0) {
-        return NOT_FOUND;
+        silent_panic();
     }
 
     device_addr_t addr = device_s.devices[major][minor];
     if (addr == -1) {
-        return NOT_FOUND;
+        silent_panic();
     }
 
     if (device_s.drivers[major].write) {
         return device_s.drivers[major].write(addr, offset, size, buffer);
     }
 
-    return NOT_IMPLEMENTED;
+    silent_panic();
+    return FAILURE;
 }
 
 int64_t devices_ioctl(device_major_t major, device_minor_t minor, uint64_t command, uint64_t input_buffer, uint64_t output_buffer) {
     if (device_s.drivers[major].initialize == 0x0) {
-        return NOT_FOUND;
+        silent_panic();
     }
 
     device_addr_t addr = device_s.devices[major][minor];
     if (addr == -1) {
-        return NOT_FOUND;
+        silent_panic();
     }
 
     if (device_s.drivers[major].ioctl) {
         return device_s.drivers[major].ioctl(addr, command, input_buffer, output_buffer);
     }
 
-    return NOT_IMPLEMENTED;
+    silent_panic();
+    return FAILURE;
 }

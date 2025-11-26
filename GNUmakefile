@@ -4,6 +4,10 @@ BUILDDIR := $(ABSDIR)/build
 OBJDIR := $(BUILDDIR)/obj
 INCDIR := $(SRCDIR)/include
 
+CC := gcc
+LD := ld
+ASMC := nasm
+
 override CFLAGS +=       \
     -I.                  \
 	-I$(INCDIR)          \
@@ -14,6 +18,10 @@ override CFLAGS +=       \
     -fno-pic             \
     -m64                 \
     -Wno-int-conversion  \
+    -Wno-packed-bitfield-compat \
+    -Wall                \
+    -Wextra              \
+    -Werror              \
     -fno-stack-protector \
     -march=x86-64        \
     -mabi=sysv           \
@@ -81,6 +89,7 @@ run: image
 	@sudo $(ABSDIR)/scripts/run-qemu.sh
 
 debug: image
+	@echo "Please run $(ABSDIR)/scripts/connect-to-debug.sh in another terminal to enter debug mode..."
 	@sudo $(ABSDIR)/scripts/debug-qemu.sh
 
 clean:

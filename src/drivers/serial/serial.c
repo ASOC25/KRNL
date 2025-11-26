@@ -2,7 +2,8 @@
 #include <krnl/devices/devices.h>
 #include <krnl/libraries/std/stdint.h>
 #include <krnl/libraries/std/stddef.h>
-#include <krnl/io/io.h>
+#include <krnl/debug/debug.h>
+#include <krnl/arch/x86/io.h>
 
 struct serial_device {
     device_addr_t port_base;
@@ -55,11 +56,12 @@ void write_serial(int port, char a) {
 
 
 int64_t read(device_addr_t id, uint64_t offset, uint64_t size, uint8_t* buffer) {
+    (void)offset; //Serial ports do not support offset reading
     if (id < 0 || id >= MAX_SERIAL_DEVICES) {
-        return INVALID_ARGUMENT;
+        silent_panic();
     }
     if (buffer == 0) {
-        return INVALID_ARGUMENT;
+        silent_panic();
     }
 
     struct serial_device* dev = &(serial_devices[id]);
@@ -72,11 +74,12 @@ int64_t read(device_addr_t id, uint64_t offset, uint64_t size, uint8_t* buffer) 
 }
 
 int64_t write(device_addr_t id, uint64_t offset, uint64_t size, const uint8_t* buffer) {
+    (void)offset; //Serial ports do not support offset writing
     if (id < 0 || id >= MAX_SERIAL_DEVICES) {
-        return INVALID_ARGUMENT;
+        silent_panic();
     }
     if (buffer == 0) {
-        return INVALID_ARGUMENT;
+        silent_panic();
     }
 
     struct serial_device* dev = &(serial_devices[id]);
@@ -90,7 +93,7 @@ int64_t write(device_addr_t id, uint64_t offset, uint64_t size, const uint8_t* b
 
 int64_t initialize(device_addr_t id) {
     if (id < 0 || id >= MAX_SERIAL_DEVICES) {
-        return INVALID_ARGUMENT;
+        silent_panic();
     }
 
     struct serial_device* dev = &(serial_devices[id]);
@@ -121,13 +124,13 @@ int64_t initialize(device_addr_t id) {
 
 int64_t ioctl(device_addr_t id, uint64_t command, uint64_t input_buffer, uint64_t output_buffer) {
     if (id < 0 || id >= MAX_SERIAL_DEVICES) {
-        return INVALID_ARGUMENT;
+        silent_panic();
     }
 
     switch (command) {
         case SERIAL_IOCTL_SET_CONFIG: {
             if (input_buffer == 0) {
-                return INVALID_ARGUMENT;
+                silent_panic();
             }
             struct serial_config* config = (struct serial_config*)input_buffer;
             struct serial_device* dev = &(serial_devices[id]);
@@ -144,7 +147,7 @@ int64_t ioctl(device_addr_t id, uint64_t command, uint64_t input_buffer, uint64_
         }
         case SERIAL_IOCTL_GET_CONFIG: {
             if (output_buffer == 0) {
-                return INVALID_ARGUMENT;
+                silent_panic();
             }
             struct serial_config* config = (struct serial_config*)output_buffer;
             struct serial_device* dev = &(serial_devices[id]);
@@ -158,7 +161,7 @@ int64_t ioctl(device_addr_t id, uint64_t command, uint64_t input_buffer, uint64_
         }
         
         default:
-            return NOT_IMPLEMENTED;
+            silent_panic();
     }
 
     return SUCCESS;
@@ -166,6 +169,7 @@ int64_t ioctl(device_addr_t id, uint64_t command, uint64_t input_buffer, uint64_
 
 int64_t shutdown(device_addr_t id) {
     //There is no shutdown procedure for serial ports
+    (void)id;
     return SUCCESS;
 }
 
@@ -186,7 +190,7 @@ status_t serial_init_pnp(void) {
     status_t res = serial_init();
 
     if (res != SUCCESS) {
-        return res;
+        silent_panic();
     }
 
     int serial_ports[] = {0x3F8, 0x2F8, 0x3E8, 0x2E8};

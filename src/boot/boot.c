@@ -3,14 +3,17 @@
 #include <krnl/drivers/serial/serial.h>
 #include <krnl/devices/devices.h>
 #include <krnl/libraries/std/string.h>
+#include <krnl/libraries/std/stddef.h>
+#include <krnl/libraries/std/stdint.h>
 #include <krnl/arch/x86/cpu.h>
+#include <krnl/mem/allocator.h>
 #include <krnl/debug/debug.h>
+#include <krnl/tests/tests.h>
+#include <krnl/mem/mem.h>
 
 void boot_startup() {
     //Init the bootloader
     init_bootloader();
-    //Init SIMD support
-    arch_init_simd();
     //Optionally init the framebuffer
     
     //Init device subsystem
@@ -18,23 +21,10 @@ void boot_startup() {
     //Init the early debugger over dcon or serial
     serial_init_pnp();
     debug_init(3, 0); //Major 3 is debug console [¡¡¡¡¡¡¡¡¡THIS MAY CHANGE!!!!!!!!]
-
-    //Init physical memory manager
-
-    //Init virtual memory manager
-
-    //Create a reasonable GDT
-
-    //Init the programmable interrupt timer (PIT)
-
-    //Init the interrupt subsystem (IDT + PIC or APIC)
-
-    //Init the CPU subsystem (detect features, multicore, etc)
-
-    //Init the VDSO subsystem
-
-    //Initialize ACPI subsystem
-
+    //Init memory management subsystem
+    mem_init();
+    //Init the CPU subsystem
+    cpu_init();
     //Initialize the disk drivers
 
     //Register other devices (fifo, serial, tty, ps2, pci)
@@ -49,8 +39,8 @@ void boot_startup() {
 
     //Start the core subsystem (manages processes, scheduling, uspace, etc)
 
-
     kprintf("ASOC KERNEL BOOTED SUCCESSFULLY!\n");
     kprintf("Using bootloader: %s version: %s\n", get_bootloader_name(), get_bootloader_version());
+    run_all_tests();
     while (1);
 }

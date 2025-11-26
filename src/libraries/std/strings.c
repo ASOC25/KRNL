@@ -24,7 +24,8 @@ void *memmove(void *dest, const void *src, size_t n) {
             s[i] = 0;
         }
     }
-
+    
+    return dest;
 }
 void *strcat(char *dest, const char *src) {
     char *dest_start = dest;
@@ -87,6 +88,7 @@ size_t strcspn(const char *str, const char *reject) {
     return count;
 }
 char *strerror(int errnum) {
+    (void)errnum;
     return "Unknown error";
 }
 char *strpbrk(const char *s, const char *accept) {
