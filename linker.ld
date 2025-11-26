@@ -44,6 +44,12 @@ SECTIONS
         *(.bss .bss.*)
     } :data
 
+    .ramdisk : ALIGN(16) {
+        RAMDISK_START = .;
+        KEEP(*(.ramdisk))
+        RAMDISK_END = .;
+    } :data
+
     /DISCARD/ : {
         *(.note .note.*)
     }

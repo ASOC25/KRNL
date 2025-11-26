@@ -10,27 +10,26 @@ void mem_init(void) {
     if (root == NULL) {
         panic("init_vmm: Current root is NULL");
     }
+
+    vmm_root * new_root = vmm_duplicate_kspace();
+    if (new_root == NULL) {
+        panic("init_vmm: Failed to duplicate kernel space for new root");
+    }
     
     status_t st;
     uint64_t physical_pages = VMM_PHYSICAL_MEMORY_SIZE / VMM_PAGE_SIZE_1GB;
 
-    st = vmm_map_pages(root, VMM_REGION_K_IDENT, 0, physical_pages, VMM_PAGE_SIZE_1GB, VMM_WRITE_BIT);
+    st = vmm_map_pages(new_root, VMM_REGION_K_IDENT, 0, physical_pages, VMM_PAGE_SIZE_1GB, VMM_WRITE_BIT);
     if (st != SUCCESS) {
         panic("init_vmm: Failed to map physical memory");
     }
 
-    st = vmm_map_pages(root, VMM_REGION_DEVICES, 0, physical_pages, VMM_PAGE_SIZE_1GB, VMM_WRITE_BIT | VMM_CACHE_DISABLE_BIT);
+    st = vmm_map_pages(new_root, VMM_REGION_DEVICES, 0, physical_pages, VMM_PAGE_SIZE_1GB, VMM_WRITE_BIT | VMM_CACHE_DISABLE_BIT);
     if (st != SUCCESS) {
         panic("init_vmm: Failed to map device memory");
     }
-    
-    vmm_remap(0xFFFFB00000000000);
-    pmm_remap(0xFFFFB00000000000); //Kind of ugly dependency
-    
-    vmm_root * global_cr3 = vmm_duplicate_kspace();
-    if (global_cr3 == NULL) {
-        panic("init_vmm: Failed to duplicate kernel space for global CR3");
-    }
 
-    vmm_set_root(global_cr3);
+    vmm_remap(VMM_REGION_K_IDENT);
+    pmm_remap(VMM_REGION_K_IDENT); //Kind of ugly dependency to avoid vm knowing pmm
+    vmm_set_root(vmm_to_identity_map(new_root));
 }

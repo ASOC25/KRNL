@@ -19,11 +19,6 @@
 #define VM_GLOBAL_BIT                      0x10
 #define VM_NX_BIT                          0x20
 
-#define PHYSICAL_MEMORY_SIZE               0x000000F000000000
-#define VM_REGION_K_IDENT                  0xFFFFB00000000000
-#define VM_REGION_DEVICES                  0xFFFFC00000000000
-#define VM_REGION_SIZE                     0x000000F000000000
-
 //WARNING: WE ARE FIXING MAXPHYADDR = 40
 
 typedef struct page_permissions {

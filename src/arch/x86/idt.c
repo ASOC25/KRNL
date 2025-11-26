@@ -3,6 +3,7 @@
 #include <krnl/arch/x86/apic.h>
 #include <krnl/arch/x86/cpu.h>
 #include <krnl/debug/debug.h>
+#include <krnl/process/scheduler.h>
 
 extern void* __interrupt_vector[IDT_ENTRY_COUNT];
 static __attribute__((aligned(IDT_PAGE_SIZE))) idt_t global_idt = {};
@@ -40,6 +41,16 @@ void idt_init(void) {
 }
 
 void interrupt_handler(cpu_context_t* ctx, uint8_t cpu_id) {
-    kprintf("Interrupt context: %p on CPU %d\n", ctx, cpu_id);
+    if (ctx->interrupt_number < 32) {
+        panic("Unhandled CPU Exception: %d", ctx->interrupt_number);
+    } else if (ctx->interrupt_number >= 32 && ctx->interrupt_number < 48) {
+        panic("Unhandled IRQ: %d", ctx->interrupt_number - 32);
+        //apic_handle_interrupt(ctx->interrupt_number, cpu_id);
+    } else if (ctx->interrupt_number == INT_SCHEDULE_APIC_TIMER) {
+        scheduler_handler(ctx, cpu_id);
+    } else {
+        panic("Unknown Interrupt: %d", ctx->interrupt_number);
+    }
     apic_local_eoi(cpu_id);
+    return;
 }

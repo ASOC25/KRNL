@@ -67,7 +67,6 @@ void callback(boot_smp_info_t *lcpu) {
 void cpu_init_id(uint64_t cpu_id, uint64_t lapic_id) {
     (void)cpu_id;
     (void)lapic_id;
-    __asm__("cli");
     simd_init();
     gdt_init();
     idt_init();
@@ -77,7 +76,6 @@ void cpu_init_id(uint64_t cpu_id, uint64_t lapic_id) {
     syscall_enable(GDT_KERNEL_CODE * sizeof(gdt_entry_t), GDT_USER_CODE * sizeof(gdt_entry_t));
     hpet_init();
     apic_start_lapic_timer();
-    __asm__("sti");
 }
 
 void cpu_init() {

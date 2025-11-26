@@ -55,7 +55,7 @@ void write_serial(int port, char a) {
 }
 
 
-int64_t read(device_addr_t id, uint64_t offset, uint64_t size, uint8_t* buffer) {
+static int64_t read(device_addr_t id, uint64_t offset, uint64_t size, uint8_t* buffer) {
     (void)offset; //Serial ports do not support offset reading
     if (id < 0 || id >= MAX_SERIAL_DEVICES) {
         silent_panic();
@@ -73,7 +73,7 @@ int64_t read(device_addr_t id, uint64_t offset, uint64_t size, uint8_t* buffer) 
     return size;
 }
 
-int64_t write(device_addr_t id, uint64_t offset, uint64_t size, const uint8_t* buffer) {
+static int64_t write(device_addr_t id, uint64_t offset, uint64_t size, const uint8_t* buffer) {
     (void)offset; //Serial ports do not support offset writing
     if (id < 0 || id >= MAX_SERIAL_DEVICES) {
         silent_panic();
@@ -91,7 +91,7 @@ int64_t write(device_addr_t id, uint64_t offset, uint64_t size, const uint8_t* b
     return size;
 }
 
-int64_t initialize(device_addr_t id) {
+static int64_t initialize(device_addr_t id) {
     if (id < 0 || id >= MAX_SERIAL_DEVICES) {
         silent_panic();
     }
@@ -122,7 +122,7 @@ int64_t initialize(device_addr_t id) {
     return SUCCESS;
 }
 
-int64_t ioctl(device_addr_t id, uint64_t command, uint64_t input_buffer, uint64_t output_buffer) {
+static int64_t ioctl(device_addr_t id, uint64_t command, uint64_t input_buffer, uint64_t output_buffer) {
     if (id < 0 || id >= MAX_SERIAL_DEVICES) {
         silent_panic();
     }
@@ -167,7 +167,7 @@ int64_t ioctl(device_addr_t id, uint64_t command, uint64_t input_buffer, uint64_
     return SUCCESS;
 }
 
-int64_t shutdown(device_addr_t id) {
+static int64_t shutdown(device_addr_t id) {
     //There is no shutdown procedure for serial ports
     (void)id;
     return SUCCESS;

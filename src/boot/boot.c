@@ -1,6 +1,7 @@
 
 #include <krnl/boot/bootloaders/bootloader.h>
 #include <krnl/drivers/serial/serial.h>
+#include <krnl/drivers/ramdisk/ramdisk.h>
 #include <krnl/devices/devices.h>
 #include <krnl/libraries/std/string.h>
 #include <krnl/libraries/std/stddef.h>
@@ -10,8 +11,11 @@
 #include <krnl/debug/debug.h>
 #include <krnl/tests/tests.h>
 #include <krnl/mem/mem.h>
+#include <krnl/process/process.h>
 
 void boot_startup() {
+    __asm__("cli");
+
     //Init the bootloader
     init_bootloader();
     //Optionally init the framebuffer
@@ -20,6 +24,7 @@ void boot_startup() {
     devices_init();
     //Init the early debugger over dcon or serial
     serial_init_pnp();
+    ramdisk_init_pnp();
     debug_init(3, 0); //Major 3 is debug console [¡¡¡¡¡¡¡¡¡THIS MAY CHANGE!!!!!!!!]
     //Init memory management subsystem
     mem_init();
@@ -42,5 +47,23 @@ void boot_startup() {
     kprintf("ASOC KERNEL BOOTED SUCCESSFULLY!\n");
     kprintf("Using bootloader: %s version: %s\n", get_bootloader_name(), get_bootloader_version());
     run_all_tests();
+
+    uint8_t buffer[512];
+    int64_t read_bytes = devices_read(4, 0, 0, 512, buffer); //Read first 512 bytes from ramdisk major 4
+    if (read_bytes != 512) {
+        panic("Failed to read from ramdisk");
+    }
+
+    //Print all hex bytes read
+    kprintf("First 512 bytes of ramdisk:\n");
+    for (int i = 0; i < 512; i++) {
+        kprintf("%02x ", buffer[i]);
+        if ((i + 1) % 16 == 0) {
+            kprintf("\n");
+        }
+    }
+
+    process_init();
+    __asm__("sti");
     while (1);
 }

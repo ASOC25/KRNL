@@ -72,12 +72,12 @@ void remove_allocation(void * ptr) {
     panic("Allocation not found for pointer %p\n", ptr);
 }
 
-void * kmalloc(uint64_t size) {
+void * __kmalloc(uint64_t size, uint64_t region) {
     void * phys_addr = pmm_alloc_pages((size + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE);
     if (phys_addr == NULL) {
         panic("kmalloc: Failed to allocate physical memory");
     }
-    void * virt_addr = vmm_to_identity_map(phys_addr);
+    void * virt_addr = region + (uint64_t)phys_addr; //Map to specific region
     add_allocation(phys_addr, virt_addr, size, 0x3, 0x0); //RW permisions, no guard
     return virt_addr;
 }
@@ -99,7 +99,7 @@ void kfree(void *ptr) {
 }
 
 //VERY IMPORTANT: WE ASUME THAT STACKS GROW DOWNWARDS, THIS MEANS THAT THE GUARD PAGE IS AT THE LOW ADDRESSES END OF THE STACK
-struct stack * kstackalloc(uint64_t initial_size) {
+struct stack * __kstackalloc(vmm_root* root, uint64_t initial_size, uint64_t region, uint8_t flags) {
     uint64_t pages = (initial_size + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE;
     uint64_t phys_addr = (uint64_t)pmm_alloc_pages(pages + 1); //Allocate an extra page for the guard
     //When the guard page is accessed, a page fault will occur, we will handle it by growing the stack
@@ -107,21 +107,21 @@ struct stack * kstackalloc(uint64_t initial_size) {
         panic("kstackalloc: Failed to allocate physical memory");
     }
 
-    uint64_t virt_addr = VMM_REGION_K_STACK + phys_addr; //Map stacks to a specific region
+    uint64_t virt_addr = region + phys_addr; //Map stacks to a specific region
     status_t st = vmm_map_pages(
-        vmm_get_root(),
+        root,
         virt_addr + PMM_PAGE_SIZE,
         phys_addr + PMM_PAGE_SIZE, //Skip the guard page
         pages,
         PMM_PAGE_SIZE,
-        VMM_WRITE_BIT
+        flags
     );
 
     if (st != SUCCESS) {
         panic("kstackalloc: Failed to map stack pages");
     }
 
-    add_allocation(phys_addr + PMM_PAGE_SIZE, virt_addr + PMM_PAGE_SIZE, initial_size, VMM_WRITE_BIT, virt_addr); //Guard page at the base of the stack
+    add_allocation(phys_addr + PMM_PAGE_SIZE, virt_addr + PMM_PAGE_SIZE, initial_size, flags, virt_addr); //Guard page at the base of the stack
 
     struct stack *stk = kmalloc(sizeof(struct stack));
     stk->top = (void *)(virt_addr + PMM_PAGE_SIZE + pages * PMM_PAGE_SIZE);
@@ -156,4 +156,20 @@ void kstackfree(struct stack *ptr) {
         current = current->next;
     }
     panic("Stack allocation not found for pointer %p\n", ptr);
+}
+
+void * kmalloc(uint64_t size) {
+    return __kmalloc(size, VMM_REGION_K_IDENT);
+}
+
+void * kmalloc_user(uint64_t size) {
+    return __kmalloc(size, VMM_REGION_U_SPACE_INI);
+}
+
+struct stack * kstackalloc(uint64_t initial_size) {
+    return __kstackalloc(vmm_get_root(), initial_size, VMM_REGION_K_STACK, VMM_WRITE_BIT);
+}
+
+struct stack * kstackalloc_user(vmm_root * root, uint64_t initial_size) {
+    return __kstackalloc(root, initial_size, VMM_REGION_U_SPACE_INI, VMM_WRITE_BIT | VMM_USER_BIT);
 }

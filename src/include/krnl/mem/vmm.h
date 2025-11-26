@@ -16,11 +16,14 @@
 #define VMM_CACHE_DISABLE_BIT               0x8
 #define VMM_GLOBAL_BIT                      0x10
 #define VMM_NX_BIT                          0x20
+
 #define VMM_PHYSICAL_MEMORY_SIZE            0x000000F000000000
+#define VMM_REGION_SIZE                     0x000000F000000000
 #define VMM_REGION_K_IDENT                  0xFFFFB00000000000
 #define VMM_REGION_K_STACK                  0xFFFFA00000000000
 #define VMM_REGION_DEVICES                  0xFFFFC00000000000
-#define VMM_REGION_SIZE                     0x000000F000000000
+#define VMM_REGION_U_SPACE_INI              0x0000000000000000
+#define VMM_REGION_U_SPACE_END              0x0000800000000000
 
 typedef struct vmm_root {
     uint64_t entries[512];

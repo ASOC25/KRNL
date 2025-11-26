@@ -75,20 +75,6 @@ void * allocate_phys_page() {
     return buffer;
 }
 
-uint64_t check_k_regions(uint64_t address) {
-    if (address > VM_REGION_K_IDENT && address < VM_REGION_K_IDENT + VM_REGION_SIZE)
-    {
-        return (uint64_t)((uint64_t)address - VM_REGION_K_IDENT);
-    }
-
-    if (address > VM_REGION_DEVICES && address < VM_REGION_DEVICES + VM_REGION_SIZE)
-    {
-        return (uint64_t)((uint64_t)address - VM_REGION_DEVICES);
-    }
-
-    return 0x0;
-}
-
 void init_entry(vm_entry * entry, uint64_t size, uint64_t page_ppn, vm_perms perms)
 {   
 
@@ -198,12 +184,6 @@ uint64_t vm_from_identity_map(uint64_t address) {
 }
 
 status_t vm_get_physical_address(vm_dir* root, uint64_t virtual_address, uint64_t* physical_address) {
-    uint64_t k_address = check_k_regions(virtual_address);
-    if (k_address != 0x0) {
-        *physical_address = k_address;
-        return SUCCESS;
-    }
-
     struct page_map_index indices;
     address_to_map((uint64_t)virtual_address, &indices);
 

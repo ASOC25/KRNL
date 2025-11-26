@@ -1,6 +1,7 @@
 ABSDIR := $(shell pwd)
 SRCDIR := $(ABSDIR)/src
 BUILDDIR := $(ABSDIR)/build
+RDDIR := $(ABSDIR)/ramdisk
 OBJDIR := $(BUILDDIR)/obj
 INCDIR := $(SRCDIR)/include
 
@@ -56,7 +57,14 @@ override OBJS += $(patsubst $(SRCDIR)/%.S, $(OBJDIR)/%_s.o, $(ASFILES))
 override OBJS += $(patsubst $(SRCDIR)/%.asm, $(OBJDIR)/%_asm.o, $(NASMFILES))
 override HEADER_DEPS := $(CFILES:.c=.d) $(ASFILES:.S=.d)
 
-kernel: $(OBJS) link
+RAMDISK_IMG := $(RDDIR)/ramdisk.img
+RAMDISK_OBJ := $(BUILDDIR)/ramdisk.o
+
+kernel: $(OBJS) $(RAMDISK_OBJ) link
+
+$(RAMDISK_OBJ): $(RAMDISK_IMG)
+	@mkdir -p $(BUILDDIR)
+	@objcopy -I binary -O elf64-x86-64 --rename-section .data=.ramdisk,alloc,load,contents,readonly $^ $@
 
 $(OBJDIR)/apps/%.o: $(SRCDIR)/apps/%.c
 #	@ echo !==== COMPILING $^
@@ -80,13 +88,16 @@ $(OBJDIR)/%_s.o: $(SRCDIR)/%.S
 
 link: 
 #	@ echo !==== LINKING $^
-	@$(LD) $(LDFLAGS) -o $(BUILDDIR)/kernel.elf $(OBJS)
+	@$(LD) $(LDFLAGS) -o $(BUILDDIR)/kernel.elf $(OBJS) $(RAMDISK_OBJ)
 
 image: kernel
 	@sudo $(ABSDIR)/scripts/make-efi-img.sh --force
 
 run: image
 	@sudo $(ABSDIR)/scripts/run-qemu.sh
+
+ramdisk:
+	@sudo python3 $(ABSDIR)/scripts/create-ramdisk.py $(ABSDIR)/fs/ $(RDDIR)/ramdisk.img
 
 debug: image
 	@echo "Please run $(ABSDIR)/scripts/connect-to-debug.sh in another terminal to enter debug mode..."
@@ -98,5 +109,5 @@ clean:
 distclean:
 	@sudo $(ABSDIR)/scripts/clean-artifacts.sh --mode dist
 
-.PHONY: kernel link image run
+.PHONY: kernel link image run ramdisk
 .PHONY: kernel link image run debug clean distclean
