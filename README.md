@@ -1,3 +1,112 @@
+# Mini tutorial TLDR:
+
+A ver, esto es muy fácil:
+
+1. Clona el repositorio
+   ```bash
+   git clone git@github.com:ASOC25/KRNL.git
+   cd KRNL
+    ```
+
+    Si quieres navegar por las ramas:
+    ```bash
+    git checkout <branch-name>
+    ```
+
+2. Comprueba que tienes las herramientas necesarias instaladas, principalmente:
+    - `build-essential` (o equivalente)
+    - `nasm`
+    - `qemu-system`
+    - `gdb`
+
+    Si te falta alguna, chatgpt te puede ayudar a instalarlas jeje
+
+3. Comprueba que el kernel compila:
+
+    ```bash
+    make kernel
+    ```
+
+4. Comprueba que la imagen de arranque se crea:
+
+    ```bash
+    make image
+    ```
+
+Llegado este punto ya tienes el kernel compilado y la imagen de arranque creada. A currar!
+
+Normalmente querrás debuguear, así que antes de nada abre una nueva terminal y lanza el script:
+
+    ```bash
+    scripts/connect-to-debug.sh
+    ```
+
+Este script se quedará esperando a que arranques QEMU para conectarse automáticamente al stub de gdb.
+Si te da timeout, no te preocupes, simplemente presiona q y enter para salir de gdb y volver a intentarlo.
+
+Para lanzar QEMU con el kernel y la imagen de arranque, usa:
+
+    ```bash
+    make debug
+    ```
+
+Deberías ver que QEMU arranca y que gdb se conecta automáticamente y para en el primer breakpoint.
+
+A partir de aquí, puedes usar los comandos habituales de gdb para debuguear tu kernel. Algunos comandos útiles son:
+
+    - `continue` o `c`: para continuar la ejecución
+    - `step` o `s`: para ejecutar la siguiente instrucción
+    - `stepi` o `si`: para ejecutar la siguiente instrucción (sin entrar en funciones)
+    - `next` o `n`: para ejecutar la siguiente línea de código (sin entrar en funciones)
+    - `break <función>` o `b <función>`: para poner un breakpoint en una función específica
+    - `break *0x<dirección>`: para poner un breakpoint en una dirección específica
+    - `disassemble _start`: para ver el desensamblado de la función `_start` (cualquier función sirve)
+    - `bt`: para ver el backtrace de llamadas
+    - `info locals`: para ver las variables locales en el contexto actual
+    - `info registers`: para ver el estado de los registros
+    - `info threads`: para ver los hilos
+    - `thread <número>`: para cambiar al hilo número `<número>`
+    - `info frame`: para ver información del frame actual 
+    - `list` o `l`: para ver el código fuente alrededor de la línea actual (si tienes los símbolos)
+    - `set $rip=0x<dirección>`: para cambiar el puntero de instrucción a una dirección específica (cualquier registro o variable sirve)
+    - `awatch <dirección>`: para poner un watchpoint que pare cuando se acceda a una dirección específica (tb vale  cualquier variable)
+    - `rwatch <dirección>`: para poner un watchpoint que pare cuando se lea una dirección específica (tb vale  cualquier variable)
+    - `watch <variable>`: para poner un watchpoint que pare cuando una variable cambie (tb  vale cualquier direccion)
+    - `p <variable>`: para imprimir el valor de una variable (puedes hacer *variable si es un puntero)
+    - `p/x $<registro>`: para imprimir el valor de un registro en hexadecimal
+    - `x/10xb $rsp`: para examinar la memoria alrededor del puntero de pila
+    - `x/10xg <dirección>`: para examinar memoria en una dirección específica (10 elementos de tamaño 'g' - 8 bytes impresos en hexadecimal)
+    - `quit` o `q`: para salir de gdb
+
+Otro truco es teclear la macro de abajo para que cada vez que gdb pare, imprima las siguientes 10 instrucciones a partir del puntero de instrucción.
+
+    ```bash
+    define hook-stop
+        x/10ig $rip
+        //Puedes añadir más comandos aquí si quieres
+    end
+    ```
+
+Recuerda tb que tienes una ventana de debug en qemu a la que puedes acceder con `Ctrl+Alt+2`. El comando más útil ahí es `info tlb` para ver las traducciones de direcciones de memoria. Aunque hay muchos otros comandos útiles.
+
+En general hay mil millones de formas de debuguear, así que explora y prueba cosas nuevas!
+
+Si quieres ejecutar sin el debugger, simplemente usa:
+
+    ```bash
+    make run
+    ```
+
+Si haces algun cambio en los headers (.h) o crees que algo no se ha recompilado bien, puedes hacer una limpieza rápida con:
+
+    ```bash
+    make clean
+    ```
+
+No hace falta hacer `make kernel` `make image` y luego `make debug`, ya que los objetivos dependen unos de otros y se encargarán de compilar lo que haga falta automáticamente.
+
+#  README
+
 # Minimal UEFI Kernel + Limine Setup
 
 This repository contains a very small freestanding x86_64 kernel built as an ELF and booted via a GPT/FAT EFI System Partition using the Limine boot components (`BOOTX64.EFI`). Helper scripts create a disk image, run it under QEMU with OVMF, and provide debugging conveniences.
