@@ -12,6 +12,8 @@
 #include <krnl/tests/tests.h>
 #include <krnl/mem/mem.h>
 #include <krnl/process/process.h>
+#include <krnl/fs/x1fs/x1fs.h>
+#include <krnl/vfs/vfs.h>
 
 void boot_startup() {
     __asm__("cli");
@@ -63,6 +65,24 @@ void boot_startup() {
         }
     }
 
+    x1fs_init();
+
+    vfs_new_mount(4, 0, "/");
+    vfs_file_descriptor_t *fd = vfs_open("/a.txt", 0);
+    if (fd == NULL) {
+        panic("Failed to open /a.txt");
+    }
+
+    uint8_t file_buffer[6];
+    ssize_t bytes_read_file = vfs_read(fd, file_buffer, 6);
+    if (bytes_read_file < 0) {
+        panic("Failed to read from /a.txt");
+    }
+    kprintf("Read %d bytes from /a.txt: ", (int)bytes_read_file);
+    for (ssize_t i = 0; i < bytes_read_file; i++)
+        kprintf("%c", file_buffer[i]);
+    kprintf("\n");
+    vfs_close(fd);
     process_init();
     __asm__("sti");
     while (1);
