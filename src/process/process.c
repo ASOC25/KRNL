@@ -8,10 +8,11 @@
 #include <krnl/libraries/std/stddef.h>
 #include <krnl/libraries/std/string.h>
 #include <krnl/mem/allocator.h>
+#include <krnl/process/loader.h>
 
 extern void set_cpu_fs_base(uint64_t base);
 
-process_t * process_create(process_t * parent, char ** argv, char ** envp) {
+process_t * process_create(process_t * parent, const char * filename, char ** argv, char ** envp) {
     if (!parent) {
         return NULL;
     }
@@ -21,8 +22,9 @@ process_t * process_create(process_t * parent, char ** argv, char ** envp) {
         panic("Failed to allocate memory for new process");
         return NULL;
     }
+    memset(new_process, 0, sizeof(process_t));
 
-    if (parent == FAKE_PROCESS) {
+    if (parent == INIT_PROCESS) {
         new_process->vmm = vmm_duplicate_kspace();
     } else {
         new_process->vmm = vmm_duplicate_fullspace(parent->vmm);
@@ -33,12 +35,22 @@ process_t * process_create(process_t * parent, char ** argv, char ** envp) {
         return NULL;
     }
 
+    loaded_elf_t * elf = elf_load_elf(new_process->vmm, filename);
+    if (!elf) {
+        panic("process_init: Failed to load /init.elf");
+    }
+    new_process->auxv = elf->auxv;
+    new_process->auxv_size = elf->auxv_size;
+    new_process->argv = argv;
+    new_process->envp = envp;
+    new_process->binary_entry = (void *)elf->ehdr->e_entry;
     new_process->thread_count = 0;
     new_process->current_thread = NULL;
     new_process->main_thread = NULL;
     new_process->pid = -1; // Will be set by scheduler
 
-    if (parent == FAKE_PROCESS) {
+
+    if (parent == INIT_PROCESS) {
         new_process->ppid = -1;
         new_process->uid = 0;
         new_process->gid = 0;
@@ -139,17 +151,21 @@ thread_t * process_create_thread(process_t * process, void * entry_point) {
         panic("process_create_thread: Maximum thread count reached");
         return NULL;
     }
+    memset(new_thread, 0, sizeof(thread_t));
 
     new_thread->context = kmalloc(sizeof(context_t));
     if (!new_thread->context) {
         panic("process_create_thread: Failed to allocate CPU context");
         return NULL;
     }
+    memset(new_thread->context, 0, sizeof(context_t));
+
     new_thread->context->simd_ctx = simd_create_context();
     if (!new_thread->context->simd_ctx) {
         panic("process_create_thread: Failed to allocate SIMD context");
         return NULL;
     }
+    memset(new_thread->context->simd_ctx, 0, 512);
 
     new_thread->entry = entry_point;
     new_thread->stack_size = NEW_PROCESS_STACK_SIZE; // 16 KB stack
@@ -158,6 +174,15 @@ thread_t * process_create_thread(process_t * process, void * entry_point) {
         panic("process_create_thread: Failed to allocate stack");
         return NULL;
     }
+
+    panic("Need to edit kstackalloc_user to farlands style!");
+    new_thread->stack->top = loader_create_args(
+        new_thread->stack->top,
+        new_thread->stack_size,
+        process->argv,
+        process->envp,
+        process->auxv
+    );
 
     if (process->thread_count == 0) {
         process->main_thread = new_thread;
@@ -200,20 +225,21 @@ status_t process_destroy_thread(thread_t * thread) {
     return SUCCESS;
 }
 
-void _fake_process_start() {
-    while (1) {
-        __asm__ volatile("hlt");
-    }
-}
-
 void process_init() {
-    process_t * init_process = process_create(FAKE_PROCESS, NULL, NULL);
-    thread_t * init_thread = process_create_thread(init_process, _fake_process_start);
-    status_t st = process_thread_context_init(init_thread->context, init_process->vmm, _fake_process_start, (void *)((uint64_t)init_thread->stack), NULL, init_thread);
-    
+    process_t * init_process = process_create(INIT_PROCESS, "/init.elf", NULL, NULL);
+    if (!init_process) {
+        panic("process_init: Failed to create init process");
+    }
+    thread_t * init_thread = process_create_thread(init_process, init_process->binary_entry);
+    if (!init_thread) {
+        panic("process_init: Failed to create init thread");
+    }
+
+    status_t st = process_thread_context_init(init_thread->context, init_process->vmm, init_thread->entry, (uint8_t *)init_thread->stack->top, init_process->argv, init_thread);
     if (st != SUCCESS) {
         panic("process_init: Failed to initialize init thread context");
     }
+
     st = scheduler_add_process(init_process, SCHEDULER_QUEUE_RUNABLE);
     if (st != SUCCESS) {
         panic("process_init: Failed to add init process to scheduler");

@@ -46,43 +46,13 @@ void boot_startup() {
 
     //Start the core subsystem (manages processes, scheduling, uspace, etc)
 
+    x1fs_init();
+    vfs_new_mount(4, 0, "/");
+
     kprintf("ASOC KERNEL BOOTED SUCCESSFULLY!\n");
     kprintf("Using bootloader: %s version: %s\n", get_bootloader_name(), get_bootloader_version());
     run_all_tests();
 
-    uint8_t buffer[512];
-    int64_t read_bytes = devices_read(4, 0, 0, 512, buffer); //Read first 512 bytes from ramdisk major 4
-    if (read_bytes != 512) {
-        panic("Failed to read from ramdisk");
-    }
-
-    //Print all hex bytes read
-    kprintf("First 512 bytes of ramdisk:\n");
-    for (int i = 0; i < 512; i++) {
-        kprintf("%02x ", buffer[i]);
-        if ((i + 1) % 16 == 0) {
-            kprintf("\n");
-        }
-    }
-
-    x1fs_init();
-
-    vfs_new_mount(4, 0, "/");
-    vfs_file_descriptor_t *fd = vfs_open("/a.txt", 0);
-    if (fd == NULL) {
-        panic("Failed to open /a.txt");
-    }
-
-    uint8_t file_buffer[6];
-    ssize_t bytes_read_file = vfs_read(fd, file_buffer, 6);
-    if (bytes_read_file < 0) {
-        panic("Failed to read from /a.txt");
-    }
-    kprintf("Read %d bytes from /a.txt: ", (int)bytes_read_file);
-    for (ssize_t i = 0; i < bytes_read_file; i++)
-        kprintf("%c", file_buffer[i]);
-    kprintf("\n");
-    vfs_close(fd);
     process_init();
     __asm__("sti");
     while (1);

@@ -162,8 +162,42 @@ void * kmalloc(uint64_t size) {
     return __kmalloc(size, VMM_REGION_K_IDENT);
 }
 
-void * kmalloc_user(uint64_t size) {
-    return __kmalloc(size, VMM_REGION_U_SPACE_INI);
+status_t kmalloc_farlands(vmm_root * root, uint64_t size, uint64_t vaddr, uint8_t flags, farlands_t * farlands) {
+    void * phys_addr = pmm_alloc_pages((size + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE);
+    if (phys_addr == NULL) {
+        panic("kmalloc: Failed to allocate physical memory");
+    }
+
+    status_t st = vmm_map_pages(
+        root,
+        vaddr,
+        (uint64_t)phys_addr,
+        (size + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE,
+        PMM_PAGE_SIZE,
+        flags
+    );
+
+    if (st != SUCCESS) {
+        panic("kmalloc_user_at: Failed to map user pages");
+    }
+
+    st = vmm_map_pages(
+        vmm_get_root(),
+        vaddr + VMM_REGION_FARLANDS,
+        (uint64_t)phys_addr,
+        (size + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE,
+        PMM_PAGE_SIZE,
+        VMM_WRITE_BIT
+    );
+
+    if (st != SUCCESS) {
+        panic("kmalloc_user_at: Failed to map farlands pages");
+    }
+
+    farlands->farland_address = (void *)(vaddr);
+    farlands->access_address = (void *)(vaddr + VMM_REGION_FARLANDS);
+
+    return SUCCESS;
 }
 
 struct stack * kstackalloc(uint64_t initial_size) {

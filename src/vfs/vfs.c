@@ -224,3 +224,14 @@ ssize_t vfs_write(vfs_file_descriptor_t *fd, const void *buf, size_t count) {
     }
     return bytes_written;
 }
+
+status_t vfs_fstat(vfs_file_descriptor_t *fd, vfs_stat_t *buf) {
+    if (fd == NULL || buf == NULL) {
+        panic("vfs_fstat: fd or buf is NULL");
+    }
+    if (fd->mount == NULL || fd->mount->ops == NULL || fd->mount->ops->fstat == NULL) {
+        panic("vfs_fstat: Invalid mount or fstat operation");
+    }
+
+    return fd->mount->ops->fstat(fd->mount->major, fd->mount->minor, fd->native_path, buf);
+}

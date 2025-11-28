@@ -84,22 +84,28 @@ ssize_t x1fs_read(device_major_t major, device_minor_t minor, const char * path,
             break;
         }
     }
-
     if (!entry) {
+        kprintf("x1fs_read: File '%s' not found on device %d:%d\n", path, major, minor);
         return -1; // File not found
     }
+
+    uint64_t file_absolute_address = fs->header.offset_to_file_data + entry->file_address;
+
+    //kprintf("x1fs_read: Reading file '%s' on device %d:%d\n", path, major, minor);
+    //kprintf("x1fs_read: File entry found at address %llu with size %llu bytes\n", file_absolute_address, entry->file_size);
 
     if (skip >= entry->file_size) {
         return 0; // Nothing to read
     }
 
-    size_t to_read = count;
-    if (skip + to_read > entry->file_size) {
-        to_read = entry->file_size - skip;
+    size_t bytes_to_read = count;
+    if (skip + count > entry->file_size) {
+        bytes_to_read = entry->file_size - skip;
     }
 
-    int64_t read_bytes = devices_read(major, minor, entry->file_address + skip, to_read, (uint8_t *)buf);
+    int64_t read_bytes = devices_read(major, minor, file_absolute_address + skip, bytes_to_read, (uint8_t *)buf);
     if (read_bytes < 0) {
+        kprintf("x1fs_read: Error reading file '%s' on device %d:%d\n", path, major, minor);
         return -1; // Read error
     }
 
@@ -180,29 +186,56 @@ struct x1fs_fs * x1fs_register_device(device_major_t major, device_minor_t minor
     fs->next = device_cache;
     device_cache = fs;
 
-    kprintf("New X1FS mounted on device %d:%d\n", fs->major, fs->minor);
-    kprintf("X1FS Number of entries: %d\n", fs->header.num_entries);
-    kprintf("X1FS Offset to string table: %llu\n", fs->header.offset_to_string_table);
-    kprintf("X1FS Offset to file data: %llu\n", fs->header.offset_to_file_data);
-    kprintf("X1FS Entries:\n");
-    for (uint32_t i = 0; i < fs->header.num_entries; i++) {
-        kprintf("  %s (Size: %llu bytes, Address: %llu)\n", fs->string_table[i], fs->entries[i].file_size, fs->entries[i].file_address);
-    }
-    kprintf("\n");
+    //kprintf("New X1FS mounted on device %d:%d\n", fs->major, fs->minor);
+    //kprintf("X1FS Number of entries: %d\n", fs->header.num_entries);
+    //kprintf("X1FS Offset to string table: %llu\n", fs->header.offset_to_string_table);
+    //kprintf("X1FS Offset to file data: %llu\n", fs->header.offset_to_file_data);
+    //kprintf("X1FS Entries:\n");
+    //for (uint32_t i = 0; i < fs->header.num_entries; i++) {
+    //    kprintf("  %s (Size: %llu bytes, Address: %llu)\n", fs->string_table[i], fs->entries[i].file_size, fs->entries[i].file_address);
+    //}
+    //kprintf("\n");
     //Dump the first 16 bytes of each file
-    for (uint32_t i = 0; i < fs->header.num_entries; i++) {
-        kprintf("First 16 bytes of %s:\n", fs->string_table[i]);
-        uint8_t buffer[16];
-        ssize_t bytes_read = x1fs_read(fs->major, fs->minor, fs->string_table[i], 0, buffer, 16);
-        if (bytes_read > 0) {
-            for (ssize_t j = 0; j < bytes_read; j++) {
-                kprintf("%02x ", buffer[j]);
-            }
-            kprintf("\n");
-        }
-    }
+    //for (uint32_t i = 0; i < fs->header.num_entries; i++) {
+    //    kprintf("First 16 bytes of %s:\n", fs->string_table[i]);
+    //    uint8_t buffer[16];
+    //    ssize_t bytes_read = x1fs_read(fs->major, fs->minor, fs->string_table[i], 0, buffer, 16);
+    //    if (bytes_read > 0) {
+    //        for (ssize_t j = 0; j < bytes_read; j++) {
+    //            kprintf("%02x ", buffer[j]);
+    //        }
+    //        kprintf("\n");
+    //    }
+    //}
 
     return fs;
+}
+
+status_t x1fs_fstat(device_major_t major, device_minor_t minor, const char * path, vfs_stat_t * buf) {
+    struct x1fs_fs *fs = x1fs_get_fs(major, minor);
+    if (!fs) {
+        panic("x1fs_fstat: Filesystem not found for device");
+    }
+
+    // Find the file entry by path
+    struct x1fs_entry *entry = NULL;
+    for (uint32_t i = 0; i < fs->header.num_entries; i++) {
+        if (strcmp(fs->string_table[i], path) == 0) {
+            entry = &fs->entries[i];
+            break;
+        }
+    }
+    if (!entry) {
+        kprintf("x1fs_fstat: File '%s' not found on device %d:%d\n", path, major, minor);
+        return FAILURE; // File not found
+    }
+
+    memset(buf, 0, sizeof(vfs_stat_t));
+    buf->st_size = entry->file_size;
+    buf->st_mode = 0x81A4; // Regular file with rw-r--r-- permissions
+    buf->st_nlink = 1;
+
+    return SUCCESS;
 }
 
 void x1fs_init(void) {
@@ -216,6 +249,7 @@ void x1fs_init(void) {
     x1fs_ops->read = x1fs_read;
     x1fs_ops->write = x1fs_write;
     x1fs_ops->detect = x1fs_detect;
+    x1fs_ops->fstat = x1fs_fstat;
     x1fs_ops->next = NULL;
 
     status_t result = vfs_register_fs(x1fs_ops);

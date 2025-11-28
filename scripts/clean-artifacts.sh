@@ -9,6 +9,7 @@ set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "$0")/.." && pwd)
 BUILD_DIR="$ROOT_DIR/build"
+RAMDISK_DIR="$ROOT_DIR/ramdisk"
 
 : "${MODE:=normal}"          # normal|dist
 : "${DIST_EXTRAS:=no}"       # yes -> also remove OVMFbin & limine directories
@@ -50,6 +51,19 @@ REMOVE=( )
 
 # Build artifacts
 [[ -d "$BUILD_DIR" ]] && REMOVE+=( "$BUILD_DIR" )
+# Ramdisk contents (but keep .gitkeep files if present)
+if [[ -d "$RAMDISK_DIR" ]]; then
+  shopt -s nullglob
+  for entry in "$RAMDISK_DIR"/* "$RAMDISK_DIR"/.*; do
+    name=$(basename -- "$entry")
+    # Skip current/parent dirs and any .gitkeep sentinel
+    if [[ "$name" == "." || "$name" == ".." || "$name" == ".gitkeep" ]]; then
+      continue
+    fi
+    REMOVE+=( "$entry" )
+  done
+  shopt -u nullglob
+fi
 # Common generated files at root
 shopt -s nullglob
 for f in *.img *.iso *.log core core.*; do

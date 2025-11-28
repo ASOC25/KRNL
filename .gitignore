@@ -12,6 +12,13 @@
 *.bin
 *.map
 
+# Executables
+*.elf
+*.exe
+*.sym
+*.ko
+*.so*
+
 # Temporary mount directory used by scripts
 mnt-esp/
 

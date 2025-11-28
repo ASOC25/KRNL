@@ -5,11 +5,12 @@
 #include <krnl/mem/vmm.h>
 #include <krnl/libraries/std/stdint.h>
 #include <krnl/libraries/std/stddef.h>
+#include <krnl/libraries/std/elf.h>
 
 #define NEW_PROCESS_STACK_SIZE 0x4000 //16KB
 #define MAX_THREADS_PER_PROCESS 16
 #define MAX_OPEN_FILES 32
-#define FAKE_PROCESS (process_t *)0xFFFFFFFFFFFFFFFF
+#define INIT_PROCESS (process_t *)0xFFFFFFFFFFFFFFFF
 
 //Type for pid
 typedef int16_t pid_t;
@@ -45,13 +46,15 @@ typedef struct process_t {
     int open_file_count;
     
     struct process_t * parent;
+    void * binary_entry;
 
     char ** argv;
     char ** envp;
-    //Auxv
+    struct auxv* auxv;
+    uint64_t auxv_size;
 } process_t;
 
-process_t * process_create(process_t * parent, char ** argv, char ** envp);
+process_t * process_create(process_t * parent, const char * filename, char ** argv, char ** envp);
 thread_t * process_create_thread(process_t * process, void * entry_point);
 status_t process_thread_context_init(context_t * context, vmm_root* root, void * pc, void * stack_top, char ** args, thread_t * thread);
 status_t process_destroy(process_t * process);

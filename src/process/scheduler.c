@@ -12,6 +12,7 @@ scheduler_queue_t * sched_stopped_queue_head = NULL;
 scheduler_queue_t * sched_zombie_queue_head = NULL;
 
 process_t * current_process = NULL;
+thread_t * current_thread = NULL;
 
 pid_t scheduler_get_free_pid() {
     static pid_t last_pid = 100; // Start from 100 to avoid reserved PIDs
@@ -67,36 +68,40 @@ scheduler_queue_t * scheduler_get_process_queue(scheduler_queue_id_t queue) {
 }
 
 process_t * scheduler_get_next_process() {
-    //Round robin through runable processes, if reached end, start from beginning, if no processes, panic
-    //Take into account current_process to continue from there
-    if (!sched_runable_queue_head) {
-        panic("scheduler_get_next_process: No runable processes");
-        return NULL;
+    //Simple round-robin scheduling among runable processes
+    //Start from the current process and find the next one
+    //If no current process, start from the head
+    //If reached the end, wrap around to the head until back to the starting point
+    static scheduler_queue_t * last_process_node = NULL;
+    scheduler_queue_t * start_node;
+    if (last_process_node == NULL) {
+        start_node = sched_runable_queue_head;
+    } else {
+        start_node = last_process_node->next;
     }
 
-    if (current_process == NULL) {
-        return sched_runable_queue_head->process;
-    }
-
-    //Search current_process in the queue
-    scheduler_queue_t * current = sched_runable_queue_head;
-    while (current) {
-        if (current->process == current_process) {
-            break;
+    scheduler_queue_t * current = start_node;;
+    while (1) {
+        if (current == NULL) {
+            current = sched_runable_queue_head; // Wrap around
         }
+
+        if (current == last_process_node) {
+            break; // Came back to starting point, no other process found
+        }
+
+        if (current != NULL) {
+            last_process_node = current;
+            current_process = current->process;
+            return current->process;
+        }
+
         current = current->next;
     }
-
-    if (!current) {
-        panic("scheduler_get_next_process: current_process not found in runable queue");
-    }
-
-    if (current->next) {
-        return current->next->process;
-    } else {
-        return sched_runable_queue_head->process;
-    }
+    panic("scheduler_get_next_process: No runable processes found");
+    return NULL;
 }
+    
 
 thread_t * scheduler_get_next_thread(process_t * process) {
     if (!process) {
@@ -112,6 +117,7 @@ thread_t * scheduler_get_next_thread(process_t * process) {
     //Simple round-robin scheduling
     static int last_thread_index = -1;
     last_thread_index = (last_thread_index + 1) % process->thread_count;
+    current_thread = &process->threads[last_thread_index];
     return &process->threads[last_thread_index];
 }
 

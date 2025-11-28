@@ -15,7 +15,6 @@ KERNEL_ELF="$BUILD_DIR/kernel.elf"
 STARTUP_NSH="$ROOT_DIR/startup.nsh"
 BOOTX64_EFI="$LIMINE_DIR/BOOTX64.EFI"
 LIMINE_CFG="$ROOT_DIR/limine.conf"
-FS_DIR="$ROOT_DIR/fs"
 
 usage() {
   cat <<EOF
@@ -27,12 +26,10 @@ containing:
   - startup.nsh
   - kernel.elf
   - limine.conf
-  - (optional) contents of ./fs directory copied to ESP root
 
 Environment overrides:
   IMG (default build/disk.img)
   IMG_SIZE_MB (default 64)
-  FS_DIR (default ./fs) directory whose contents are merged into image root
 
 Options:
   --img PATH     Output image path (default: $IMG)
@@ -73,9 +70,7 @@ if [[ ! -f "$LIMINE_CFG" ]]; then
   echo "limine.conf not found at $LIMINE_CFG" >&2
   exit 1
 fi
-if [[ -d "$FS_DIR" ]]; then
-  echo "Will include additional files from $FS_DIR" >&2
-fi
+
 
 mkdir -p "$(dirname "$IMG")"
 
@@ -130,16 +125,6 @@ sudo cp "$BOOTX64_EFI" mnt-esp/EFI/BOOT/BOOTX64.EFI
 sudo cp "$STARTUP_NSH" mnt-esp/startup.nsh
 sudo cp "$KERNEL_ELF" mnt-esp/kernel.elf
 sudo cp "$LIMINE_CFG" mnt-esp/limine.conf
-
-# Copy arbitrary extra files if fs dir exists
-if [[ -d "$FS_DIR" ]]; then
-  # Use rsync if available for permissions/timestamps; fallback to cp -r
-  if command -v rsync >/dev/null 2>&1; then
-    sudo rsync -a --no-perms --no-owner --no-group "$FS_DIR"/ mnt-esp/
-  else
-    sudo cp -rT "$FS_DIR" mnt-esp/
-  fi
-fi
 
 sync
 sudo umount mnt-esp
