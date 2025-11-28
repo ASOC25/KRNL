@@ -154,7 +154,6 @@ static inline void _out_char(char character, void* buffer, size_t idx, size_t ma
   if (character) {
     //acquire_lock(&printf_lock);
     sys_write(1, &character, 1);
-    sys_ioctl(1, 0x5, 0);
     //release_lock(&printf_lock);
   }
 }

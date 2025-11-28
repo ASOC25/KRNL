@@ -90,9 +90,11 @@ override SRC_HEADER_DEPS := $(SRC_CFILES:.c=.d) $(SRC_ASFILES:.S=.d) $(SRC_NASMF
 all:
 	@echo "Building program..."
 	@echo "Absdir: $(ABSDIR)"
+	@mkdir -p $(BUILDDIR)
+	@mkdir -p $(OBJDIR)
+	@mkdir -p $(SYMDIR)
 	@make program
 	@echo "Generating symbol table..."
-	@mkdir -p $(SYMDIR)
 # Create symbol table for entering in gdb
 	@objcopy --only-keep-debug $(BUILDDIR)/$(PROGRAM) $(SYMDIR)/$(PROGRAM).sym
 	@echo "Done."

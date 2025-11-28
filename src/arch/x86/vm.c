@@ -413,6 +413,8 @@ status_t vm_map_address(vm_dir * root, uint64_t virtual_address, uint64_t physic
 
 check_mapping:
     uint64_t resulting_paddr;
+    //Invalidate TLB and verify mapping
+    vm_flush_tlb_entry(virtual_address);
     if (vm_get_physical_address(root, virtual_address, &resulting_paddr) != SUCCESS) {
         panic("vm_map_page: Verification of mapping failed");
     }

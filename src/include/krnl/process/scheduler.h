@@ -17,6 +17,8 @@ typedef struct scheduler_queue {
     struct scheduler_queue * next;
 } scheduler_queue_t;
 
+void scheduler_exit_process(process_t * process, cpu_context_t* ctx, uint8_t cpu_id);
+thread_t * scheduler_get_current_thread();
 process_t * scheduler_get_next_process();
 thread_t * scheduler_get_next_thread(process_t * process);
 void scheduler_handler(cpu_context_t* ctx, uint8_t cpu_id);

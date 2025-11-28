@@ -1,6 +1,10 @@
 #ifndef _VFS_H
 #define _VFS_H
 
+#define SEEK_SET 0
+#define SEEK_CUR 1
+#define SEEK_END 2
+
 #define VFS_PATH_MAX 4096
 
 #include <krnl/libraries/std/stddef.h>

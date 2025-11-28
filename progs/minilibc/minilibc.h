@@ -1,7 +1,5 @@
 
 #include <stdint.h>
-#include <signal.h>
-#include <time.h>
 
 #define MAP_FAILED ((void *)-1)
 
@@ -44,41 +42,10 @@ typedef struct stack {
 typedef struct stat stat_t;
 
 void minilibc_init();
-void * get_vdso_signal_trampoline();
 void sys_read(int fd, char * buffer, int size);
 void sys_write(int fd, char * buffer, int size);
 int sys_open(const char * path, int flags);
 int sys_close(int fd);
-int sys_ioctl(int fd, unsigned long request, void * arg);
-int sys_fstat(int fd, struct stat * buf);
 int sys_stat(const char * path, struct stat * buf);
-int sys_msync(void * addr, size_t length, int flags);
-void sys_sched_yield();
-short sys_fork();
-int sys_nanosleep(struct timespec * req, struct timespec * rem);
-void sys_exit(int error_code);
-void sys_execve(const char * path, char ** argv, char ** envp);
-void * sys_mmap(void * addr, size_t length, int prot, int flags, int fd, off_t offset);
-void sys_mprotect(void * addr, size_t length, int prot);
-void sys_munmap(void * addr, size_t length);
-int sys_dup(int fd);
-int sys_dup2(int oldfd, int newfd);
-int sys_getpid();
-int sys_getppid();
-
-
-int sys_sigaction(int signum, struct sigaction * act, struct sigaction * oldact);
-int sys_sigsuspend(sigset_t* sigsuspend_mask, const sigset_t *mask);
-int sys_sigprocmask(int how, const sigset_t *set, sigset_t *oldset);
-int sys_sigpending(sigset_t *set);
-int sys_kill(int pid, int sig);
-int sys_sigaltstack(const stack_t *ss, stack_t *oss);
-int sys_waitpid(int pid, int *status, int options);
-
-int sys_gettimeofday(struct timeval *tv, struct timezone *tz);
-int sys_arch_prctl(int code, unsigned long *addr);
-int sys_gettid();
-int sys_clock_settime(int clock_id, const struct timespec *tp);
-int sys_clock_gettime(int clock_id, struct timespec *tp);
-int sys_clock_getres(int clock_id, struct timespec *tp);
-int sys_thread_exit();
+int sys_fstat(int fd, struct stat * buf);
+int sys_seek(int fd, int offset, int whence);

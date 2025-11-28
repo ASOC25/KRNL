@@ -296,9 +296,9 @@ status_t allocate_segment(vmm_root* root, uint8_t * elf_datab, Elf64_Phdr * prog
     }
 
     //Zero the buffer
-    memset((uint8_t *)farlands.access_address, 0, total_pages * 0x1000);
+    memset((uint8_t *)farlands.handle, 0, total_pages * 0x1000);
     //Copy file data
-    memcpy((uint8_t *)farlands.access_address + vaddr_offset, elf_datab + program_header->p_offset, program_header->p_filesz);
+    memcpy((uint8_t *)farlands.handle + vaddr_offset, elf_datab + program_header->p_offset, program_header->p_filesz);
     return SUCCESS;
 }
 

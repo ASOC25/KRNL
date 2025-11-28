@@ -68,40 +68,44 @@ scheduler_queue_t * scheduler_get_process_queue(scheduler_queue_id_t queue) {
 }
 
 process_t * scheduler_get_next_process() {
-    //Simple round-robin scheduling among runable processes
-    //Start from the current process and find the next one
-    //If no current process, start from the head
-    //If reached the end, wrap around to the head until back to the starting point
-    static scheduler_queue_t * last_process_node = NULL;
-    scheduler_queue_t * start_node;
-    if (last_process_node == NULL) {
-        start_node = sched_runable_queue_head;
-    } else {
-        start_node = last_process_node->next;
-    }
-
-    scheduler_queue_t * current = start_node;;
-    while (1) {
-        if (current == NULL) {
-            current = sched_runable_queue_head; // Wrap around
+    //Iterate over the runable queue and return the process with
+    //the highest priority (lowest numerical value of current_nice)
+    //The chosen process will have its current_nice reset to its nice value
+    //All other processes in the queue will have their current_nice decreased by 1
+    scheduler_queue_t * current = sched_runable_queue_head;
+    process_t * chosen_process = NULL;
+    long highest_priority = 0x7FFFFFFF;
+    while (current != NULL) {
+        if (current->process->current_nice < highest_priority) {
+            highest_priority = current->process->current_nice;
+            chosen_process = current->process;
         }
-
-        if (current == last_process_node) {
-            break; // Came back to starting point, no other process found
-        }
-
-        if (current != NULL) {
-            last_process_node = current;
-            current_process = current->process;
-            return current->process;
-        }
-
         current = current->next;
     }
-    panic("scheduler_get_next_process: No runable processes found");
-    return NULL;
+    if (chosen_process) {
+        //Adjust niceness values
+        current = sched_runable_queue_head;
+        while (current != NULL) {
+            if (current->process == chosen_process) {
+                current->process->current_nice = current->process->nice;
+            } else {
+                if (current->process->current_nice > 0) {
+                    current->process->current_nice--;
+                }
+            }
+            current = current->next;
+        }
+    } else {
+        panic("scheduler_get_next_process: No process found in runable queue");
+        return NULL;
+    }
+    current_process = chosen_process;
+    return chosen_process;
 }
-    
+
+thread_t * scheduler_get_current_thread() {
+    return current_thread;
+}
 
 thread_t * scheduler_get_next_thread(process_t * process) {
     if (!process) {
@@ -257,9 +261,19 @@ status_t scheduler_send_event_to_process(process_t * process, int event) {
     return SUCCESS;
 }
 
+void scheduler_exit_process(process_t * process, cpu_context_t* ctx, uint8_t cpu_id) {
+    //First move the process to the zombie queue
+    //Then switch to the next process by calling scheduler_handler
+    status_t st = scheduler_move_process(process, SCHEDULER_QUEUE_ZOMBIE);
+    if (st != SUCCESS) {
+        panic("scheduler_exit_process: Failed to move process to zombie queue");
+    }
+    scheduler_handler(ctx, cpu_id);
+}
+
 void scheduler_handler(cpu_context_t* ctx, uint8_t cpu_id){
     (void)cpu_id;
-
+    
     thread_t * ending_thread = ctx->ctx_info->thread;
     if (ending_thread) {
         context_save(ending_thread->context, ctx);

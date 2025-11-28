@@ -5,7 +5,9 @@ set mem inaccessible-by-default off
 set disassembly-flavor intel
 set remotetimeout 999
 add-symbol-file ramdisk/init.elf.sym
+define hook-stop
+  x/10ig $rip
+end
 hbreak boot_startup
-hbreak interrupt_handler
-hbreak syscall_handler
+hbreak main
 c

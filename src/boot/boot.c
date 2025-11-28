@@ -13,6 +13,7 @@
 #include <krnl/mem/mem.h>
 #include <krnl/process/process.h>
 #include <krnl/fs/x1fs/x1fs.h>
+#include <krnl/fs/tty/tty.h>
 #include <krnl/vfs/vfs.h>
 
 void boot_startup() {
@@ -47,13 +48,15 @@ void boot_startup() {
     //Start the core subsystem (manages processes, scheduling, uspace, etc)
 
     x1fs_init();
+    tty_init();
     vfs_new_mount(4, 0, "/");
+    vfs_new_mount(3, 0, "/dev/tty0"); //Placeholders!!!!
 
     kprintf("ASOC KERNEL BOOTED SUCCESSFULLY!\n");
     kprintf("Using bootloader: %s version: %s\n", get_bootloader_name(), get_bootloader_version());
     run_all_tests();
 
-    process_init();
+    process_init("/init.elf", "/dev/tty0");
     __asm__("sti");
     while (1);
 }

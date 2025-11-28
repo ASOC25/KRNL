@@ -125,16 +125,30 @@ status_t vfs_remove_mount(const char *mount_point) {
     return NOT_FOUND;
 }
 
+struct find_mount_candidate {
+    vfs_mount_t *mount;
+    size_t mount_point_len;
+};
+
+//Find the most specific mount point for the given path
+//If multiple mount points match, return the one with the longest mount point
 vfs_mount_t * vfs_find_mount(const char *path) {
     vfs_mount_t *current = vfs_mounts;
+    struct find_mount_candidate best_candidate = {NULL, 0};
     while (current != NULL) {
         size_t mount_point_len = strlen(current->mount_point);
         if (strncmp(path, current->mount_point, mount_point_len) == 0) {
-            return current;
+            //Check if this is a better candidate
+            if (mount_point_len > best_candidate.mount_point_len) {
+                best_candidate.mount = current;
+                best_candidate.mount_point_len = mount_point_len;
+            } else if (mount_point_len == best_candidate.mount_point_len) {
+                panic("vfs_find_mount: Multiple mount points with same length match path");
+            }
         }
         current = current->next;
     }
-    return NULL;
+    return best_candidate.mount;
 }
 
 char * vfs_get_native_path(const char *path, vfs_mount_t *mount) {

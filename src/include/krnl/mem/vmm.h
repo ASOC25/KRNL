@@ -24,6 +24,7 @@
 #define VMM_REGION_DEVICES                  0xFFFFC00000000000
 #define VMM_REGION_FARLANDS                 0xFFFFD00000000000
 #define VMM_REGION_U_SPACE_INI              0x0000000000000000
+#define VMM_REGION_U_STACK                  0x00007FFFFFFFF000
 #define VMM_REGION_U_SPACE_END              0x0000800000000000
 
 typedef struct vmm_root {
