@@ -3,7 +3,7 @@
 #include <krnl/mem/pmm.h>
 #include <krnl/debug/debug.h>
 
-status_t vmm_map_pages(vmm_root * root, uint64_t virtual_address_start, uint64_t physical_address_start, uint64_t pages, uint64_t page_size, uint8_t flags) {
+status_t vmm_map_pages(vmm_root_t * root, uint64_t virtual_address_start, uint64_t physical_address_start, uint64_t pages, uint64_t page_size, uint8_t flags) {
     if (root == 0) {
         panic("vmm_map_pages: root page directory is NULL");
     }
@@ -23,7 +23,7 @@ status_t vmm_map_pages(vmm_root * root, uint64_t virtual_address_start, uint64_t
     return SUCCESS;
 }
 
-status_t vmm_unmap_pages(vmm_root * root, uint64_t virtual_address_start, uint64_t pages, uint64_t page_size) {
+status_t vmm_unmap_pages(vmm_root_t * root, uint64_t virtual_address_start, uint64_t pages, uint64_t page_size) {
     if (root == 0) {
         panic("vmm_unmap_pages: root page directory is NULL");
     }
@@ -42,7 +42,7 @@ status_t vmm_unmap_pages(vmm_root * root, uint64_t virtual_address_start, uint64
     return SUCCESS;
 }
 
-status_t vmm_mprotect_pages(vmm_root * root, uint64_t virtual_address_start, uint64_t pages, uint64_t page_size, uint8_t new_flags) {
+status_t vmm_mprotect_pages(vmm_root_t * root, uint64_t virtual_address_start, uint64_t pages, uint64_t page_size, uint8_t new_flags) {
     if (root == 0) {
         panic("vmm_mprotect_pages: root page directory is NULL");
     }
@@ -65,24 +65,24 @@ void vmm_remap(uint64_t offset) {
     vm_set_offset(offset);
 }
 
-vmm_root * vmm_get_root() {
-    return (vmm_root *)vm_get_current_pml4();
+vmm_root_t * vmm_get_root() {
+    return (vmm_root_t *)vm_get_current_pml4();
 }
 
-void vmm_set_root(vmm_root * root) {
+void vmm_set_root(vmm_root_t * root) {
     vm_set_current_pml4((vm_dir *)root);
 }
 
-vmm_root * vmm_duplicate_kspace() {
-    vmm_root * current_pml4 = vmm_get_root();
-    return (vmm_root *)vm_duplicate_pml4((vm_dir *)current_pml4, VM_COPY_KERNEL_ONLY);
+vmm_root_t * vmm_duplicate_kspace() {
+    vmm_root_t * current_pml4 = vmm_get_root();
+    return (vmm_root_t *)vm_duplicate_pml4((vm_dir *)current_pml4, VM_COPY_KERNEL_ONLY);
 }
 
-vmm_root * vmm_duplicate_fullspace(vmm_root * original) {
-    return (vmm_root *)vm_duplicate_pml4((vm_dir *)original, VM_COPY_ALL);
+vmm_root_t * vmm_duplicate_fullspace(vmm_root_t * original) {
+    return (vmm_root_t *)vm_duplicate_pml4((vm_dir *)original, VM_COPY_ALL);
 }
 
-void vmm_free_root(vmm_root * root) {
+void vmm_free_root(vmm_root_t * root) {
     vm_flush_tlb_entry((uint64_t)root);
 }
 
@@ -102,11 +102,22 @@ uint64_t vmm_from_device_map(uint64_t address) {
     return (uint64_t)(address - VMM_REGION_DEVICES);
 }
 
-status_t vmm_get_physical_address(vmm_root * root, uint64_t virtual_address, uint64_t * physical_address) {
+status_t vmm_get_physical_address(vmm_root_t * root, uint64_t virtual_address, uint64_t * physical_address) {
     return vm_get_physical_address((vm_dir *)root, virtual_address, physical_address);
 }
 
-status_t vmm_get_page_info(vmm_root * root, uint64_t virtual_address, vmm_info * info) {
+uint8_t vmm_check_and_clean_dirty(vmm_root_t * root, uint64_t virtual_address, uint64_t pages, uint64_t page_size) {
+    for (uint64_t i = 0; i < pages; i++) {
+        uint64_t va = virtual_address + (i * page_size);
+        uint8_t dirty = vm_check_and_clean_dirty((vm_dir *)root, va);
+        if (dirty == 1) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+status_t vmm_get_page_info(vmm_root_t * root, uint64_t virtual_address, vmm_info * info) {
     struct page_info inf;
     status_t st = vm_get_page_info((vm_dir *)root, virtual_address, &inf);
     if (st != SUCCESS) {

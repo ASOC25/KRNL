@@ -81,7 +81,7 @@ struct acpi_sdt_header* find_rsdt(struct rsdt* rsdt, const char* signature, uint
 
     for (uint32_t i = 0; i < entries; i++) {
         uint32_t pto = rsdt->pointer_other_sdt[i];
-        struct acpi_sdt_header* header = vmm_to_identity_map((struct acpi_sdt_header*)(uint64_t)pto); //TODO: delete this inmediately
+        struct acpi_sdt_header* header = (struct acpi_sdt_header*)vmm_to_identity_map((uint64_t)pto); //TODO: delete this inmediately
 
         if (!memcmp(header->signature, signature, sig_len))
             return header;
@@ -95,7 +95,7 @@ struct acpi_sdt_header* find_xsdt(struct xsdt* xsdt, const char* signature, uint
 
     for (uint32_t i = 0; i < entries; i++) {
         uint32_t pto = xsdt->pointer_other_sdt[i];
-        struct acpi_sdt_header* header =  vmm_to_identity_map((struct acpi_sdt_header*)(uint64_t)pto); //TODO: delete this inmediately
+        struct acpi_sdt_header* header =  (struct acpi_sdt_header*)vmm_to_identity_map((uint64_t)pto); //TODO: delete this inmediately
 
         if (!memcmp(header->signature, signature, sig_len))
             return header;
@@ -116,7 +116,7 @@ void* init_acpi_vt(void* rsdp_address, const char* target) {
     strncpy(oemid, rsdp->first_part.oem_id, 6);
     strncpy(signature, rsdp->first_part.signature, 8);
 
-    struct xsdt* xsdt = vmm_to_identity_map((struct xsdt*)(uint64_t)(rsdp->xsdt_address));
+    struct xsdt* xsdt = (struct xsdt*)vmm_to_identity_map((uint64_t)(rsdp->xsdt_address));
     struct acpi_sdt_header* result = find_xsdt(xsdt, target, 4);
     if (result == 0) {
         return 0;
@@ -140,7 +140,7 @@ void* init_acpi_vz(void* rsdp_address, const char * target) {
     strncpy(oemid, rsdp->oem_id, 6);
     strncpy(signature, rsdp->signature, 8);
 
-    struct rsdt* rsdt = vmm_to_identity_map((struct rsdt*)(uint64_t)(rsdp->rsdt_address));
+    struct rsdt* rsdt = (struct rsdt*)vmm_to_identity_map((uint64_t)(rsdp->rsdt_address));
     struct acpi_sdt_header* result = find_rsdt(rsdt, target, 4);
 
     if (!acpi_sdt_checksum(result))

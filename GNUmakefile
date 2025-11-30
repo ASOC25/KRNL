@@ -21,8 +21,6 @@ override CFLAGS +=       \
     -fno-pie             \
     -fno-pic             \
     -m64                 \
-    -Wno-int-conversion  \
-    -Wno-packed-bitfield-compat \
     -Wall                \
     -Wextra              \
     -Werror              \
@@ -113,6 +111,7 @@ progs:
 
 clean:
 	@sudo $(ABSDIR)/scripts/clean-artifacts.sh --mode normal
+	$(foreach prog,$(PROGS),$(MAKE) -C $(prog) clean)
 
 distclean:
 	@sudo $(ABSDIR)/scripts/clean-artifacts.sh --mode dist

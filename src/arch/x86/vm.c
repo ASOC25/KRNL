@@ -71,7 +71,7 @@ void * allocate_phys_page() {
     {
         return NULL;
     }
-    memset(TO_IDENTITY_MAP(buffer), 0, VM_PAGE_SIZE_4KB);
+    memset((void*)TO_IDENTITY_MAP(buffer), 0, VM_PAGE_SIZE_4KB);
     return buffer;
 }
 
@@ -291,11 +291,11 @@ status_t vm_get_page_info(vm_dir * root, uint64_t virtual_address, struct page_i
 vm_dir * vm_get_current_pml4() {
     vm_dir* cr3;
     __asm__("mov %%cr3, %0" : "=r"(cr3));
-    return TO_IDENTITY_MAP(cr3);
+    return (vm_dir*)TO_IDENTITY_MAP((uint64_t)cr3);
 }
 
 vm_dir * vm_duplicate_pml4(vm_dir * pml4, vm_copy_range range) {
-    vm_dir* new_pml4 = (vm_dir*)TO_IDENTITY_MAP(allocate_phys_page());
+    vm_dir* new_pml4 = (vm_dir*)TO_IDENTITY_MAP((uint64_t)allocate_phys_page());
     if (new_pml4 == NULL) {
         panic("vm_duplicate_pml4: Failed to allocate memory for new PML4");
     }
@@ -315,13 +315,53 @@ vm_dir * vm_duplicate_pml4(vm_dir * pml4, vm_copy_range range) {
 }
 
 void vm_set_current_pml4(vm_dir * pml4) {
-    vm_dir * physical_pml4 = FROM_IDENTITY_MAP(pml4);
+    vm_dir * physical_pml4 = (vm_dir*)FROM_IDENTITY_MAP((uint64_t)pml4);
     __asm__("mov %0, %%cr3" : : "r"(physical_pml4) : "memory");
 }
 
 void vm_flush_tlb_entry(uint64_t address)
 {
     __asm__("invlpg (%0)" : : "r"(address) : "memory");
+}
+
+
+uint8_t vm_check_and_clean_dirty(vm_dir * root, uint64_t virtual_address) {
+    struct page_map_index indices;
+    address_to_map((uint64_t)virtual_address, &indices);
+
+    vm_dir *pdptable, *pdtable, *pttable;
+    vm_entry *pml4entry, *pdptentry, *pdentry, *ptentry;
+
+    pml4entry = GET_ENTRY(root, indices.PML4_index);
+    if (!IS_PRESENT(pml4entry)) {
+        panic("vm_is_dirty: PML4 entry not present");
+    }
+
+    pdptable = (vm_dir *)(get_pdpp(pml4entry, VM_PAGE_SIZE_DIR));
+    pdptentry = GET_ENTRY(pdptable, indices.PDP_index);
+    if (!IS_PRESENT(pdptentry)) {
+        panic("vm_is_dirty: PDPT entry not present");
+    } else if (pdptentry->huge.PS) {
+        return pdptentry->huge.D ? SUCCESS : FAILURE;
+    }
+
+    pdtable = (vm_dir *)(get_pdpp(pdptentry, VM_PAGE_SIZE_DIR));
+    pdentry = GET_ENTRY(pdtable, indices.PD_index);
+    if (!IS_PRESENT(pdentry)) {
+        panic("vm_is_dirty: PD entry not present");
+    } else if (pdentry->big.PS) {
+        return pdentry->big.D ? SUCCESS : FAILURE;
+    }
+
+    pttable = (vm_dir *)(get_pdpp(pdentry, VM_PAGE_SIZE_DIR));
+    ptentry = GET_ENTRY(pttable, indices.PT_index);
+    if (!IS_PRESENT(ptentry)) {
+        panic("vm_is_dirty: PT entry not present");
+    }
+    uint8_t was_dirty = ptentry->regular.D;
+    ptentry->regular.D = 0;
+    vm_flush_tlb_entry(virtual_address);
+    return was_dirty;
 }
 
 status_t vm_map_address(vm_dir * root, uint64_t virtual_address, uint64_t physical_address, uint64_t page_size, uint8_t flags) {

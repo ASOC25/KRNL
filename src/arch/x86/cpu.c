@@ -87,7 +87,7 @@ void cpu_init() {
     for (uint64_t i = 0; i < get_smp_cpu_count(); i++) {
         boot_smp_info_t * cpu = cpus[i];
         if (cpu->lapic_id != bsp_lapic_id) {
-            cpu->goto_address = (uint64_t)callback;
+            cpu->goto_address = (void*)(uint64_t)callback;
         } else {
             cpu_init_id(cpu->processor_id, cpu->lapic_id);
         }

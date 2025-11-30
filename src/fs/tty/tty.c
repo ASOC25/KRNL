@@ -31,6 +31,16 @@ status_t tty_fstat(device_major_t major, device_minor_t minor, const char * path
     return SUCCESS;
 }
 
+status_t tty_ioctl(device_major_t major, device_minor_t minor, const char * path, uint64_t request, void * arg) {
+    (void)major;
+    (void)minor;
+    (void)path;
+    (void)request;
+    (void)arg;
+    // TTY does not support any ioctls in this implementation
+    return FAILURE; // Ioctl not supported
+}
+
 void tty_init(void) {
     vfs_fs_t *tty_ops = (vfs_fs_t *)kmalloc(sizeof(vfs_fs_t));
     if (!tty_ops) {
@@ -43,6 +53,7 @@ void tty_init(void) {
     tty_ops->write = tty_write;
     tty_ops->detect = tty_detect;
     tty_ops->fstat = tty_fstat;
+    tty_ops->ioctl = tty_ioctl;
     tty_ops->next = NULL;
 
     status_t result = vfs_register_fs(tty_ops);

@@ -202,7 +202,7 @@ void vmm_tests(void) {
     strcpy(test_buffer, "abcdefghijklmnopqrstuvwxyz");
 
     status_t st;
-    vmm_root * root;
+    vmm_root_t * root;
     uint64_t buffer_phaddr;
     uint64_t test_phaddr;
     char * test_vaddr = (char * )0xFFFFD00000000000;
@@ -219,7 +219,7 @@ void vmm_tests(void) {
 
     st = vmm_map_pages(
         root,
-        test_vaddr,
+        (uint64_t)test_vaddr,
         buffer_phaddr,
         0x1,
         0x1000,

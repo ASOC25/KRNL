@@ -40,9 +40,16 @@ void idt_init(void) {
     idt_initialized = 1;
 }
 
+void exception(cpu_context_t * ctx) {
+    //Print cr2 , offending address
+    uint64_t cr2;
+    __asm__ volatile("mov %%cr2, %0" : "=r"(cr2));
+    panic("CPU EXCEPTION: %d | Stacktrace (CR2: 0x%016x):", ctx->interrupt_number, cr2);
+}
+
 void interrupt_handler(cpu_context_t* ctx, uint8_t cpu_id) {
     if (ctx->interrupt_number < 32) {
-        panic("Unhandled CPU Exception: %d", ctx->interrupt_number);
+        exception(ctx);
     } else if (ctx->interrupt_number >= 32 && ctx->interrupt_number < 48) {
         panic("Unhandled IRQ: %d", ctx->interrupt_number - 32);
         //apic_handle_interrupt(ctx->interrupt_number, cpu_id);

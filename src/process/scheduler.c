@@ -5,6 +5,7 @@
 #include <krnl/arch/x86/idt.h>
 #include <krnl/libraries/std/stddef.h>
 #include <krnl/process/process.h>
+#include <krnl/libraries/lock/spinlock.h>
 
 scheduler_queue_t * sched_runable_queue_head = NULL;
 scheduler_queue_t * sched_sleeping_queue_head = NULL;
@@ -14,7 +15,25 @@ scheduler_queue_t * sched_zombie_queue_head = NULL;
 process_t * current_process = NULL;
 thread_t * current_thread = NULL;
 
-pid_t scheduler_get_free_pid() {
+static spinlock_t scheduler_spinlock = SPINLOCK_INIT;
+
+// Scheduler spinlock helpers
+#define SCHEDULER_LOCK()   \
+    do { \
+        if (spinlock_acquire(&scheduler_spinlock) != 0) { \
+            panic("SCHEDULER_LOCK: Deadlock detected in scheduler"); \
+        } \
+        __asm__ volatile("cli"); \
+    } while (0)
+
+#define SCHEDULER_UNLOCK() \
+    do { \
+        spinlock_release(&scheduler_spinlock); \
+        __asm__ volatile("sti"); \
+    } while (0)
+
+// Internal helper: must be called with scheduler_spinlock already held
+static pid_t scheduler_get_free_pid_locked(void) {
     static pid_t last_pid = 100; // Start from 100 to avoid reserved PIDs
     scheduler_queue_t * current;
     pid_t candidate_pid = last_pid;
@@ -52,6 +71,14 @@ pid_t scheduler_get_free_pid() {
     return candidate_pid;
 }
 
+pid_t scheduler_get_free_pid() {
+    pid_t pid;
+    SCHEDULER_LOCK();
+    pid = scheduler_get_free_pid_locked();
+    SCHEDULER_UNLOCK();
+    return pid;
+}
+
 scheduler_queue_t * scheduler_get_process_queue(scheduler_queue_id_t queue) {
     switch (queue) {
         case SCHEDULER_QUEUE_RUNABLE:
@@ -72,6 +99,7 @@ process_t * scheduler_get_next_process() {
     //the highest priority (lowest numerical value of current_nice)
     //The chosen process will have its current_nice reset to its nice value
     //All other processes in the queue will have their current_nice decreased by 1
+    SCHEDULER_LOCK();
     scheduler_queue_t * current = sched_runable_queue_head;
     process_t * chosen_process = NULL;
     long highest_priority = 0x7FFFFFFF;
@@ -97,9 +125,11 @@ process_t * scheduler_get_next_process() {
         }
     } else {
         panic("scheduler_get_next_process: No process found in runable queue");
+        SCHEDULER_UNLOCK();
         return NULL;
     }
     current_process = chosen_process;
+    SCHEDULER_UNLOCK();
     return chosen_process;
 }
 
@@ -130,6 +160,7 @@ status_t scheduler_add_process(process_t * process, scheduler_queue_id_t queue) 
         panic("scheduler_add_process: process is NULL");
         return FAILURE;
     }
+    SCHEDULER_LOCK();
 
     scheduler_queue_t ** head;
     switch (queue) {
@@ -147,13 +178,16 @@ status_t scheduler_add_process(process_t * process, scheduler_queue_id_t queue) 
             break;
         default:
             panic("scheduler_add_process: Invalid queue type");
+            SCHEDULER_UNLOCK();
             return FAILURE;
     }
 
-    process->pid = scheduler_get_free_pid();
+    // We already hold the scheduler lock here, so call locked helper
+    process->pid = scheduler_get_free_pid_locked();
     scheduler_queue_t * new_node = kmalloc(sizeof(scheduler_queue_t));
     if (!new_node) {
         panic("scheduler_add_process: Failed to allocate memory for scheduler queue node");
+        SCHEDULER_UNLOCK();
         return FAILURE;
     }
 
@@ -169,6 +203,7 @@ status_t scheduler_add_process(process_t * process, scheduler_queue_id_t queue) 
         current->next = new_node;
     }
 
+    SCHEDULER_UNLOCK();
     return SUCCESS;
 }
 
@@ -181,12 +216,13 @@ status_t scheduler_move_process(process_t * process, scheduler_queue_id_t queue)
     }
     return scheduler_add_process(process, queue);
 }
+
 status_t scheduler_remove_process(process_t * process) {
     if (!process) {
         panic("scheduler_remove_process: process is NULL");
         return FAILURE;
     }
-
+    SCHEDULER_LOCK();
     scheduler_queue_t ** queues[] = {
         &sched_runable_queue_head,
         &sched_sleeping_queue_head,
@@ -207,19 +243,21 @@ status_t scheduler_remove_process(process_t * process) {
                     previous->next = current->next;
                 }
                 kfree(current);
+                SCHEDULER_UNLOCK();
                 return SUCCESS;
             }
             previous = current;
             current = current->next;
         }
     }
-
+    SCHEDULER_UNLOCK();
     panic("scheduler_remove_process: Process not found in any queue");
     return FAILURE;
 }
 status_t scheduler_flush_queue(scheduler_queue_id_t queue) {
     //Remove all processes from the specified queue
     scheduler_queue_t ** head;
+    SCHEDULER_LOCK();
     switch (queue) {
         case SCHEDULER_QUEUE_RUNABLE:
             head = &sched_runable_queue_head;
@@ -235,6 +273,7 @@ status_t scheduler_flush_queue(scheduler_queue_id_t queue) {
             break;
         default:
             panic("scheduler_flush_queue: Invalid queue type");
+            SCHEDULER_UNLOCK();
             return FAILURE;
     }
 
@@ -245,6 +284,7 @@ status_t scheduler_flush_queue(scheduler_queue_id_t queue) {
         kfree(to_free);
     }
     *head = NULL;
+    SCHEDULER_UNLOCK();
     return SUCCESS;
 }
 

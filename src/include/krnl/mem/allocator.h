@@ -29,10 +29,12 @@ typedef struct allocator_stack_farlands {
 } farlands_stack_t;
 
 void * kmalloc(uint64_t size);
-status_t kmalloc_farlands(vmm_root * root, uint64_t size, uint64_t vaddr, uint8_t flags, farlands_t * farlands);
-void kfree(void *ptr); //Common for both user and kernel
+stack_t * kstackalloc(uint64_t initial_size);
+void kfree(void * virtual_address);
+void kstackfree(stack_t * stk);
 
-stack_t * kstackalloc(uint64_t size);
-status_t kstackalloc_farlands(vmm_root * root, uint64_t size, uint64_t vaddr, uint8_t flags, farlands_stack_t * farlands);
-void kstackfree(stack_t *ptr); //Common for both user and kernel
+status_t malloc(vmm_root_t * root, uint64_t size, uint64_t vaddr, uint8_t flags, farlands_t * farlands);
+status_t stackalloc(vmm_root_t * root, uint64_t size, uint64_t vaddr, uint8_t flags, farlands_stack_t * farstack);
+void free(vmm_root_t * cr3, void * virtual_address);
+void stackfree(vmm_root_t * cr3, farlands_stack_t * farstack);
 #endif

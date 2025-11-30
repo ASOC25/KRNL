@@ -160,15 +160,15 @@ struct lapic_address {
 }__attribute__((packed));
 
 struct ioapic_redirection_entry {
-    uint8_t vector:8;
-    uint8_t delivery_mode:3;
-    uint8_t destination_mode:1;
-    uint8_t delivery_status:1;
-    uint8_t pin_polarity:1;
-    uint8_t remote_irr:1;
-    uint8_t trigger_mode:1;
-    uint8_t mask:1;
-    uint8_t destination:8;
+    uint16_t vector:8;
+    uint16_t delivery_mode:3;
+    uint16_t destination_mode:1;
+    uint16_t delivery_status:1;
+    uint16_t pin_polarity:1;
+    uint16_t remote_irr:1;
+    uint16_t trigger_mode:1;
+    uint16_t mask:1;
+    uint16_t destination:8;
 }__attribute__((packed));
 
 struct apic_context {

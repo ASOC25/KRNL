@@ -7,6 +7,7 @@
 #include <krnl/libraries/std/stdint.h>
 #include <krnl/libraries/std/stddef.h>
 #include <krnl/libraries/std/elf.h>
+#include <krnl/mem/vmarea.h>
 #include <krnl/mem/allocator.h>
 
 #define NEW_PROCESS_STACK_SIZE 0x4000 //16KB
@@ -34,8 +35,9 @@ typedef struct thread_t {
 } thread_t;
 
 typedef struct process_t {
-    vmm_root * vmm;
-    
+    vmm_root_t * vmm;
+    vm_area_t *vm_areas;
+
     thread_t threads[MAX_THREADS_PER_PROCESS];
     int thread_count;
     thread_t * current_thread;
@@ -67,7 +69,7 @@ vfs_file_descriptor_t * process_get_fd(process_t *proc, int fd);
 int process_allocate_fd_slot(process_t *proc);
 process_t * process_create(process_t * parent, const char * filename, const char * tty, char ** argv, char ** envp);
 thread_t * process_create_thread(process_t * process, void * entry_point);
-status_t process_thread_context_init(context_t * context, vmm_root* root, void * pc, void * stack_top, char ** args, thread_t * thread);
+status_t process_thread_context_init(context_t * context, vmm_root_t* root, void * pc, void * stack_top, char ** args, thread_t * thread);
 status_t process_destroy(process_t * process);
 status_t process_destroy_thread(thread_t * thread);
 

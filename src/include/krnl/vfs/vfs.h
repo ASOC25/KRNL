@@ -12,6 +12,22 @@
 #include <krnl/libraries/std/time.h>
 #include <krnl/devices/devices.h>
 
+#define O_WRONLY    0x1
+#define O_RDONLY    0x2
+#define O_RDWR      0x4
+#define O_CREAT     0x8
+#define O_EXCL      0x10
+#define O_NOCTTY    0x20
+#define O_TRUNC     0x40
+#define O_APPEND    0x80
+#define O_NONBLOCK  0x100
+#define O_DSYNC     0x200
+#define O_DIRECT    0x400
+#define O_LARGEFILE 0x800
+#define O_DIRECTORY 0x1000
+#define O_NOFOLLOW  0x2000
+#define O_CLOEXEC   0x4000
+
 typedef struct stat {
 	uint64_t st_dev;
 	uint64_t st_ino;
@@ -38,6 +54,7 @@ typedef struct vfs_fs {
     ssize_t (*write)(device_major_t major, device_minor_t minor, const char * path, size_t skip, const void *buf, size_t count);
     //fstat
     status_t (*fstat)(device_major_t major, device_minor_t minor, const char * path, vfs_stat_t * buf);
+    status_t (*ioctl)(device_major_t major, device_minor_t minor, const char * path, uint64_t request, void * arg);
     //Detect filesystem
     status_t (*detect)(device_major_t major, device_minor_t minor);
 
@@ -53,6 +70,7 @@ typedef struct vfs_mount {
 } vfs_mount_t;
 
 typedef struct vfs_file_descriptor {
+    uint8_t valid;
     vfs_mount_t *mount;
     size_t position;
     int flags;
@@ -65,10 +83,10 @@ status_t vfs_unregister_fs(char *fs_name);
 vfs_mount_t *vfs_new_mount(device_major_t major, device_minor_t minor, const char *mount_point);
 status_t vfs_remove_mount(const char *mount_point);
 
-vfs_file_descriptor_t * vfs_open(const char *path, int flags);
-ssize_t vfs_close(vfs_file_descriptor_t *fd);
+status_t vfs_open(const char *path, int flags, vfs_file_descriptor_t *fd);
+status_t vfs_close(vfs_file_descriptor_t *fd);
 ssize_t vfs_read(vfs_file_descriptor_t *fd, void *buf, size_t count);
 ssize_t vfs_write(vfs_file_descriptor_t *fd, const void *buf, size_t count);
 status_t vfs_fstat(vfs_file_descriptor_t *fd, vfs_stat_t *buf);
-
+status_t vfs_ioctl(vfs_file_descriptor_t *fd, uint64_t request, void * arg);
 #endif

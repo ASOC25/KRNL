@@ -45,7 +45,7 @@ void hpet_init(){
     if(hpet == 0){
         panic("HPET table not found");
     }
-    hpet_base = (void*)vmm_to_device_map((void*)hpet->address.address);
+    hpet_base = (void*)vmm_to_device_map((uint64_t)hpet->address.address);
 
     hpet_frequency = hpet_read_register(HPET_TIMER_OFFSET_GENERAL_CAPABILITIES_ID) >> HPET_GENERAL_CAPABILITIES_ID_COUNTER_PERIOD;
     

@@ -169,44 +169,44 @@ char * vfs_get_native_path(const char *path, vfs_mount_t *mount) {
     return native_path_copy;
 }
 
-vfs_file_descriptor_t * vfs_open(const char *path, int flags) {
+status_t vfs_open(const char *path, int flags, vfs_file_descriptor_t *fd) {
     if (path == NULL) {
         panic("vfs_open: path is NULL");
+    }
+    if (fd == NULL) {
+        panic("vfs_open: fd is NULL");
     }
 
     vfs_mount_t *mount = vfs_find_mount(path);
     if (!mount) {
-        return NULL;
+        return FAILURE;
     }
-
-    vfs_file_descriptor_t *fd = (vfs_file_descriptor_t *)kmalloc(sizeof(vfs_file_descriptor_t));
-    if (!fd) {
-        panic("vfs_open: Unable to allocate memory for file descriptor");
-    }
-
     fd->mount = mount;
     fd->position = 0;
     fd->flags = flags;
     fd->native_path = vfs_get_native_path(path, mount);
     if (!fd->native_path) {
-        kfree(fd);
-        panic("vfs_open: Unable to get native path");
+        return FAILURE;
     }
+    fd->valid = 1;
 
-    return fd;
+    return SUCCESS;
 }
 
 
-ssize_t vfs_close(vfs_file_descriptor_t *fd) {
+status_t vfs_close(vfs_file_descriptor_t *fd) {
     if (fd == NULL) {
         panic("vfs_close: fd is NULL");
     }
-
-    if (fd->native_path) {
-        kfree(fd->native_path);
+    if (fd->mount == NULL || fd->mount->ops == NULL) {
+        panic("vfs_close: Invalid mount or close operation");
     }
-    kfree(fd);
-    return 0;
+    if (fd->native_path == NULL) {
+        panic("vfs_close: fd->native_path is NULL");
+    }
+    kfree(fd->native_path);
+    fd->valid = 0;
+    return SUCCESS;
 }
 
 ssize_t vfs_read(vfs_file_descriptor_t *fd, void *buf, size_t count) {
@@ -248,4 +248,15 @@ status_t vfs_fstat(vfs_file_descriptor_t *fd, vfs_stat_t *buf) {
     }
 
     return fd->mount->ops->fstat(fd->mount->major, fd->mount->minor, fd->native_path, buf);
+}
+
+status_t vfs_ioctl(vfs_file_descriptor_t *fd, uint64_t request, void * arg) {
+    if (fd == NULL) {
+        panic("vfs_ioctl: fd is NULL");
+    }
+    if (fd->mount == NULL || fd->mount->ops == NULL || fd->mount->ops->ioctl == NULL) {
+        panic("vfs_ioctl: Invalid mount or ioctl operation");
+    }
+
+    return fd->mount->ops->ioctl(fd->mount->major, fd->mount->minor, fd->native_path, request, arg);
 }

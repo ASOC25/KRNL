@@ -63,6 +63,27 @@ int sys_fstat(int fd, struct stat * buf) {
 int sys_seek(int fd, int offset, int whence) {
     return (int)syscall(6, (uint64_t)fd, (uint64_t)offset, (uint64_t)whence, 0, 0, 0);
 }
+int sys_ioctl(int fd, uint64_t request, void * arg) {
+    return (int)syscall(7, (uint64_t)fd, (uint64_t)request, (uint64_t)arg, 0, 0, 0);
+}
 int sys_exit(int code) {
-    return (int)syscall(7, (uint64_t)code, 0, 0, 0, 0, 0);
+    return (int)syscall(8, (uint64_t)code, 0, 0, 0, 0, 0);
+}
+void * sys_mmap(void * addr, uint64_t length, int prot, int flags, int fd, uint64_t offset) {
+    return (void *)syscall(9, (uint64_t)addr, (uint64_t)length, (uint64_t)prot, (uint64_t)flags, (uint64_t)fd, (uint64_t)offset);
+}
+int sys_munmap(void * addr, uint64_t length) {
+    return (int)syscall(10, (uint64_t)addr, (uint64_t)length, 0, 0, 0, 0);
+}
+int sys_mprotect(void * addr, uint64_t length, int prot) {
+    return (int)syscall(11, (uint64_t)addr, (uint64_t)length, (uint64_t)prot, 0, 0, 0);
+}
+void sys_sched(void) {
+    syscall(12, 0, 0, 0, 0, 0, 0);
+}
+int sys_pread(int fd, void * buf, size_t count, off_t offset) {
+    return (int)syscall(13, (uint64_t)fd, (uint64_t)buf, (uint64_t)count, (uint64_t)offset, 0, 0);
+}
+int sys_tell(int fd) {
+    return (int)syscall(14, (uint64_t)fd, 0, 0, 0, 0, 0);
 }

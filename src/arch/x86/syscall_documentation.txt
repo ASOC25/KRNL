@@ -1,0 +1,70 @@
+mmap(addr, len, prot, flags, fd, offset) -> mapped_addr
+Create a new memory mapping in the virtual address space of the calling process.
+
+Parameters:
+
+addr -> where to map 
+	if == 0: Kernel chooses where
+	if != 0: Kernel takes it as a hint that may be ignored
+
+len -> length of the mapping
+
+flags -> mode of the mapping, we will limit ourselves to:
+	MAP_SHARED: Changes to this mapping are visible to other processes
+	mapping the same region, or if file-backed To the file (We don't
+	require this to be done right away, for that subject msync exists)
+
+	MAP_PRIVATE: Create a copy-on-write mapping. This updates are not
+	visible to other processes or the file.
+	
+	And we also can add the following:
+
+	MAP_ANONYMOUS: The region is not backed by any file. The contents are zero-filled.
+	
+
+prot -> cannot conflict with the open mode of the file and can be
+	PROT_NONE
+	or a bitwise combination of:
+	PROT_EXEC
+	PROT_READ
+	PROT_WRITE
+
+fd -> file descriptor in case we are initializing from a file
+
+offset -> offset into fd (must be aligned to page size), must be zero if MAP_ANONYMOUS
+
+ERRORS
+       EACCES A file descriptor refers to a non-regular file.  Or a file
+              mapping was requested, but fd is not open for reading.  Or
+              MAP_SHARED was requested and PROT_WRITE is set, but fd is
+              not open in read/write (O_RDWR) mode.  Or PROT_WRITE is
+              set, but the file is append-only.
+
+       EAGAIN The file has been locked, or too much memory has been
+              locked (see setrlimit(2)).
+
+       EBADF  fd is not a valid file descriptor (and MAP_ANONYMOUS was
+              not set).
+
+       EINVAL We don't like addr, length, or offset (e.g., they are too
+              large, or not aligned on a page boundary), length was 0,
+	      flags contained none of MAP_PRIVATE, MAP_SHARED, or
+              MAP_SHARED_VALIDATE.
+
+       ENFILE The system-wide limit on the total number of open files has
+              been reached.
+
+       ENODEV The underlying filesystem of the specified file does not
+              support memory mapping.
+
+       ENOMEM No memory is available. or the process's maximum number
+	      of mappings would have been exceeded.  This error can
+	      also occur for munmap(), when unmapping a region in the
+	      middle of an existing mapping, since this results in two
+	      smaller mappings on either side of the region being unmapped
+	      or we don't like addr, because it exceeds the virtual address
+              space of the CPU.
+
+       EPERM  The prot argument asks for PROT_EXEC but the mapped area
+              belongs to a file on a filesystem that was mounted no-exec.
+	      or the operation was prevented by a file seal

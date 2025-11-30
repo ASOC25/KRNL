@@ -7,7 +7,6 @@
 #include <krnl/debug/debug.h>
 
 #define DYNAMIC_LINKER_BASE_ADDRESS ((void*)0x40000000)
-#define VDSO_BASE_ADDRESS            0xFFFFD00000000000
 
 #define AT_NULL   0	/* end of vector */
 #define AT_IGNORE 1	/* entry should be ignored */
@@ -59,7 +58,7 @@ typedef struct loaded_elf {
     uint64_t ld_size;
 } loaded_elf_t;
 
-loaded_elf_t* elf_load_elf(vmm_root * root, const char * filename);
+loaded_elf_t* elf_load_elf(vmm_root_t * root, const char * filename);
 void * loader_create_args(void * stack, uint64_t max_size, char ** argv, char ** envp, struct auxv* auxv);
 
 #endif

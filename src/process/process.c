@@ -40,11 +40,12 @@ void process_open_stdfiles(process_t * process, const char * tty) {
         if (slot < 0) {
             panic("process_open_stdfiles: Unable to allocate fd slot");
         }
-        vfs_file_descriptor_t *newfd = vfs_open(tty, /*O_RDWR*/ 2);
-        if (!newfd) {
+        vfs_file_descriptor_t newfd;
+        status_t st = vfs_open(tty, /*O_RDWR*/ 2, &newfd);
+        if (st != SUCCESS || !newfd.valid) {
             panic("process_open_stdfiles: Unable to open tty for stdfile");
         }
-        process->open_files[slot] = *newfd;
+        process->open_files[slot] = newfd;
         process->open_file_count++;
     }
 }
@@ -116,11 +117,11 @@ process_t * process_create(process_t * parent, const char * filename, const char
     return new_process;
 }
 
-status_t process_thread_context_init(context_t * ctx, vmm_root* root, void * pc, void * stack_top, char ** args, thread_t * thread) {
+status_t process_thread_context_init(context_t * ctx, vmm_root_t* root, void * pc, void * stack_top, char ** args, thread_t * thread) {
     ctx->cpu_ctx.rip = (uint64_t)pc;
     ctx->cpu_ctx.rsp = (uint64_t)stack_top;
     ctx->cpu_ctx.rflags = 0x202; // Interrupts enabled
-    ctx->cpu_ctx.cr3 = (uint64_t)vmm_from_identity_map(root);
+    ctx->cpu_ctx.cr3 = (uint64_t)vmm_from_identity_map((uint64_t)root);
     if (!ctx->cpu_ctx.cr3) {
         panic("context_init: Failed to get CR3 from VMM root");
         return FAILURE;
@@ -243,7 +244,7 @@ thread_t * process_create_thread(process_t * process, void * entry_point) {
 
     farlands_stack_t farlands;
 
-    status_t st = kstackalloc_farlands(process->vmm, new_thread->stack_size, VMM_REGION_U_STACK, VMM_WRITE_BIT | VMM_USER_BIT, &farlands);
+    status_t st = stackalloc(process->vmm, new_thread->stack_size, VMM_REGION_U_STACK, VMM_WRITE_BIT | VMM_USER_BIT, &farlands);
     if (st != SUCCESS) {
         panic("process_create_thread: Failed to allocate user stack");
         return NULL;
@@ -309,7 +310,13 @@ status_t process_destroy_thread(thread_t * thread) {
     }
 
     if (thread->stack) {
-        kstackfree(thread->stack);
+        farlands_stack_t farstack;
+        farstack.top = thread->stack->top;
+        farstack.base = thread->stack->base;
+        farstack.flags = thread->stack->flags;
+        farstack.guard_size = thread->stack->guard_size;
+        process_t * process = (process_t *)thread->process;
+        stackfree(process->vmm, &farstack);
     }
 
     return SUCCESS;

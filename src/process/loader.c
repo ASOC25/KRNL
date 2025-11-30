@@ -265,7 +265,7 @@ status_t parse_elf_file(uint8_t * buffer) {
     return SUCCESS;
 }
 
-status_t allocate_segment(vmm_root* root, uint8_t * elf_datab, Elf64_Phdr * program_header, void* base) {
+status_t allocate_segment(vmm_root_t* root, uint8_t * elf_datab, Elf64_Phdr * program_header, void* base) {
     if (program_header->p_type != PT_LOAD) panic("allocate_segment: Not a loadable segment");
 
     uint64_t vaddr_offset = program_header->p_vaddr & 0xfff;
@@ -282,7 +282,7 @@ status_t allocate_segment(vmm_root* root, uint8_t * elf_datab, Elf64_Phdr * prog
     if (!(program_header->p_flags & PF_X)) perms |= VMM_NX_BIT;
 
     farlands_t farlands;
-    status_t st = kmalloc_farlands(
+    status_t st = malloc(
         root,
         total_pages * 0x1000,
         vaddr,
@@ -302,17 +302,18 @@ status_t allocate_segment(vmm_root* root, uint8_t * elf_datab, Elf64_Phdr * prog
     return SUCCESS;
 }
 
-loaded_elf_t* elf_load_elf(vmm_root * root, const char * filename) {
-    vfs_file_descriptor_t * fd = vfs_open(filename, 0);
-    if(!fd) {
+loaded_elf_t* elf_load_elf(vmm_root_t * root, const char * filename) {
+    vfs_file_descriptor_t fd;
+    status_t st = vfs_open(filename, 0, &fd);
+    if(st != SUCCESS || !fd.valid) {
         panic("elf_load_elf: Failed to open ELF file %s\n", filename);
         return NULL;
     }
 
     vfs_stat_t stat_buf;
-    if (vfs_fstat(fd, &stat_buf) != SUCCESS) {
+    if (vfs_fstat(&fd, &stat_buf) != SUCCESS) {
         panic("elf_load_elf: Failed to stat ELF file %s\n", filename);
-        vfs_close(fd);
+        vfs_close(&fd);
         return NULL;
     }
 
@@ -320,19 +321,19 @@ loaded_elf_t* elf_load_elf(vmm_root * root, const char * filename) {
     uint8_t * elf_datab = (uint8_t *)kmalloc(file_size);
     if (!elf_datab) {
         panic("elf_load_elf: Failed to allocate memory for ELF file %s\n", filename);
-        vfs_close(fd);
+        vfs_close(&fd);
         return NULL;
     }
 
-    ssize_t bytes_read = vfs_read(fd, elf_datab, file_size);
+    ssize_t bytes_read = vfs_read(&fd, elf_datab, file_size);
     if ((size_t)bytes_read != file_size) {
         panic("elf_load_elf: Failed to read complete ELF file %s\n", filename);
         kfree(elf_datab);
-        vfs_close(fd);
+        vfs_close(&fd);
         return NULL;
     }
 
-    vfs_close(fd);
+    vfs_close(&fd);
     if (parse_elf_file(elf_datab) != SUCCESS) {
         kfree(elf_datab);
         return NULL;

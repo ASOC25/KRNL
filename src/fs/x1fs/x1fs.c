@@ -238,6 +238,18 @@ status_t x1fs_fstat(device_major_t major, device_minor_t minor, const char * pat
     return SUCCESS;
 }
 
+status_t x1fs_ioctl(device_major_t major, device_minor_t minor, const char * path, uint64_t request, void * arg) {
+    (void)major;
+    (void)minor;
+    (void)path;
+    (void)request;
+    (void)arg;
+
+    // X1FS does not support any ioctls in this implementation
+    return FAILURE; // Ioctl not supported
+}
+
+
 void x1fs_init(void) {
     vfs_fs_t *x1fs_ops = (vfs_fs_t *)kmalloc(sizeof(vfs_fs_t));
     if (!x1fs_ops) {
@@ -250,6 +262,7 @@ void x1fs_init(void) {
     x1fs_ops->write = x1fs_write;
     x1fs_ops->detect = x1fs_detect;
     x1fs_ops->fstat = x1fs_fstat;
+    x1fs_ops->ioctl = x1fs_ioctl;
     x1fs_ops->next = NULL;
 
     status_t result = vfs_register_fs(x1fs_ops);

@@ -5,7 +5,7 @@
 
 #define MAP_SHARED 0x1
 #define MAP_PRIVATE 0x2
-#define MAP_ANONYMOUS 0x4
+#define MAP_ANONYMOUS 0x20
 
 #define PROT_READ 0x1
 #define PROT_WRITE 0x2
@@ -15,6 +15,26 @@
 #define MS_SYNC 0x0
 #define MS_ASYNC 0x1
 #define MS_INVALIDATE 0x2
+
+#define SEEK_SET 0
+#define SEEK_CUR 1
+#define SEEK_END 2
+
+#define O_WRONLY    0x1
+#define O_RDONLY    0x2
+#define O_RDWR      0x4
+#define O_CREAT     0x8
+#define O_EXCL      0x10
+#define O_NOCTTY    0x20
+#define O_TRUNC     0x40
+#define O_APPEND    0x80
+#define O_NONBLOCK  0x100
+#define O_DSYNC     0x200
+#define O_DIRECT    0x400
+#define O_LARGEFILE 0x800
+#define O_DIRECTORY 0x1000
+#define O_NOFOLLOW  0x2000
+#define O_CLOEXEC   0x4000
 
 struct stat {
     uint64_t st_dev;
@@ -49,3 +69,9 @@ int sys_close(int fd);
 int sys_stat(const char * path, struct stat * buf);
 int sys_fstat(int fd, struct stat * buf);
 int sys_seek(int fd, int offset, int whence);
+void * sys_mmap(void * addr, uint64_t length, int prot, int flags, int fd, uint64_t offset);
+int sys_munmap(void * addr, uint64_t length);
+int sys_mprotect(void * addr, uint64_t length, int prot);
+int sys_ioctl(int fd, uint64_t request, void * arg);
+int sys_exit(int code);
+int sys_tell(int fd);
