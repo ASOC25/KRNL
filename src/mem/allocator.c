@@ -107,7 +107,7 @@ stack_t * kstackalloc(uint64_t size) {
         panic("kstackalloc: Failed to allocate physical memory");
     }
 
-    void * virt_addr = (void*)((uint64_t)VMM_REGION_K_IDENT + (uint64_t)phys_addr); //Map to identity region
+    void * virt_addr = (void*)((uint64_t)VMM_REGION_K_STACK + (uint64_t)phys_addr); //Map to identity region
 
     uint64_t top_address = (uint64_t)(virt_addr + size);
     if (top_address % 0x10) {
@@ -115,11 +115,25 @@ stack_t * kstackalloc(uint64_t size) {
     }
     top_address -= 0x8;
 
-    memset(virt_addr, 0, (size + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE * PMM_PAGE_SIZE);
-    add_allocation(vmm_get_root(), phys_addr, NULL, 0x0, virt_addr, size, 0x3); //RW permisions
+    uint64_t base_address = (uint64_t)virt_addr & ~0xFFF; //Align to page size
+    status_t st = vmm_map_pages(
+        vmm_get_root(),
+        base_address,
+        (uint64_t)phys_addr,
+        (size + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE,
+        PMM_PAGE_SIZE,
+        VMM_WRITE_BIT
+    );
+
+    if (st != SUCCESS) {
+        panic("kstackalloc: Failed to map kernel stack pages");
+    }
+
+    memset((void *)base_address, 0, (size + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE * PMM_PAGE_SIZE);
+    add_allocation(vmm_get_root(), phys_addr, NULL, 0x0, (void*)base_address, size, 0x3); //RW permisions
     stack_t *stk = kmalloc(sizeof(stack_t));
     stk->top = (void *)(top_address);
-    stk->base = (void *)(virt_addr);
+    stk->base = (void *)(base_address);
     stk->flags = VMM_WRITE_BIT;
     return stk;
 }
@@ -243,4 +257,70 @@ void free(vmm_root_t * cr3, void * virtual_address) {
 void stackfree(vmm_root_t * cr3, farlands_stack_t * farstack) {
     (void)cr3;
     (void)farstack;
+}
+
+stack_t * copy_kstack(vmm_root_t * dest_root, stack_t * source) {
+    uint64_t stack_size = ((uint64_t)source->top - (uint64_t)source->base);
+    uint64_t pages = (stack_size + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE;
+    void * phys_addr = pmm_alloc_pages(pages);
+    if (phys_addr == NULL) {
+        panic("copy_stack: Failed to allocate physical memory");
+    }
+    memcpy((void*)vmm_to_identity_map((uint64_t)phys_addr), source->base, pages * PMM_PAGE_SIZE);
+    //Unmap the old stack if it exists and map it again to the new physical address
+    status_t st = vmm_unmap_pages(
+        dest_root,
+        (uint64_t)source->base,
+        pages,
+        PMM_PAGE_SIZE
+    );
+    if (st != SUCCESS) {
+        panic("copy_stack: Failed to unmap old stack pages");
+    }
+
+    st = vmm_map_pages(
+        dest_root,
+        (uint64_t)source->base,
+        (uint64_t)phys_addr,
+        pages,
+        PMM_PAGE_SIZE,
+        source->flags
+    );
+    if (st != SUCCESS) {
+        panic("copy_stack: Failed to map new stack pages");
+    }
+    return source;
+}
+
+farlands_stack_t * copy_stack(vmm_root_t * dest_root, farlands_stack_t * source) {
+    uint64_t stack_size = ((uint64_t)source->top - (uint64_t)source->base);
+    uint64_t pages = (stack_size + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE;
+    void * phys_addr = pmm_alloc_pages(pages);
+    if (phys_addr == NULL) {
+        panic("copy_stack: Failed to allocate physical memory");
+    }
+    memcpy((void*)vmm_to_identity_map((uint64_t)phys_addr), source->base, pages * PMM_PAGE_SIZE);
+    //Unmap the old stack if it exists and map it again to the new physical address
+    status_t st = vmm_unmap_pages(
+        dest_root,
+        (uint64_t)source->base,
+        pages,
+        PMM_PAGE_SIZE
+    );
+    if (st != SUCCESS) {
+        panic("copy_stack: Failed to unmap old stack pages");
+    }
+
+    st = vmm_map_pages(
+        dest_root,
+        (uint64_t)source->base,
+        (uint64_t)phys_addr,
+        pages,
+        PMM_PAGE_SIZE,
+        source->flags
+    );
+    if (st != SUCCESS) {
+        panic("copy_stack: Failed to map new stack pages");
+    }
+    return source;
 }

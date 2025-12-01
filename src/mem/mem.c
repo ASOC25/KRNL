@@ -29,11 +29,6 @@ void mem_init(void) {
         panic("init_vmm: Failed to map device memory");
     }
 
-    st = vmm_map_pages(new_root, VMM_REGION_K_STACK, 0, physical_pages, VMM_PAGE_SIZE_1GB, VMM_WRITE_BIT);
-    if (st != SUCCESS) {
-        panic("init_vmm: Failed to map device memory");
-    }
-
     st = vmm_map_pages(new_root, VMM_REGION_FARLANDS, 0, physical_pages, VMM_PAGE_SIZE_1GB, VMM_WRITE_BIT);
     if (st != SUCCESS) {
         panic("init_vmm: Failed to map farlands memory");

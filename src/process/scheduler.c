@@ -318,7 +318,7 @@ void scheduler_handler(cpu_context_t* ctx, uint8_t cpu_id){
     if (ending_thread) {
         context_save(ending_thread->context, ctx);
     }
-
+    process_t * ending_process = current_process;
     process_t * next_process = scheduler_get_next_process();
     if (!next_process) {
         panic("scheduler_handler: No next process found");
@@ -327,5 +327,11 @@ void scheduler_handler(cpu_context_t* ctx, uint8_t cpu_id){
     if (!next_thread) {
         panic("scheduler_handler: No next thread found");
     }
+
+    kprintf("Scheduler switching from %d to %d\n",
+        ending_process ? ending_process->pid : -1,
+        next_process->pid
+    );
+
     context_restore(next_thread->context, ctx);
 }

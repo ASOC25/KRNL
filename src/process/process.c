@@ -247,14 +247,14 @@ thread_t * duplicate_thread(process_t * parent, thread_t * og) {
     }
     memset(new_thread, 0, sizeof(thread_t));
 
-    new_thread->kstack = kstackalloc(KERNEL_STACK_SIZE);
-    if (!new_thread->kstack) {
-        panic("duplicate_thread: Failed to allocate kernel stack for new thread");
+    new_thread->stack_size = og->stack_size;
+    new_thread->kstack = copy_kstack(parent->vmm, og->kstack);
+    new_thread->ustack = copy_stack(parent->vmm, og->ustack);
+    if (!new_thread->kstack || !new_thread->ustack) {
+        panic("duplicate_thread: Failed to copy stacks for new thread");
         kfree(new_thread);
         return NULL;
     }
-    memset(new_thread->kstack->base, 0, KERNEL_STACK_SIZE);
-    memcpy(new_thread->kstack->base, og->kstack->base, KERNEL_STACK_SIZE);
 
     context_info_t * new_ctx_info = kmalloc(sizeof(context_info_t));
     if (!new_ctx_info) {
@@ -276,7 +276,7 @@ thread_t * duplicate_thread(process_t * parent, thread_t * og) {
         return NULL;
     }
     memset(new_cpu_ctx, 0, sizeof(cpu_context_t));
-    new_cpu_ctx->cr3 = (uint64_t)parent->vmm;
+    new_cpu_ctx->cr3 = (uint64_t)vmm_from_identity_map((uint64_t)parent->vmm);
     new_cpu_ctx->ctx_info = new_ctx_info;
     new_cpu_ctx->rax = og->context->cpu_ctx.rax;
     new_cpu_ctx->rbx = og->context->cpu_ctx.rbx;
@@ -327,9 +327,6 @@ thread_t * duplicate_thread(process_t * parent, thread_t * og) {
     new_thread->context = new_ctx;
     new_thread->entry = og->entry;
     new_thread->process = (void *)parent;
-    new_thread->stack_size = og->stack_size;
-    new_thread->kstack = og->kstack;
-    new_thread->ustack = og->ustack;
 
     return new_thread;
 }
@@ -396,7 +393,7 @@ process_t * process_fork(process_t * parent, thread_t * forking_thread) {
     child->open_file_count = parent->open_file_count;
 
     create_args(child, (const char **)parent->argv, (const char **)parent->envp, &parent->auxv, &parent->auxv_size);
-    forking_thread->context->cpu_ctx.rax = 0; // Child process return value is 0
+    child_thread->context->cpu_ctx.rax = 0; // Child process return value is 0
     return child;
 }
 
@@ -526,7 +523,7 @@ thread_t * process_create_thread(process_t * process, void * entry_point) {
         panic("process_create_thread: Failed to allocate user stack");
         return NULL;
     }
-    vmarea_addforeign(process, new_thread->ustack->base, new_thread->stack_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS);
+
     uint64_t old_top = (uint64_t)new_thread->ustack->handle_top;
     new_thread->ustack->handle_top = loader_create_args(new_thread->ustack->handle_top, new_thread->stack_size, process->argv, process->envp, process->auxv);
     new_thread->ustack->top -= (old_top - (uint64_t)new_thread->ustack->handle_top);
