@@ -24,7 +24,12 @@ void mem_init(void) {
         panic("init_vmm: Failed to map physical memory");
     }
 
-    st = vmm_map_pages(new_root, VMM_REGION_DEVICES, 0, physical_pages, VMM_PAGE_SIZE_1GB, VMM_WRITE_BIT | VMM_CACHE_DISABLE_BIT);
+    st = vmm_map_pages(new_root, VMM_REGION_K_DEVICES, 0, physical_pages, VMM_PAGE_SIZE_1GB, VMM_WRITE_BIT | VMM_CACHE_DISABLE_BIT);
+    if (st != SUCCESS) {
+        panic("init_vmm: Failed to map device memory");
+    }
+
+    st = vmm_map_pages(new_root, VMM_REGION_K_STACK, 0, physical_pages, VMM_PAGE_SIZE_1GB, VMM_WRITE_BIT);
     if (st != SUCCESS) {
         panic("init_vmm: Failed to map device memory");
     }

@@ -3,6 +3,7 @@
 #include <krnl/mem/allocator.h>
 #include <krnl/vfs/vfs.h>
 #include <krnl/debug/debug.h>
+#include <krnl/libraries/std/string.h>
 
 vm_area_t* vmarea_find(process_t* process, void * address) {
     vm_area_t * current = process->vm_areas;
@@ -27,7 +28,7 @@ vm_area_t* vmarea_collides(process_t * process, vm_area_t * vma) {
     return 0;
 }
 
-void vmarea_create(process_t * process, void * start, uint64_t size, uint64_t area_page_size, uint8_t flags, uint8_t prot, int fd, uint64_t offset) {
+vm_area_t * vmarea_create(process_t * process, void * start, uint64_t size, uint64_t area_page_size, uint8_t flags, uint8_t prot, int fd, uint64_t offset) {
     vm_area_t * new_area = (vm_area_t *)kmalloc(sizeof(vm_area_t));
     new_area->start = start;
     new_area->size = size;
@@ -35,9 +36,107 @@ void vmarea_create(process_t * process, void * start, uint64_t size, uint64_t ar
     new_area->flags = flags;
     new_area->prot = prot;
     new_area->fd = fd;
+    new_area->cow = 0;
     new_area->offset = offset;
     new_area->next = process->vm_areas;
     process->vm_areas = new_area;
+    return new_area;
+}
+
+//This has to be called after duplicating the VMM of the process!!!!
+status_t vmarea_fork(process_t * destination, process_t * source) {
+    if (!destination || !source) {
+        panic("vmarea_fork: destination or source is NULL");
+    }
+
+    vm_area_t * current = source->vm_areas;
+    while (current) {
+        vm_area_t * copy = vmarea_create(
+            destination,
+            current->start,
+            current->size,
+            current->page_size,
+            current->flags,
+            current->prot,
+            current->fd,
+            current->offset
+        );
+        if (current->flags & MAP_PRIVATE) {
+            current->cow = 1;
+            copy->cow = 1;
+            uint8_t vmm_flags = VMM_USER_BIT;
+            if (!(current->prot & PROT_EXEC)) vmm_flags |= VMM_NX_BIT;
+            status_t st = vmm_mprotect_pages(
+                (vmm_root_t *)destination->vmm,
+                (uint64_t)current->start,
+                (current->size + current->page_size - 1) / current->page_size,
+                current->page_size,
+                vmm_flags
+            );
+            if (st != SUCCESS) {
+                panic("vmarea_fork: Failed to mprotect pages for copy-on-write");
+            }
+            st = vmm_mprotect_pages(
+                (vmm_root_t *)source->vmm,
+                (uint64_t)current->start,
+                (current->size + current->page_size - 1) / current->page_size,
+                current->page_size,
+                vmm_flags
+            );
+            if (st != SUCCESS) {
+                panic("vmarea_fork: Failed to mprotect pages for copy-on-write");
+            }
+        } else {
+           //Shared mapping, nothing special to do 
+        }
+        current = current->next;
+    }
+
+    return SUCCESS;;
+}
+
+status_t vmarea_try_cow(process_t * process, void * address) {
+    vm_area_t * vma = vmarea_find(process, address);
+    if (!vma) {
+        return FAILURE;
+    }
+    if (!vma->cow) {
+        return FAILURE;
+    }
+
+    uint64_t original_physical;
+    status_t st = vmm_get_physical_address((vmm_root_t *)process->vmm, (uint64_t)vma->start, &original_physical);
+    if (st != SUCCESS) {
+        panic("vmarea_try_cow: Failed to get original physical address");
+    }
+    
+    st = vmm_unmap_pages(
+        (vmm_root_t *)process->vmm,
+        (uint64_t)vma->start,
+        (vma->size + vma->page_size - 1) / vma->page_size,
+        vma->page_size
+    );
+    if (st != SUCCESS) {
+        panic("vmarea_try_cow: Failed to unmap original pages");
+    }
+
+    farlands_t new_farlands;
+    st = malloc(
+        (vmm_root_t *)process->vmm,
+        vma->size,
+        (uint64_t)vma->start,
+        VMM_USER_BIT | ((vma->prot & PROT_WRITE) ? VMM_WRITE_BIT : 0) | ((!(vma->prot & PROT_EXEC)) ? VMM_NX_BIT : 0),
+        &new_farlands
+    );
+
+    if (st != SUCCESS) {
+        panic("vmarea_try_cow: Failed to allocate new page for copy-on-write");
+    }
+
+    //Copy the data
+    memcpy((void*)vma->start ,(void*)vmm_to_identity_map(original_physical), vma->size);
+    vma->cow = 0;
+    return SUCCESS;
 }
 
 void * vmarea_find_space(process_t * process, void * hint, uint64_t size, uint64_t page_size) {
@@ -99,6 +198,11 @@ void vmarea_sync(process_t * process) {
 advance:
         current = current->next;
     }
+}
+
+status_t vmarea_addforeign(process_t * process, void * addr, uint64_t length, uint8_t prot, uint8_t flags) {
+    vmarea_create(process, addr, length, VMM_PAGE_SIZE_4KB, flags, prot, -1, 0);
+    return SUCCESS;
 }
 
 status_t vmarea_remove(process_t * process, void * address) {

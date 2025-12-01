@@ -558,3 +558,10 @@ status_t vm_mprotect_address(vm_dir * root, uint64_t virtual_address, uint8_t ne
 
     return SUCCESS;
 }
+
+status_t vm_deallocate_vspace(vm_dir * root) {
+    (void)root;
+    //panic("vm_deallocate_vspace: Not yet implemented");
+    return SUCCESS;
+    //Remove all mappings and free all page tables
+}

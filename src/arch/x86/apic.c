@@ -226,9 +226,9 @@ void apic_start_lapic_timer(void){
     write_lapic_register(lapic_address, local_apic_register_offset_divide, 4);        
     write_lapic_register(lapic_address, local_apic_register_offset_initial_count, 0xffffffff);
 
-    hpet_sleep(10000);
+    hpet_sleep(1000000);
     
-    uint32_t tick10ms = 0xffffffff - read_lapic_register(lapic_address, local_apic_register_offset_curent_count);
+    uint32_t tick1000ms = 0xffffffff - read_lapic_register(lapic_address, local_apic_register_offset_curent_count);
 
     struct local_apic_interrupt_register timer_registers;
 
@@ -243,7 +243,7 @@ void apic_start_lapic_timer(void){
     
     uint32_t timer = read_lapic_register(lapic_address, local_apic_register_offset_lvt_timer);
     write_lapic_register(lapic_address, local_apic_register_offset_lvt_timer, create_register_value_interrupts(timer_registers) | (timer & 0xfffcef00));    
-    write_lapic_register(lapic_address, local_apic_register_offset_initial_count, (tick10ms / 10)); 
+    write_lapic_register(lapic_address, local_apic_register_offset_initial_count, (tick1000ms / 10)); 
 }
 
 void apic_init(void) {

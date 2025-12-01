@@ -13,7 +13,6 @@ struct allocation {
     //uint64_t page_size; //All pages allocated here are 0x1000 bytes
     uint64_t size;
     uint8_t permisions;
-    uint64_t guard_base; //Only used for stacks that grow
 
     struct allocation * next;
     struct allocation * prev;
@@ -27,7 +26,7 @@ struct alloc_buffer {
 struct allocation * allocations_head = NULL;
 struct alloc_buffer current_alloc_buffer = {0};
 
-void add_allocation(vmm_root_t* root, void * physical_address, vmm_root_t * access_root, void * access_address, void * virtual_address, uint64_t size, uint8_t permisions, uint64_t guard_base) {
+void add_allocation(vmm_root_t* root, void * physical_address, vmm_root_t * access_root, void * access_address, void * virtual_address, uint64_t size, uint8_t permisions) {
     if (current_alloc_buffer.buffer_base_address == NULL || current_alloc_buffer.buffer_free_allocations == 0) {
         //Initialize the allocation buffer
         current_alloc_buffer.buffer_base_address = (void*)vmm_to_identity_map((uint64_t)pmm_alloc_pages(1)); //Allocate 1 page for the allocation buffer
@@ -42,7 +41,6 @@ void add_allocation(vmm_root_t* root, void * physical_address, vmm_root_t * acce
     new_allocation->virtual_address = virtual_address;
     new_allocation->size = size;
     new_allocation->permisions = permisions;
-    new_allocation->guard_base = guard_base;
     new_allocation->next = allocations_head;
     new_allocation->prev = NULL;
 
@@ -98,40 +96,30 @@ void * kmalloc(uint64_t size) {
     }
     void * virt_addr = (void*)((uint64_t)VMM_REGION_K_IDENT + (uint64_t)phys_addr); //Map to identity region
     memset(virt_addr, 0, (size + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE * PMM_PAGE_SIZE);
-    add_allocation(vmm_get_root(), phys_addr, NULL, 0x0, virt_addr, size, 0x3, 0x0); //RW permisions, no guard
+    add_allocation(vmm_get_root(), phys_addr, NULL, 0x0, virt_addr, size, 0x3); //RW permisions
     return virt_addr;
 }
 
-//VERY IMPORTANT: WE ASUME THAT STACKS GROW DOWNWARDS, THIS MEANS THAT THE GUARD PAGE IS AT THE LOW ADDRESSES END OF THE STACK
-//Stackalloc cannot use identity mapping as we need to support guard pages
-stack_t * kstackalloc(uint64_t initial_size) {
-    uint64_t pages = (initial_size + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE;
-    uint64_t phys_addr = (uint64_t)pmm_alloc_pages(pages + 1); //Allocate an extra page for the guard
-    //When the guard page is accessed, a page fault will occur, we will handle it by growing the stack
+//VERY IMPORTANT: WE ASUME THAT STACKS GROW DOWNWARDS, ALSO KERNEL STACKS CANNOT GROW
+stack_t * kstackalloc(uint64_t size) {
+    void * phys_addr = pmm_alloc_pages((size + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE);
     if (phys_addr == 0x0) {
         panic("kstackalloc: Failed to allocate physical memory");
     }
 
-    uint64_t virt_addr = VMM_REGION_K_STACK + phys_addr; //Map stacks to a specific region
-    status_t st = vmm_map_pages(
-        vmm_get_root(),
-        virt_addr + PMM_PAGE_SIZE,
-        phys_addr + PMM_PAGE_SIZE, //Skip the guard page
-        pages,
-        PMM_PAGE_SIZE,
-        VMM_WRITE_BIT
-    );
+    void * virt_addr = (void*)((uint64_t)VMM_REGION_K_IDENT + (uint64_t)phys_addr); //Map to identity region
 
-    if (st != SUCCESS) {
-        panic("kstackalloc: Failed to map stack pages");
+    uint64_t top_address = (uint64_t)(virt_addr + size);
+    if (top_address % 0x10) {
+        top_address -= top_address % 0x10;
     }
-    memset((void *)(virt_addr + PMM_PAGE_SIZE), 0, pages * PMM_PAGE_SIZE);
-    add_allocation(vmm_get_root(), (void*)(phys_addr + PMM_PAGE_SIZE), NULL, 0x0, (void*)(virt_addr + PMM_PAGE_SIZE), initial_size, VMM_WRITE_BIT, virt_addr); //Guard page at the base of the stack
+    top_address -= 0x8;
 
+    memset(virt_addr, 0, (size + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE * PMM_PAGE_SIZE);
+    add_allocation(vmm_get_root(), phys_addr, NULL, 0x0, virt_addr, size, 0x3); //RW permisions
     stack_t *stk = kmalloc(sizeof(stack_t));
-    stk->top = (void *)(virt_addr + PMM_PAGE_SIZE + pages * PMM_PAGE_SIZE);
-    stk->base = (void *)(virt_addr + PMM_PAGE_SIZE);
-    stk->guard_size = PMM_PAGE_SIZE;
+    stk->top = (void *)(top_address);
+    stk->base = (void *)(virt_addr);
     stk->flags = VMM_WRITE_BIT;
     return stk;
 }
@@ -154,35 +142,7 @@ void kfree(void * virtual_address) {
 }
 
 void kstackfree(stack_t * stk) {
-    //Find the allocation
-    struct allocation * current = allocations_head;
-    vmm_root_t * cr3 = vmm_get_root();
-
-    while (current != NULL) {
-        if (current->virtual_address == stk->base && current->root == cr3) {
-            //Free the physical pages
-            pmm_free_pages(current->physical_address - current->guard_base, ((current->size + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE) + 1); //Free guard page too
-            
-            //Unmap the pages
-            status_t st = vmm_unmap_pages(
-                cr3,
-                (uint64_t)(stk->base - stk->guard_size),
-                ((current->size + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE) + 1,
-                PMM_PAGE_SIZE
-            );
-
-            if (st != SUCCESS) {
-                panic("kstackfree: Failed to unmap stack pages");
-            }
-
-            //remove the allocation from the list
-            remove_allocation(NULL, stk->base);
-            kfree(stk);
-            return;
-        }
-        current = current->next;
-    }
-    panic("kstackfree: Allocation not found for stack at base pointer %p\n", stk->base);
+    (void)stk;
 }
 
 status_t malloc(vmm_root_t * root, uint64_t size, uint64_t vaddr, uint8_t flags, farlands_t * farlands) {
@@ -210,44 +170,54 @@ status_t malloc(vmm_root_t * root, uint64_t size, uint64_t vaddr, uint8_t flags,
     farlands->flags = flags;
     memset(farlands->handle, 0, (size + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE * PMM_PAGE_SIZE);
 
-    add_allocation(root, phys_addr, vmm_get_root(), farlands->handle, farlands->address, size, flags, 0x0);
+    add_allocation(root, phys_addr, vmm_get_root(), farlands->handle, farlands->address, size, flags);
 
     return SUCCESS;
 }
 
 status_t stackalloc(vmm_root_t * root, uint64_t size, uint64_t vaddr, uint8_t flags, farlands_stack_t * farstack) {
     uint64_t pages = (size + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE;
-    uint64_t phys_addr = (uint64_t)pmm_alloc_pages(pages + 1); //Allocate an extra page for the guard
-    //When the guard page is accessed, a page fault will occur, we will handle it by growing the stack
-    if (phys_addr == 0x0) {
-        panic("kstackalloc: Failed to allocate physical memory");
+    void * phys_addr = pmm_alloc_pages(pages);
+    if (phys_addr == NULL) {
+        panic("stackalloc: Failed to allocate physical memory");
     }
-    uint64_t vaddr_bottom = vaddr - (pages * PMM_PAGE_SIZE) - PMM_PAGE_SIZE; //Calculate the bottom of the stack including guard
+
     status_t st = vmm_map_pages(
         root,
-        vaddr_bottom,
-        phys_addr + PMM_PAGE_SIZE, //Skip the guard page
+        vaddr,
+        (uint64_t)phys_addr,
         pages,
         PMM_PAGE_SIZE,
         flags
     );
 
     if (st != SUCCESS) {
-        panic("kstackalloc: Failed to map stack pages");
+        panic("stackalloc: Failed to map user pages");
     }
 
-    uint64_t handle_base = (VMM_REGION_FARLANDS + phys_addr + PMM_PAGE_SIZE);
-    uint64_t handle_top = (VMM_REGION_FARLANDS + phys_addr + PMM_PAGE_SIZE + pages * PMM_PAGE_SIZE);
-
-    farstack->top = (void *)(vaddr_bottom + PMM_PAGE_SIZE + pages * PMM_PAGE_SIZE);
-    farstack->base = (void *)(vaddr_bottom + PMM_PAGE_SIZE);
-    farstack->handle_top = (void *)(handle_top);
-    farstack->handle_base = (void *)(handle_base);
+    farstack->base = (void *)(vaddr);
+    farstack->top = (void *)(vaddr + size);
+    farstack->handle_base = (void *)(phys_addr + VMM_REGION_FARLANDS);
+    farstack->handle_top = (void *)((uint64_t)farstack->handle_base + size);
     farstack->flags = flags;
-    farstack->guard_size = PMM_PAGE_SIZE;
     memset(farstack->handle_base, 0, pages * PMM_PAGE_SIZE);
 
-    add_allocation(root, (void *)(phys_addr + PMM_PAGE_SIZE), vmm_get_root(), (void *)(handle_base), (void *)(vaddr_bottom + PMM_PAGE_SIZE), size, flags, vaddr_bottom); //Guard page at the base of the stack
+    //Make sure top and handle top are aligned to 16 bytes
+    //uint64_t aligned_top = (uint64_t)farstack->top;
+    //if (aligned_top % 0x10) {
+    //    aligned_top -= aligned_top % 0x10;
+    //}
+    //aligned_top -= 0x8;
+    //farstack->top = (void *)aligned_top;
+//
+    //uint64_t aligned_handle_top = (uint64_t)farstack->handle_top;
+    //if (aligned_handle_top % 0x10) {
+    //    aligned_handle_top -= aligned_handle_top % 0x10;
+    //}
+    //aligned_handle_top -= 0x8;
+    //farstack->handle_top = (void *)aligned_handle_top;
+
+    add_allocation(root, phys_addr, vmm_get_root(), farstack->handle_base, farstack->base, size, flags);
     return SUCCESS;
 }
 
@@ -271,33 +241,6 @@ void free(vmm_root_t * cr3, void * virtual_address) {
 }
 
 void stackfree(vmm_root_t * cr3, farlands_stack_t * farstack) {
-    //Find the allocation
-    struct allocation * current = allocations_head;
-
-    while (current != NULL) {
-        if (current->virtual_address == farstack->base && current->root == cr3) {
-            //Free the physical pages
-            if (should_deallocate_pmm(cr3, current->physical_address)) {
-                pmm_free_pages(current->physical_address - current->guard_base, ((current->size + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE) + 1); //Free guard page too
-            }
-
-            //Unmap the pages
-            status_t st = vmm_unmap_pages(
-                cr3,
-                (uint64_t)(farstack->base - farstack->guard_size),
-                ((current->size + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE) + 1,
-                PMM_PAGE_SIZE
-            );
-
-            if (st != SUCCESS) {
-                panic("stackfree: Failed to unmap stack pages");
-            }
-
-            //remove the allocation from the list
-            remove_allocation(cr3, farstack->base);
-            return;
-        }
-        current = current->next;
-    }
-    panic("stackfree: Allocation not found for stack at base pointer %p\n", farstack->base);
+    (void)cr3;
+    (void)farstack;
 }

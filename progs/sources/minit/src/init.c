@@ -42,8 +42,20 @@ int main(int argc, char* argv[], char* envp[]) {
     printf("\n");
     sys_munmap(buffer, size + 1);
     sys_close(fd);
-    printf("Exiting userspace program.\n");
-    sys_exit(0);
+
+    printf("Testing fork and execve:\n");
+    int pid = sys_fork();
+    if (pid < 0) {
+        printf("Fork failed.\n");
+        sys_exit(1);
+    } else if (pid == 0) {
+        // Child process
+        printf("Child process!\n");
+        sys_exit(1);
+    } else {
+        // Parent process
+        printf("Parent process, child PID: %d\n", pid);
+    }
     while (1);
     return 0;
 }

@@ -83,7 +83,7 @@ vmm_root_t * vmm_duplicate_fullspace(vmm_root_t * original) {
 }
 
 void vmm_free_root(vmm_root_t * root) {
-    vm_flush_tlb_entry((uint64_t)root);
+    vm_deallocate_vspace((vm_dir *)root);
 }
 
 uint64_t vmm_to_identity_map(uint64_t address) {
@@ -95,11 +95,11 @@ uint64_t vmm_from_identity_map(uint64_t address) {
 }
 
 uint64_t vmm_to_device_map(uint64_t address) {
-    return (uint64_t)(address + VMM_REGION_DEVICES);
+    return (uint64_t)(address + VMM_REGION_K_DEVICES);
 }
 
 uint64_t vmm_from_device_map(uint64_t address) {
-    return (uint64_t)(address - VMM_REGION_DEVICES);
+    return (uint64_t)(address - VMM_REGION_K_DEVICES);
 }
 
 status_t vmm_get_physical_address(vmm_root_t * root, uint64_t virtual_address, uint64_t * physical_address) {

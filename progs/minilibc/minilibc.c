@@ -87,3 +87,12 @@ int sys_pread(int fd, void * buf, size_t count, off_t offset) {
 int sys_tell(int fd) {
     return (int)syscall(14, (uint64_t)fd, 0, 0, 0, 0, 0);
 }
+int sys_fork() {
+    return (int)syscall(15, 0, 0, 0, 0, 0, 0);
+}
+int sys_execve(const char * filename, char ** argv, char ** envp) {
+    return (int)syscall(16, (uint64_t)filename, (uint64_t)argv, (uint64_t)envp, 0, 0, 0);
+}
+int sys_waitpid(int pid, int * status, int options) {
+    return (int)syscall(17, (uint64_t)pid, (uint64_t)status, (uint64_t)options, 0, 0, 0);
+}

@@ -4,6 +4,7 @@
 #include <krnl/libraries/std/elf.h>
 #include <krnl/mem/vmm.h>
 #include <krnl/vfs/vfs.h>
+#include <krnl/process/process.h>
 #include <krnl/debug/debug.h>
 
 #define DYNAMIC_LINKER_BASE_ADDRESS ((void*)0x40000000)
@@ -58,7 +59,7 @@ typedef struct loaded_elf {
     uint64_t ld_size;
 } loaded_elf_t;
 
-loaded_elf_t* elf_load_elf(vmm_root_t * root, const char * filename);
+loaded_elf_t* elf_load_elf(process_t * process, const char * filename);
 void * loader_create_args(void * stack, uint64_t max_size, char ** argv, char ** envp, struct auxv* auxv);
 
 #endif

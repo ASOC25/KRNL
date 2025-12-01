@@ -285,6 +285,52 @@ int64_t syscall_schedule_yield(thread_t * thread, cpu_context_t * context) {
     return 0;
 }
 
+int64_t syscall_fork(thread_t * thread, cpu_context_t * context) {
+    (void)context; // Unused
+    process_t * parent_proc = (process_t *)thread->process;
+    process_t * child_proc = process_fork(parent_proc, thread);
+    if (!child_proc) {
+        return -EAGAIN;
+    }
+    status_t std = scheduler_add_process(child_proc, SCHEDULER_QUEUE_RUNABLE);
+    if (std != SUCCESS) {
+        process_destroy(child_proc);
+        return -EAGAIN;
+    }
+
+    return (int64_t)child_proc->pid;
+}
+
+int64_t syscall_execve(thread_t * thread, cpu_context_t * context) {
+    const char *filename = (const char *)SYSCALL_ARG0(context);
+    const char ** argv = (const char **)SYSCALL_ARG1(context);
+    const char ** envp = (const char **)SYSCALL_ARG2(context);
+    process_t * proc = (process_t *)thread->process;
+    status_t st = process_execve(proc, filename, argv, envp);
+    if (st != SUCCESS) {
+        return -EIO;
+    }
+    panic("syscall_execve: Returned from process_execve");
+    return 0; // Should not reach here on success
+}
+
+int64_t syscall_waitpid(thread_t * thread, cpu_context_t * context) {
+    int pid = (int)SYSCALL_ARG0(context);
+    int * status = (int *)SYSCALL_ARG1(context);
+    int options = (int)SYSCALL_ARG2(context);
+    process_t * proc = (process_t *)thread->process;
+
+    if (pid < -1 || pid == 0) {
+        return -EINVAL;
+    }
+
+    status_t st = process_waitpid(proc, pid, status, options);
+    if (st != SUCCESS) {
+        return -ECHILD;
+    }
+    return (int64_t)pid;
+}
+
 static syscall_handler_t handlers[SYS_COUNT] = { 
     syscall_read, //0
     syscall_write,
@@ -300,16 +346,16 @@ static syscall_handler_t handlers[SYS_COUNT] = {
     syscall_mprotect,
     syscall_schedule_yield,
     syscall_pread, //13
-    syscall_tell
+    syscall_tell,
+    syscall_fork, //15
+    syscall_execve,
+    syscall_waitpid
+
 /*
     syscall_dup,
     syscall_dup2,
     syscall_nanosleep,
     syscall_getpid,
-    syscall_fork,
-    syscall_execve,
-    syscall_exit,
-    syscall_waitpid,
     syscall_kill,
     syscall_fcntl,
     syscall_chdir,

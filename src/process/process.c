@@ -9,6 +9,7 @@
 #include <krnl/libraries/std/string.h>
 #include <krnl/mem/allocator.h>
 #include <krnl/process/loader.h>
+#include <krnl/mem/mmap.h>
 
 extern void set_cpu_fs_base(uint64_t base);
 
@@ -33,6 +34,60 @@ int process_allocate_fd_slot(process_t *proc) {
     return -1;
 }
 
+status_t process_waitpid(process_t * proc, int pid, int * status, int options) {
+    if (!proc) {
+        return FAILURE;
+    }
+    (void)pid;
+    (void)status;
+    (void)options;
+    panic("process_waitpid: Not yet implemented");
+    return SUCCESS;
+}
+
+void create_args(process_t * process, const char ** argv, const char ** envp, struct auxv ** out_auxv, uint64_t * out_auxv_size) {
+    //Allocate and build in new buffers
+
+    //Copy argv
+    int argc = 0;
+    while (argv && argv[argc]) {
+        argc++;
+    }
+    char ** new_argv = kmalloc((argc + 1) * sizeof(char *));
+    for (int i = 0; i < argc; i++) {
+        size_t len = strlen(argv[i]);
+        new_argv[i] = kmalloc(len + 1);
+        strcpy(new_argv[i], argv[i]);
+    }
+    new_argv[argc] = NULL;
+    //Copy envp
+    int envc = 0;
+    while (envp && envp[envc]) {
+        envc++;
+    }
+    char ** new_envp = kmalloc((envc + 1) * sizeof(char *));
+    for (int i = 0; i < envc; i++) {
+        size_t len = strlen(envp[i]);
+        new_envp[i] = kmalloc(len + 1);
+        strcpy(new_envp[i], envp[i]);
+    }
+    new_envp[envc] = NULL;
+    //Create auxv and copy out_auxv_size entries, include null entries
+    struct auxv * new_auxv = NULL;
+    uint64_t auxv_size = 0;
+    if (out_auxv && out_auxv_size && *out_auxv && *out_auxv_size > 0) {
+        auxv_size = *out_auxv_size;
+        new_auxv = kmalloc(sizeof(struct auxv) * auxv_size);
+        for (uint64_t i = 0; i < auxv_size; i++) {
+            new_auxv[i] = (*out_auxv)[i];
+        }
+    }
+    process->argv = new_argv;
+    process->envp = new_envp;
+    process->auxv = new_auxv;
+    process->auxv_size = auxv_size;
+}
+
 void process_open_stdfiles(process_t * process, const char * tty) {
     // Open stdin, stdout, stderr to the given tty
     for (int fd = 0; fd < 3; fd++) {
@@ -50,7 +105,7 @@ void process_open_stdfiles(process_t * process, const char * tty) {
     }
 }
 
-process_t * process_create(process_t * parent, const char * filename, const char * tty, char ** argv, char ** envp) {
+process_t * process_create(process_t * parent, const char * filename, const char * tty, const char ** argv, const char ** envp) {
     if (!parent) {
         return NULL;
     }
@@ -73,14 +128,13 @@ process_t * process_create(process_t * parent, const char * filename, const char
         return NULL;
     }
 
-    loaded_elf_t * elf = elf_load_elf(new_process->vmm, filename);
+    loaded_elf_t * elf = elf_load_elf(new_process, filename);
     if (!elf) {
         panic("process_init: Failed to load /init.elf");
     }
-    new_process->auxv = elf->auxv;
-    new_process->auxv_size = elf->auxv_size;
-    new_process->argv = argv;
-    new_process->envp = envp;
+
+    create_args(new_process, argv, envp, &elf->auxv, &elf->auxv_size);
+
     new_process->binary_entry = (void *)elf->ehdr->e_entry;
     new_process->thread_count = 0;
     new_process->current_thread = NULL;
@@ -111,13 +165,10 @@ process_t * process_create(process_t * parent, const char * filename, const char
         new_process->parent = parent;
     }
 
-    new_process->argv = argv;
-    new_process->envp = envp;
-    //Auxv
     return new_process;
 }
 
-status_t process_thread_context_init(context_t * ctx, vmm_root_t* root, void * pc, void * stack_top, char ** args, thread_t * thread) {
+status_t process_init_thread_context(context_t * ctx, vmm_root_t* root, void * pc, void * stack_top, char ** args, thread_t * thread) {
     ctx->cpu_ctx.rip = (uint64_t)pc;
     ctx->cpu_ctx.rsp = (uint64_t)stack_top;
     ctx->cpu_ctx.rflags = 0x202; // Interrupts enabled
@@ -147,7 +198,7 @@ status_t process_thread_context_init(context_t * ctx, vmm_root_t* root, void * p
     ctx->cpu_ctx.ctx_info->thread = thread;
     ctx->cpu_ctx.ctx_info->cs = ctx->cpu_ctx.cs;
     ctx->cpu_ctx.ctx_info->ss = ctx->cpu_ctx.ss;
-    ctx->cpu_ctx.ctx_info->kernel_stack = kstackalloc(KERNEL_STACK_SIZE);
+    ctx->cpu_ctx.ctx_info->kernel_stack = thread->kstack->top;
     if (!ctx->cpu_ctx.ctx_info->kernel_stack) {
         panic("context_init: Failed to allocate kernel stack");
         return FAILURE;
@@ -182,6 +233,221 @@ void context_restore(context_t* ctx, cpu_context_t* cpu_ctx){
     simd_restore_context(ctx->simd_ctx);
     set_cpu_fs_base(ctx->fs_base);
     memcpy(cpu_ctx, &ctx->cpu_ctx, sizeof(cpu_context_t));
+}
+
+thread_t * duplicate_thread(process_t * parent, thread_t * og) {
+    if (!parent || !og) {
+        panic("duplicate_thread: parent or og thread is NULL");
+    }
+
+    thread_t * new_thread = kmalloc(sizeof(thread_t));
+    if (!new_thread) {
+        panic("duplicate_thread: Failed to allocate memory for new thread");
+        return NULL;
+    }
+    memset(new_thread, 0, sizeof(thread_t));
+
+    new_thread->kstack = kstackalloc(KERNEL_STACK_SIZE);
+    if (!new_thread->kstack) {
+        panic("duplicate_thread: Failed to allocate kernel stack for new thread");
+        kfree(new_thread);
+        return NULL;
+    }
+    memset(new_thread->kstack->base, 0, KERNEL_STACK_SIZE);
+    memcpy(new_thread->kstack->base, og->kstack->base, KERNEL_STACK_SIZE);
+
+    context_info_t * new_ctx_info = kmalloc(sizeof(context_info_t));
+    if (!new_ctx_info) {
+        panic("duplicate_thread: Failed to allocate memory for context_info_t");
+        kfree(new_thread);
+        return NULL;
+    }
+    memcpy(new_ctx_info, og->context->cpu_ctx.ctx_info, sizeof(context_info_t));
+    new_ctx_info->thread = new_thread;
+    new_ctx_info->kernel_stack = new_thread->kstack->top;
+    new_ctx_info->cs = og->context->cpu_ctx.ctx_info->cs;
+    new_ctx_info->ss = og->context->cpu_ctx.ctx_info->ss;
+
+    cpu_context_t * new_cpu_ctx = kmalloc(sizeof(cpu_context_t));
+    if (!new_cpu_ctx) {
+        panic("duplicate_thread: Failed to allocate memory for cpu_context_t");
+        kfree(new_ctx_info);
+        kfree(new_thread);
+        return NULL;
+    }
+    memset(new_cpu_ctx, 0, sizeof(cpu_context_t));
+    new_cpu_ctx->cr3 = (uint64_t)parent->vmm;
+    new_cpu_ctx->ctx_info = new_ctx_info;
+    new_cpu_ctx->rax = og->context->cpu_ctx.rax;
+    new_cpu_ctx->rbx = og->context->cpu_ctx.rbx;
+    new_cpu_ctx->rcx = og->context->cpu_ctx.rcx;
+    new_cpu_ctx->rdx = og->context->cpu_ctx.rdx;
+    new_cpu_ctx->rsi = og->context->cpu_ctx.rsi;
+    new_cpu_ctx->rdi = og->context->cpu_ctx.rdi;
+    new_cpu_ctx->rbp = og->context->cpu_ctx.rbp;
+    new_cpu_ctx->r8 = og->context->cpu_ctx.r8;
+    new_cpu_ctx->r9 = og->context->cpu_ctx.r9;
+    new_cpu_ctx->r10 = og->context->cpu_ctx.r10;
+    new_cpu_ctx->r11 = og->context->cpu_ctx.r11;
+    new_cpu_ctx->r12 = og->context->cpu_ctx.r12;
+    new_cpu_ctx->r13 = og->context->cpu_ctx.r13;
+    new_cpu_ctx->r14 = og->context->cpu_ctx.r14;
+    new_cpu_ctx->r15 = og->context->cpu_ctx.r15;
+
+    new_cpu_ctx->interrupt_number = og->context->cpu_ctx.interrupt_number;
+    new_cpu_ctx->error_code = og->context->cpu_ctx.error_code;
+
+    new_cpu_ctx->rip = og->context->cpu_ctx.rip;
+    new_cpu_ctx->cs = og->context->cpu_ctx.cs;
+    new_cpu_ctx->rflags = og->context->cpu_ctx.rflags;
+    new_cpu_ctx->rsp = og->context->cpu_ctx.rsp;
+    new_cpu_ctx->ss = og->context->cpu_ctx.ss;
+
+    context_t * new_ctx = kmalloc(sizeof(context_t));
+    if (!new_ctx) {
+        panic("duplicate_thread: Failed to allocate memory for context_t");
+        kfree(new_cpu_ctx);
+        kfree(new_ctx_info);
+        kfree(new_thread);
+        return NULL;
+    }
+    memset(new_ctx, 0, sizeof(context_t));
+    new_ctx->cpu_ctx = *new_cpu_ctx;
+    new_ctx->fs_base = og->context->fs_base;
+    new_ctx->simd_ctx = kmalloc(512);
+    if (!new_ctx->simd_ctx) {
+        panic("duplicate_thread: Failed to allocate memory for SIMD context");
+        kfree(new_ctx);
+        kfree(new_cpu_ctx);
+        kfree(new_ctx_info);
+        kfree(new_thread);
+        return NULL;
+    }
+    memcpy(new_ctx->simd_ctx, og->context->simd_ctx, 512);
+    new_thread->context = new_ctx;
+    new_thread->entry = og->entry;
+    new_thread->process = (void *)parent;
+    new_thread->stack_size = og->stack_size;
+    new_thread->kstack = og->kstack;
+    new_thread->ustack = og->ustack;
+
+    return new_thread;
+}
+
+process_t * process_fork(process_t * parent, thread_t * forking_thread) {
+    if (!parent || !forking_thread) {
+        return NULL;
+    }
+
+    process_t * child = kmalloc(sizeof(process_t));
+    if (!child) {
+        panic("process_fork: Failed to allocate memory for child process");
+        return NULL;
+    }
+    memset(child, 0, sizeof(process_t));
+    vmarea_sync(parent);
+
+    if (!parent->vmm) {
+        panic("process_fork: Parent process has no VMM");
+        kfree(child);
+        return NULL;
+    } else {
+        child->vmm = vmm_duplicate_fullspace(parent->vmm);
+        if (!child->vmm) {
+            panic("process_fork: Failed to duplicate VMM for child process");
+            kfree(child);
+            return NULL;
+        }
+    }
+
+    status_t st = vmarea_fork(child, parent);
+    if (st != SUCCESS) {
+        panic("process_fork: Failed to duplicate VM areas for child process");
+        vmm_free_root(child->vmm);
+        kfree(child);
+        return NULL;
+    }
+
+    //duplicate only forking_thread
+    thread_t * child_thread = duplicate_thread(child, forking_thread);
+    if (!child_thread) {
+        panic("process_fork: Failed to duplicate thread for child process");
+        vmarea_remove_all(child);
+        vmm_free_root(child->vmm);
+        kfree(child);
+        return NULL;
+    }
+
+    child->threads[0] = *child_thread;
+    child->thread_count = 1;
+    child->main_thread = &child->threads[0];
+    child->current_thread = &child->threads[0];
+    child->pid = -1; // Will be set by scheduler
+    child->ppid = parent->pid;
+    child->uid = parent->uid;
+    child->gid = parent->gid;
+    child->nice = parent->nice;
+    child->current_nice = parent->current_nice;
+    child->binary_entry = parent->binary_entry;
+    child->exit_code = 0;
+    for (int i = 0; i < parent->open_file_count; i++) {
+        child->open_files[i] = parent->open_files[i];
+    }
+    child->open_file_count = parent->open_file_count;
+
+    create_args(child, (const char **)parent->argv, (const char **)parent->envp, &parent->auxv, &parent->auxv_size);
+    forking_thread->context->cpu_ctx.rax = 0; // Child process return value is 0
+    return child;
+}
+
+status_t process_execve(process_t * process, const char * filename, const char ** argv, const char ** envp) {
+    if (!process) {
+        panic("process_execve: process is NULL");
+        return FAILURE;
+    }
+
+    process->vmm = vmm_duplicate_kspace();
+    if (!process->vmm) {
+        panic("process_execve: Failed to duplicate kernel space VMM");
+        return FAILURE;
+    }
+    vmarea_remove_all(process);
+
+    loaded_elf_t * elf = elf_load_elf(process, filename);
+    if (!elf) {
+        panic("process_execve: Failed to load ELF binary");
+        return FAILURE;
+    }
+
+    create_args(process, argv, envp, &elf->auxv, &elf->auxv_size);
+
+    process->binary_entry = (void *)elf->ehdr->e_entry;
+
+    thread_t * new_thread = process_create_thread(process, process->binary_entry);
+    if (!new_thread) {
+        panic("process_execve: Failed to create main thread");
+        return FAILURE;
+    }
+
+    process->main_thread = new_thread;
+    process->current_thread = new_thread;
+    process->threads[0] = *new_thread;
+    process->thread_count = 1;
+
+    status_t st = process_init_thread_context(
+        new_thread->context,
+        process->vmm,
+        process->binary_entry,
+        (void *)new_thread->ustack->top,
+        process->argv,
+        new_thread
+    );
+
+    if (st != SUCCESS) {
+        panic("process_execve: Failed to initialize main thread context");
+    }
+
+    return SUCCESS;
 }
 
 void parse_stack(void * stack) {
@@ -242,34 +508,34 @@ thread_t * process_create_thread(process_t * process, void * entry_point) {
     new_thread->entry = entry_point;
     new_thread->stack_size = NEW_PROCESS_STACK_SIZE; // 16 KB stack
 
-    farlands_stack_t farlands;
+    new_thread->kstack = kstackalloc(KERNEL_STACK_SIZE);
+    if (!new_thread->kstack) {
+        panic("context_init: Failed to allocate kernel stack for process");
+        return NULL;
+    }
+    memset(new_thread->kstack->base, 0, KERNEL_STACK_SIZE);
 
-    status_t st = stackalloc(process->vmm, new_thread->stack_size, VMM_REGION_U_STACK, VMM_WRITE_BIT | VMM_USER_BIT, &farlands);
+    new_thread->ustack = kmalloc(sizeof(farlands_stack_t));
+    if (!new_thread->ustack) {
+        panic("process_create_thread: Failed to allocate user stack structure");
+        return NULL;
+    }
+    memset(new_thread->ustack, 0, sizeof(farlands_stack_t));
+    status_t st = stackalloc(process->vmm, new_thread->stack_size, VMM_REGION_U_STACK - new_thread->stack_size, VMM_WRITE_BIT | VMM_USER_BIT, new_thread->ustack);
     if (st != SUCCESS) {
         panic("process_create_thread: Failed to allocate user stack");
         return NULL;
     }
-    memset((void *)farlands.handle_base, 0, new_thread->stack_size);
-    
-    farlands.handle_top = loader_create_args(farlands.handle_top, new_thread->stack_size, process->argv, process->envp, process->auxv);
-    farlands.top -= ((uint64_t)farlands.handle_top - (uint64_t)(farlands.handle_base));
-
-    new_thread->stack = kmalloc(sizeof(stack_t));
-    if (!new_thread->stack) {
-        panic("process_create_thread: Failed to allocate stack_t");
-        return NULL;
-    }
-    new_thread->stack->top = farlands.top;
-    new_thread->stack->base = farlands.base;
-    new_thread->stack->flags = farlands.flags;
-    new_thread->stack->guard_size = farlands.guard_size;
+    vmarea_addforeign(process, new_thread->ustack->base, new_thread->stack_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS);
+    uint64_t old_top = (uint64_t)new_thread->ustack->handle_top;
+    new_thread->ustack->handle_top = loader_create_args(new_thread->ustack->handle_top, new_thread->stack_size, process->argv, process->envp, process->auxv);
+    new_thread->ustack->top -= (old_top - (uint64_t)new_thread->ustack->handle_top);
 
     if (process->thread_count == 0) {
         process->main_thread = new_thread;
     }
 
-    parse_stack(farlands.handle_top);
-
+    parse_stack(new_thread->ustack->handle_top);
     process->thread_count++;
 
     return new_thread;
@@ -283,22 +549,7 @@ void process_set_exit_code(process_t * process, int code) {
     process->exit_code = code;
 }
 
-status_t process_destroy(process_t * process) {
-    if (!process) {
-        panic("process_destroy: process is NULL");
-        return FAILURE;
-    }
-
-    for (int i = 0; i < process->thread_count; i++) {
-        process_destroy_thread(&process->threads[i]);
-    }
-
-    vmm_free_root(process->vmm);
-    kfree(process);
-    return SUCCESS;
-}
-
-status_t process_destroy_thread(thread_t * thread) {
+status_t process_destroy_thread(process_t * process, thread_t * thread) {
     if (!thread) {
         panic("process_destroy_thread: thread is NULL");
         return FAILURE;
@@ -306,19 +557,33 @@ status_t process_destroy_thread(thread_t * thread) {
 
     if (thread->context) {
         simd_free_context(thread->context->simd_ctx);
+        kfree(thread->context->cpu_ctx.ctx_info);
         kfree(thread->context);
     }
 
-    if (thread->stack) {
-        farlands_stack_t farstack;
-        farstack.top = thread->stack->top;
-        farstack.base = thread->stack->base;
-        farstack.flags = thread->stack->flags;
-        farstack.guard_size = thread->stack->guard_size;
-        process_t * process = (process_t *)thread->process;
-        stackfree(process->vmm, &farstack);
+    if (thread->ustack) {
+        stackfree(process->vmm, thread->ustack);
+    }
+    if (thread->kstack) {
+        kstackfree(thread->kstack);
     }
 
+    return SUCCESS;
+}
+
+status_t process_destroy(process_t * process) {
+    if (!process) {
+        panic("process_destroy: process is NULL");
+        return FAILURE;
+    }
+
+    for (int i = 0; i < process->thread_count; i++) {
+        process_destroy_thread(process, &process->threads[i]);
+    }
+
+    vmarea_remove_all(process);
+    vmm_free_root(process->vmm);
+    kfree(process);
     return SUCCESS;
 }
 
@@ -332,7 +597,7 @@ void process_init(const char * INIT_PROCESS, const char * INIT_TTY) {
         panic("process_init: Failed to create init thread");
     }
 
-    status_t st = process_thread_context_init(init_thread->context, init_process->vmm, init_thread->entry, (uint8_t *)init_thread->stack->top, init_process->argv, init_thread);
+    status_t st = process_init_thread_context(init_thread->context, init_process->vmm, init_thread->entry, (uint8_t *)init_thread->ustack->top, init_process->argv, init_thread);
     if (st != SUCCESS) {
         panic("process_init: Failed to initialize init thread context");
     }

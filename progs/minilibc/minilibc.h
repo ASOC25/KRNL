@@ -56,7 +56,6 @@ typedef struct stack {
     void * base;
     int flags;
     void * top;
-    uint64_t guard_size;
 } stack_t;
 
 typedef struct stat stat_t;
@@ -75,3 +74,6 @@ int sys_mprotect(void * addr, uint64_t length, int prot);
 int sys_ioctl(int fd, uint64_t request, void * arg);
 int sys_exit(int code);
 int sys_tell(int fd);
+int sys_fork();
+int sys_execve(const char * filename, char ** argv, char ** envp);
+int sys_waitpid(int pid, int * status, int options);

@@ -8,7 +8,6 @@ typedef struct stack {
     void * top;
     void * base;
     int flags;
-    uint64_t guard_size;
 } stack_t;
 
 typedef struct allocator_farlands {
@@ -24,7 +23,6 @@ typedef struct allocator_stack_farlands {
     void * handle_top;
     void * handle_base;
     int flags;
-    uint64_t guard_size;
 
 } farlands_stack_t;
 

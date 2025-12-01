@@ -4,6 +4,7 @@
 #include <krnl/arch/x86/cpu.h>
 #include <krnl/debug/debug.h>
 #include <krnl/process/scheduler.h>
+#include <krnl/mem/mmap.h>
 
 extern void* __interrupt_vector[IDT_ENTRY_COUNT];
 static __attribute__((aligned(IDT_PAGE_SIZE))) idt_t global_idt = {};
@@ -47,8 +48,26 @@ void exception(cpu_context_t * ctx) {
     panic("CPU EXCEPTION: %d | Stacktrace (CR2: 0x%016x):", ctx->interrupt_number, cr2);
 }
 
+
+
 void interrupt_handler(cpu_context_t* ctx, uint8_t cpu_id) {
+
+
+
     if (ctx->interrupt_number < 32) {
+        if (ctx->interrupt_number == 14) {
+            //Page fault
+            uint64_t cr2;
+            __asm__ volatile("mov %%cr2, %0" : "=r"(cr2));
+            process_t *  current_process = (process_t *)scheduler_get_current_thread()->process;
+            status_t status = vmarea_try_cow(current_process, (void *)cr2);
+            if (status == SUCCESS) {
+                apic_local_eoi(cpu_id);
+                return;
+            } else {
+                exception(ctx);
+            }
+        }
         exception(ctx);
     } else if (ctx->interrupt_number >= 32 && ctx->interrupt_number < 48) {
         panic("Unhandled IRQ: %d", ctx->interrupt_number - 32);

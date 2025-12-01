@@ -4,6 +4,7 @@
 #include <krnl/libraries/std/stdint.h>
 #include <krnl/mem/allocator.h>
 #include <krnl/libraries/std/elf.h>
+#include <krnl/mem/mmap.h>
 #include <krnl/vfs/vfs.h>
 
 const char * elf_class[] = {
@@ -265,7 +266,7 @@ status_t parse_elf_file(uint8_t * buffer) {
     return SUCCESS;
 }
 
-status_t allocate_segment(vmm_root_t* root, uint8_t * elf_datab, Elf64_Phdr * program_header, void* base) {
+status_t allocate_segment(process_t* process, uint8_t * elf_datab, Elf64_Phdr * program_header, void* base) {
     if (program_header->p_type != PT_LOAD) panic("allocate_segment: Not a loadable segment");
 
     uint64_t vaddr_offset = program_header->p_vaddr & 0xfff;
@@ -283,7 +284,7 @@ status_t allocate_segment(vmm_root_t* root, uint8_t * elf_datab, Elf64_Phdr * pr
 
     farlands_t farlands;
     status_t st = malloc(
-        root,
+        process->vmm,
         total_pages * 0x1000,
         vaddr,
         perms,
@@ -295,6 +296,13 @@ status_t allocate_segment(vmm_root_t* root, uint8_t * elf_datab, Elf64_Phdr * pr
         return FAILURE;
     }
 
+    vmarea_addforeign(process, (void *)vaddr, total_pages * 0x1000, 
+        ((program_header->p_flags & PF_R) ? PROT_READ : 0) |
+        ((program_header->p_flags & PF_W) ? PROT_WRITE : 0) |
+        ((program_header->p_flags & PF_X) ? PROT_EXEC : 0),
+        MAP_PRIVATE | MAP_ANONYMOUS
+    );
+
     //Zero the buffer
     memset((uint8_t *)farlands.handle, 0, total_pages * 0x1000);
     //Copy file data
@@ -302,7 +310,7 @@ status_t allocate_segment(vmm_root_t* root, uint8_t * elf_datab, Elf64_Phdr * pr
     return SUCCESS;
 }
 
-loaded_elf_t* elf_load_elf(vmm_root_t * root, const char * filename) {
+loaded_elf_t* elf_load_elf(process_t * process, const char * filename) {
     vfs_file_descriptor_t fd;
     status_t st = vfs_open(filename, 0, &fd);
     if(st != SUCCESS || !fd.valid) {
@@ -382,7 +390,7 @@ loaded_elf_t* elf_load_elf(vmm_root_t * root, const char * filename) {
 
     for (int i = 0; i < elf_header->e_phnum; i++) {
         if (program_header[i].p_type == PT_LOAD) {
-            if (allocate_segment(root, elf_datab, &program_header[i], 0) != SUCCESS) {
+            if (allocate_segment(process, elf_datab, &program_header[i], 0) != SUCCESS) {
                 panic("elf_load_elf: Failed to allocate segment\n");
                 kfree(elf_datab);
                 return NULL;

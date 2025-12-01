@@ -30,7 +30,8 @@ typedef struct thread_t {
     context_t* context;
     void * entry;
     void * process;
-    stack_t * stack;
+    stack_t * kstack;
+    farlands_stack_t * ustack;
     uint64_t stack_size;
 } thread_t;
 
@@ -67,14 +68,15 @@ typedef struct process_t {
 void process_set_exit_code(process_t * process, int code);
 vfs_file_descriptor_t * process_get_fd(process_t *proc, int fd);
 int process_allocate_fd_slot(process_t *proc);
-process_t * process_create(process_t * parent, const char * filename, const char * tty, char ** argv, char ** envp);
+process_t * process_create(process_t * parent, const char * filename, const char * tty, const char ** argv, const char ** envp);
 thread_t * process_create_thread(process_t * process, void * entry_point);
-status_t process_thread_context_init(context_t * context, vmm_root_t* root, void * pc, void * stack_top, char ** args, thread_t * thread);
+status_t process_init_thread_context(context_t * context, vmm_root_t* root, void * pc, void * stack_top, char ** args, thread_t * thread);
 status_t process_destroy(process_t * process);
-status_t process_destroy_thread(thread_t * thread);
 
 void context_save(context_t* ctx, cpu_context_t* cpu_ctx);
 void context_restore(context_t* ctx, cpu_context_t* cpu_ctx);
-
+status_t process_execve(process_t * process, const char * filename, const char ** argv, const char ** envp);
+process_t * process_fork(process_t * parent, thread_t * forking_thread);
+status_t process_waitpid(process_t * proc, int pid, int * status, int options);
 void process_init();
 #endif

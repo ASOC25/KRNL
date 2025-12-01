@@ -32,4 +32,6 @@ status_t scheduler_flush_queue(scheduler_queue_id_t queue);
 status_t scheduler_send_event_to_queue(scheduler_queue_id_t queue, int event);
 status_t scheduler_send_event_to_process(process_t * process, int event);
 
+thread_t * scheduler_get_current_thread();
+
 #endif

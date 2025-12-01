@@ -149,7 +149,7 @@ vm_dir * vm_get_current_pml4();
 vm_dir * vm_duplicate_pml4(vm_dir * pml4, vm_copy_range range);
 void vm_set_current_pml4(vm_dir * pml4);
 void vm_flush_tlb_entry(uint64_t address);
-
+status_t vm_deallocate_vspace(vm_dir * root);
 uint8_t vm_check_and_clean_dirty(vm_dir * root, uint64_t virtual_address);
 
 status_t vm_map_address(vm_dir * root, uint64_t virtual_address, uint64_t physical_address, uint64_t page_size, uint8_t flags);
