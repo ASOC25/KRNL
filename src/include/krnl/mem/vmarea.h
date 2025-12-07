@@ -4,7 +4,6 @@
 
 typedef struct vm_area {
     void * start;
-    uint8_t is_kernel;
     uint64_t size;
     uint64_t page_size;
     uint8_t flags;
