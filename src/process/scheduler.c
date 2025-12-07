@@ -318,7 +318,7 @@ void scheduler_handler(cpu_context_t* ctx, uint8_t cpu_id){
     if (ending_thread) {
         context_save(ending_thread->context, ctx);
     }
-
+    process_t * ending_process = (process_t*)ending_thread->process;
     process_t * next_process = scheduler_get_next_process();
     if (!next_process) {
         panic("scheduler_handler: No next process found");
@@ -327,5 +327,7 @@ void scheduler_handler(cpu_context_t* ctx, uint8_t cpu_id){
     if (!next_thread) {
         panic("scheduler_handler: No next thread found");
     }
+
+    kprintf("ROBERT, ITS PISSING ME OFF from %d to %d\n", ending_process->pid, next_process->pid);
     context_restore(next_thread->context, ctx);
 }
