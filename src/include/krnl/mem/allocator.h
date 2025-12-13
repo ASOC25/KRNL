@@ -27,7 +27,7 @@ typedef struct allocator_stack_farlands {
 } farlands_stack_t;
 
 void * kmalloc(uint64_t size);
-stack_t * kstackalloc(uint64_t initial_size);
+stack_t * kstackalloc(vmm_root_t * root, uint64_t initial_size);
 void kfree(void * virtual_address);
 void kstackfree(stack_t * stk);
 

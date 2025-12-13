@@ -5,6 +5,8 @@
 #include <krnl/arch/x86/hpet.h>
 #include <krnl/arch/x86/syscall.h>
 #include <krnl/mem/allocator.h>
+#include <krnl/libraries/std/string.h>
+#include <krnl/mem/vmm.h>
 #include <krnl/boot/bootloaders/bootloader.h>
 
 #define SIMD_CONTEXT_SIZE 512
@@ -44,7 +46,10 @@ void simd_init() {
 
 void cpu_tss_init(core_context_t * cpu_ctx) {
     cpu_ctx->cpu_tss = (tss_t*)kmalloc(sizeof(tss_t));
-    cpu_ctx->cpu_tss->rsp[0] = (uint64_t)(kstackalloc(KERNEL_STACK_SIZE)->top);
+    stack_t * kernel_stack = kstackalloc(vmm_get_root(), KERNEL_STACK_SIZE);
+    memset(kernel_stack->base, 0, KERNEL_STACK_SIZE);
+    memset(cpu_ctx->cpu_tss, 0, sizeof(tss_t));
+    cpu_ctx->cpu_tss->rsp[0] = (uint64_t)(kernel_stack->top);
     gdt_load_tss(cpu_ctx->cpu_tss);
 }
 

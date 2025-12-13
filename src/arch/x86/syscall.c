@@ -288,6 +288,7 @@ int64_t syscall_schedule_yield(thread_t * thread, cpu_context_t * context) {
 int64_t syscall_fork(thread_t * thread, cpu_context_t * context) {
     (void)context; // Unused
     process_t * parent_proc = (process_t *)thread->process;
+    scheduler_save_context(context);
     process_t * child_proc = process_fork(parent_proc, thread);
     if (!child_proc) {
         return -EAGAIN;

@@ -195,6 +195,7 @@ status_t process_init_thread_context(context_t * ctx, vmm_root_t* root, void * p
         panic("context_init: Failed to allocate context_info_t");
         return FAILURE;
     }
+    memset(ctx->cpu_ctx.ctx_info, 0, sizeof(context_info_t));
     ctx->cpu_ctx.ctx_info->thread = thread;
     ctx->cpu_ctx.ctx_info->cs = ctx->cpu_ctx.cs;
     ctx->cpu_ctx.ctx_info->ss = ctx->cpu_ctx.ss;
@@ -262,7 +263,7 @@ thread_t * duplicate_thread(process_t * parent, thread_t * og) {
         kfree(new_thread);
         return NULL;
     }
-    memcpy(new_ctx_info, og->context->cpu_ctx.ctx_info, sizeof(context_info_t));
+
     new_ctx_info->thread = new_thread;
     new_ctx_info->kernel_stack = new_thread->kstack->top;
     new_ctx_info->cs = og->context->cpu_ctx.ctx_info->cs;
@@ -505,12 +506,11 @@ thread_t * process_create_thread(process_t * process, void * entry_point) {
     new_thread->entry = entry_point;
     new_thread->stack_size = NEW_PROCESS_STACK_SIZE; // 16 KB stack
 
-    new_thread->kstack = kstackalloc(KERNEL_STACK_SIZE);
+    new_thread->kstack = kstackalloc(process->vmm, KERNEL_STACK_SIZE);
     if (!new_thread->kstack) {
         panic("context_init: Failed to allocate kernel stack for process");
         return NULL;
     }
-    memset(new_thread->kstack->base, 0, KERNEL_STACK_SIZE);
 
     new_thread->ustack = kmalloc(sizeof(farlands_stack_t));
     if (!new_thread->ustack) {

@@ -22,6 +22,7 @@ thread_t * scheduler_get_current_thread();
 process_t * scheduler_get_next_process();
 thread_t * scheduler_get_next_thread(process_t * process);
 void scheduler_handler(cpu_context_t* ctx, uint8_t cpu_id);
+void scheduler_save_context(cpu_context_t* ctx);
 
 scheduler_queue_t * scheduler_get_process_queue(scheduler_queue_id_t queue);
 status_t scheduler_add_process(process_t * process, scheduler_queue_id_t queue);

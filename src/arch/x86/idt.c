@@ -48,18 +48,20 @@ void exception(cpu_context_t * ctx) {
     panic("CPU EXCEPTION: %d | Stacktrace (CR2: 0x%016x):", ctx->interrupt_number, cr2);
 }
 
-
-
 void interrupt_handler(cpu_context_t* ctx, uint8_t cpu_id) {
-
-
 
     if (ctx->interrupt_number < 32) {
         if (ctx->interrupt_number == 14) {
             //Page fault
             uint64_t cr2;
             __asm__ volatile("mov %%cr2, %0" : "=r"(cr2));
-            process_t *  current_process = (process_t *)scheduler_get_current_thread()->process;
+            process_t * current_process = 0x0;
+            thread_t *  current_thread = (thread_t *)scheduler_get_current_thread();
+            if (current_thread) {
+                current_process = current_thread->process;
+            } else {
+                exception(ctx);
+            }
             status_t status = vmarea_try_cow(current_process, (void *)cr2);
             if (status == SUCCESS) {
                 apic_local_eoi(cpu_id);

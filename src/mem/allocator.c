@@ -101,7 +101,7 @@ void * kmalloc(uint64_t size) {
 }
 
 //VERY IMPORTANT: WE ASUME THAT STACKS GROW DOWNWARDS, ALSO KERNEL STACKS CANNOT GROW
-stack_t * kstackalloc(uint64_t size) {
+stack_t * kstackalloc(vmm_root_t * root, uint64_t size) {
     void * phys_addr = pmm_alloc_pages((size + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE);
     if (phys_addr == 0x0) {
         panic("kstackalloc: Failed to allocate physical memory");
@@ -117,7 +117,7 @@ stack_t * kstackalloc(uint64_t size) {
 
     uint64_t base_address = (uint64_t)virt_addr & ~0xFFF; //Align to page size
     status_t st = vmm_map_pages(
-        vmm_get_root(),
+        root,
         base_address,
         (uint64_t)phys_addr,
         (size + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE,
@@ -129,8 +129,8 @@ stack_t * kstackalloc(uint64_t size) {
         panic("kstackalloc: Failed to map kernel stack pages");
     }
 
-    memset((void *)base_address, 0, (size + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE * PMM_PAGE_SIZE);
-    add_allocation(vmm_get_root(), phys_addr, NULL, 0x0, (void*)base_address, size, 0x3); //RW permisions
+    memset((void *)VMM_REGION_K_IDENT + (uint64_t)phys_addr, 0, (size + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE * PMM_PAGE_SIZE);
+    add_allocation(root, phys_addr, NULL, 0x0, (void*)base_address, size, 0x3); //RW permisions
     stack_t *stk = kmalloc(sizeof(stack_t));
     stk->top = (void *)(top_address);
     stk->base = (void *)(base_address);

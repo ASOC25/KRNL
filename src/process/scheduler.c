@@ -311,14 +311,37 @@ void scheduler_exit_process(process_t * process, cpu_context_t* ctx, uint8_t cpu
     scheduler_handler(ctx, cpu_id);
 }
 
+void scheduler_save_context(cpu_context_t* ctx) {
+    if (ctx == NULL) {
+        panic("scheduler_save_context: ctx is NULL");
+    }
+    
+    if (ctx->ctx_info == NULL) {
+        panic("scheduler_save_context: ctx->ctx_info is NULL");
+    }
+
+    thread_t * current_thread = ctx->ctx_info->thread;
+    if (current_thread) {
+        context_save(current_thread->context, ctx);
+    }
+}
+
 void scheduler_handler(cpu_context_t* ctx, uint8_t cpu_id){
     (void)cpu_id;
+    if (ctx == NULL) {
+        panic("scheduler_handler: ctx is NULL");
+    }
     
+    if (ctx->ctx_info == NULL) {
+        panic("scheduler_handler: ctx->ctx_info is NULL");
+    }
+
     thread_t * ending_thread = ctx->ctx_info->thread;
+    process_t * ending_process = NULL;
     if (ending_thread) {
         context_save(ending_thread->context, ctx);
+        ending_process = (process_t*)ending_thread->process;
     }
-    process_t * ending_process = (process_t*)ending_thread->process;
     process_t * next_process = scheduler_get_next_process();
     if (!next_process) {
         panic("scheduler_handler: No next process found");
@@ -328,6 +351,10 @@ void scheduler_handler(cpu_context_t* ctx, uint8_t cpu_id){
         panic("scheduler_handler: No next thread found");
     }
 
-    kprintf("ROBERT, ITS PISSING ME OFF from %d to %d\n", ending_process->pid, next_process->pid);
+    if (ending_process)
+        kprintf("ROBERT, ITS PISSING ME OFF from %d to %d\n", ending_process->pid, next_process->pid);
+    else
+        kprintf("ROBERT, ITS PISSING ME OFF from NULL to %d\n", next_process->pid);
+    
     context_restore(next_thread->context, ctx);
 }
