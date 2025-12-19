@@ -15,6 +15,9 @@
 #include <krnl/fs/x1fs/x1fs.h>
 #include <krnl/fs/tty/tty.h>
 #include <krnl/vfs/vfs.h>
+#include <krnl/arch/x86/apic.h>
+
+extern uint8_t getApicId(void);
 
 void boot_startup() {
     __asm__("cli");

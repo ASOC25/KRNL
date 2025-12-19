@@ -281,9 +281,8 @@ int64_t syscall_tell(thread_t * thread, cpu_context_t * context) {
 int64_t syscall_schedule_yield(thread_t * thread, cpu_context_t * context) {
     (void)thread;
     uint8_t cpu_id = getApicId();
-    kprintf("syscall_schedule_yield: CPU %d yielding\n", cpu_id);
     scheduler_handler(context, cpu_id);
-    return 0;
+    return context->rax;
 }
 
 int64_t syscall_fork(thread_t * thread, cpu_context_t * context) {

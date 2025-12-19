@@ -105,7 +105,6 @@ syscall_entry:
     mov r11, [rsp + 0x20]
     mov rcx, [rsp + 0x10]
 
-    cli
     mov rsp, [rsp + 0x28]
     swapgs
     o64 sysret

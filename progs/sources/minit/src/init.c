@@ -18,7 +18,7 @@ void print_args(int argc, char* argv[], char* envp[]) {
     printf("\n");
 }
 
-void fork_stress() {
+void __attribute__ ((noinline)) fork_stress() {
     int pid = sys_fork();
     if (pid < 0) {
         printf("Fork failed in stress test.\n");
@@ -61,6 +61,9 @@ int main(int argc, char* argv[], char* envp[]) {
     for (int i = 0; i < 300; i++) {
         fork_stress();
     }
-    while (1);
+    printf("Entering scheduling loop.\n");
+    while (1) {
+        printf("IM A RESOURCE HOG!\n");
+    }
     return 0;
 }

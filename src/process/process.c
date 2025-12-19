@@ -249,7 +249,12 @@ thread_t * duplicate_thread(process_t * parent, thread_t * og) {
     memset(new_thread, 0, sizeof(thread_t));
 
     new_thread->stack_size = og->stack_size;
-    new_thread->kstack = copy_kstack(parent->vmm, og->kstack);
+    new_thread->kstack = kmalloc(sizeof(stack_t));
+    if (!new_thread->kstack) {
+        panic("duplicate_thread: Failed to allocate memory for new kstack");
+    }
+    memcpy(new_thread->kstack, og->kstack, sizeof(stack_t));
+
     new_thread->ustack = copy_stack(parent->vmm, og->ustack);
     if (!new_thread->kstack || !new_thread->ustack) {
         panic("duplicate_thread: Failed to copy stacks for new thread");
@@ -336,6 +341,7 @@ process_t * process_fork(process_t * parent, thread_t * forking_thread) {
     if (!parent || !forking_thread) {
         return NULL;
     }
+    kprintf("Process %d is forking thread %p\n", parent->pid, forking_thread);
 
     process_t * child = kmalloc(sizeof(process_t));
     if (!child) {
@@ -394,7 +400,7 @@ process_t * process_fork(process_t * parent, thread_t * forking_thread) {
     child->open_file_count = parent->open_file_count;
 
     create_args(child, (const char **)parent->argv, (const char **)parent->envp, &parent->auxv, &parent->auxv_size);
-    child_thread->context->cpu_ctx.rax = 0; // Child process return value is 0
+    child_thread->context->cpu_ctx.rax = 0; // Child process gets 0 return value from fork
     return child;
 }
 

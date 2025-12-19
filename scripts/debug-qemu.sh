@@ -8,7 +8,7 @@ GDB_SCRIPT="$ROOT_DIR/debug.gdb"
 KERNEL_ELF="$BUILD_DIR/kernel.elf"
 
 : "${QEMU:=qemu-system-x86_64}"
-: "${RAM:=512}"
+: "${RAM:=2G}"
 : "${MACHINE:=q35}"
 : "${ACCEL:=}"
 : "${SMP:=1}"

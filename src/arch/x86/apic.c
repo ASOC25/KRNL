@@ -223,12 +223,13 @@ void apic_start_lapic_timer(void){
 
     void * lapic_address = actx.lapic_addresses[getApicId()].virtual_address;
     // setup local apic timer
-    write_lapic_register(lapic_address, local_apic_register_offset_divide, 4);        
+    write_lapic_register(lapic_address, local_apic_register_offset_divide, 0x3); // divide by 16    
     write_lapic_register(lapic_address, local_apic_register_offset_initial_count, 0xffffffff);
 
-    hpet_sleep(1000000);
+    hpet_sleep(10000); // sleep 10ms
     
-    uint32_t tick1000ms = 0xffffffff - read_lapic_register(lapic_address, local_apic_register_offset_curent_count);
+    write_lapic_register(lapic_address, local_apic_register_offset_lvt_timer, LAPIC_LVT_INT_MASKED); // mask timer interrupt
+    uint32_t ticksin10ms = 0xffffffff - read_lapic_register(lapic_address, local_apic_register_offset_curent_count);
 
     struct local_apic_interrupt_register timer_registers;
 
@@ -239,11 +240,27 @@ void apic_start_lapic_timer(void){
     timer_registers.remote_irr = local_apic_interrupt_register_remote_irr_completed;
     timer_registers.trigger_mode = local_apic_interrupt_register_trigger_mode_edge;
     timer_registers.mask = local_apic_interrupt_register_mask_enable;
-    timer_registers.timer_mode = local_apic_interrupt_timer_mode_periodic;
+    timer_registers.timer_mode = local_apic_interrupt_timer_mode_one_shot;
     
     uint32_t timer = read_lapic_register(lapic_address, local_apic_register_offset_lvt_timer);
     write_lapic_register(lapic_address, local_apic_register_offset_lvt_timer, create_register_value_interrupts(timer_registers) | (timer & 0xfffcef00));    
-    write_lapic_register(lapic_address, local_apic_register_offset_initial_count, (tick1000ms / 10)); 
+    write_lapic_register(lapic_address, local_apic_register_offset_initial_count, ticksin10ms * 10); // set timer for 10ms
+
+    actx.lapic_timer_ticks_per_ms = ticksin10ms / 10;
+}
+
+void apic_arm_lapic_timer(uint8_t cpu_id, uint32_t ms) {
+    if (!actx.initialized || !actx.lapic_addresses[cpu_id].virtual_address) {
+        panic("apic_arm_lapic_timer: Invalid CPU ID or LAPIC address not initialized");
+    }
+
+    uint32_t ticks = actx.lapic_timer_ticks_per_ms * ms;
+    void * lapic_address = actx.lapic_addresses[cpu_id].virtual_address;
+    uint32_t remaining_ticks = read_lapic_register(lapic_address, local_apic_register_offset_curent_count);
+    uint32_t remaining_ms = remaining_ticks / actx.lapic_timer_ticks_per_ms;
+    //Print ms remaining ticks and total ticks
+    kprintf("APIC Timer Arm: CPU %d, remaining ms: %d, rearming for %d ms \n", cpu_id, remaining_ms, ms);
+    write_lapic_register(lapic_address, local_apic_register_offset_initial_count, ticks);
 }
 
 void apic_init(void) {

@@ -29,6 +29,8 @@
 
 #define LAPIC_EOI                               0xB0
 
+#define LAPIC_LVT_INT_MASKED                 0x10000
+
 #define IOAPIC_VERSION                          0x01
 
 #define IOAPIC_REDIRECTION_BITS_VECTOR              0x00
@@ -74,6 +76,7 @@
 #define local_apic_interrupt_register_trigger_mode_edge 0x0
 #define local_apic_interrupt_register_mask_enable 0x0
 #define local_apic_interrupt_timer_mode_periodic 0x1
+#define local_apic_interrupt_timer_mode_one_shot 0x0
 #define local_apic_register_offset_lvt_timer 0x320
 #define local_apic_register_offset_initial_count 0x380
 #define local_apic_register_offset_divide			       0x3E0
@@ -181,6 +184,7 @@ struct apic_context {
     struct ioapic_iso ioapic_iso_entries[APIC_ENTRIES_HARD_LIMIT];
     uint16_t ioapic_iso_count;
 
+    uint32_t lapic_timer_ticks_per_ms;
     uint8_t initialized;
 };
 
@@ -188,5 +192,6 @@ void apic_init(void);
 void apic_local_eoi(uint8_t cpu_id);
 void apic_start_lapic_timer(void);
 uint8_t apic_ioapic_mask(uint8_t irq, uint8_t enable);
+void apic_arm_lapic_timer(uint8_t cpu_id, uint32_t ms);
 
 #endif

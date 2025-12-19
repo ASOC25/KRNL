@@ -5,6 +5,7 @@
 #include <krnl/arch/x86/idt.h>
 #include <krnl/libraries/std/stddef.h>
 #include <krnl/process/process.h>
+#include <krnl/arch/x86/apic.h>
 #include <krnl/libraries/lock/spinlock.h>
 
 scheduler_queue_t * sched_runable_queue_head = NULL;
@@ -305,6 +306,7 @@ void scheduler_exit_process(process_t * process, cpu_context_t* ctx, uint8_t cpu
         panic("scheduler_exit_process: Failed to move process to zombie queue");
     }
     scheduler_handler(ctx, cpu_id);
+    panic("scheduler_exit_process: Returned from scheduler_handler");
 }
 
 void scheduler_save_context(cpu_context_t* ctx) {
@@ -322,8 +324,7 @@ void scheduler_save_context(cpu_context_t* ctx) {
     }
 }
 
-void scheduler_handler(cpu_context_t* ctx, uint8_t cpu_id){
-    (void)cpu_id;
+void scheduler_handler(cpu_context_t* ctx, uint8_t cpu_id) {
     if (ctx == NULL) {
         panic("scheduler_handler: ctx is NULL");
     }
@@ -355,4 +356,5 @@ void scheduler_handler(cpu_context_t* ctx, uint8_t cpu_id){
     
     context_restore(next_thread->context, ctx);
     SCHEDULER_UNLOCK();
+    apic_arm_lapic_timer(cpu_id, SCHEDULER_TIMESLICE_MS);
 }

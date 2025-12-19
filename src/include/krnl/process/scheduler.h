@@ -5,6 +5,12 @@
 #include <krnl/libraries/std/stddef.h>
 #include <krnl/process/process.h>
 
+#define SCHEDULER_TIMESLICE_MS 100
+
+#define SCHEDULER_SOURCE_TIMER_INTERRUPT 0
+#define SCHEDULER_SOURCE_YIELD_SYSCALL 1
+#define SCHEDULER_SOURCE_OTHER 2
+
 typedef enum {
     SCHEDULER_QUEUE_RUNABLE,
     SCHEDULER_QUEUE_SLEEPING,
