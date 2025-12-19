@@ -96,3 +96,7 @@ int sys_execve(const char * filename, char ** argv, char ** envp) {
 int sys_waitpid(int pid, int * status, int options) {
     return (int)syscall(17, (uint64_t)pid, (uint64_t)status, (uint64_t)options, 0, 0, 0);
 }
+
+int sys_getpid() {
+    return (int)syscall(18, 0, 0, 0, 0, 0, 0);
+}

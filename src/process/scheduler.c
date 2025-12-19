@@ -23,13 +23,11 @@ static spinlock_t scheduler_spinlock = SPINLOCK_INIT;
         if (spinlock_acquire(&scheduler_spinlock) != 0) { \
             panic("SCHEDULER_LOCK: Deadlock detected in scheduler"); \
         } \
-        __asm__ volatile("cli"); \
     } while (0)
 
 #define SCHEDULER_UNLOCK() \
     do { \
         spinlock_release(&scheduler_spinlock); \
-        __asm__ volatile("sti"); \
     } while (0)
 
 // Internal helper: must be called with scheduler_spinlock already held
@@ -99,10 +97,10 @@ process_t * scheduler_get_next_process() {
     //the highest priority (lowest numerical value of current_nice)
     //The chosen process will have its current_nice reset to its nice value
     //All other processes in the queue will have their current_nice decreased by 1
-    SCHEDULER_LOCK();
     scheduler_queue_t * current = sched_runable_queue_head;
     process_t * chosen_process = NULL;
     long highest_priority = 0x7FFFFFFF;
+    long lowest_priority = -0x7FFFFFFF;
     while (current != NULL) {
         if (current->process->current_nice < highest_priority) {
             highest_priority = current->process->current_nice;
@@ -117,7 +115,7 @@ process_t * scheduler_get_next_process() {
             if (current->process == chosen_process) {
                 current->process->current_nice = current->process->nice;
             } else {
-                if (current->process->current_nice > 0) {
+                if (current->process->current_nice > lowest_priority) {
                     current->process->current_nice--;
                 }
             }
@@ -125,11 +123,9 @@ process_t * scheduler_get_next_process() {
         }
     } else {
         panic("scheduler_get_next_process: No process found in runable queue");
-        SCHEDULER_UNLOCK();
         return NULL;
     }
     current_process = chosen_process;
-    SCHEDULER_UNLOCK();
     return chosen_process;
 }
 
@@ -335,6 +331,7 @@ void scheduler_handler(cpu_context_t* ctx, uint8_t cpu_id){
     if (ctx->ctx_info == NULL) {
         panic("scheduler_handler: ctx->ctx_info is NULL");
     }
+    SCHEDULER_LOCK();
 
     thread_t * ending_thread = ctx->ctx_info->thread;
     process_t * ending_process = NULL;
@@ -357,4 +354,5 @@ void scheduler_handler(cpu_context_t* ctx, uint8_t cpu_id){
         kprintf("ROBERT, ITS PISSING ME OFF from NULL to %d\n", next_process->pid);
     
     context_restore(next_thread->context, ctx);
+    SCHEDULER_UNLOCK();
 }

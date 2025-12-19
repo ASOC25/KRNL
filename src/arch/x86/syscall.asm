@@ -38,6 +38,7 @@ syscall_enable:
 	ret
 
 syscall_entry:
+    cli
     swapgs               ; swap from USER gs to KERNEL gs
     mov [gs:0x10], rsp    ; save current stack to the local cpu structure
     mov rsp, [gs:0x8]    ; use the kernel syscall stack
@@ -48,7 +49,6 @@ syscall_entry:
     push qword [rbp + 0x10] ; ss
     push qword [gs:0x10]   ; rsp
 
-    sti
     push r11             ; saved rflags
     push qword [rbp + 0x8] ; cs
     push rcx             ; current IP

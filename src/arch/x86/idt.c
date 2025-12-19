@@ -75,6 +75,7 @@ void interrupt_handler(cpu_context_t* ctx, uint8_t cpu_id) {
         panic("Unhandled IRQ: %d", ctx->interrupt_number - 32);
         //apic_handle_interrupt(ctx->interrupt_number, cpu_id);
     } else if (ctx->interrupt_number == INT_SCHEDULE_APIC_TIMER) {
+        kprintf("Timer Interrupt on CPU %d\n", cpu_id);
         scheduler_handler(ctx, cpu_id);
     } else {
         panic("Unknown Interrupt: %d", ctx->interrupt_number);

@@ -2,6 +2,7 @@
 #define _X86_CPU_H
 
 #include <krnl/libraries/std/stdint.h>
+#include <krnl/mem/allocator.h>
 
 #define KERNEL_STACK_SIZE 0x10000
 
@@ -67,4 +68,5 @@ typedef struct{
     uint64_t ss;
 }__attribute__((packed)) cpu_context_t; 
 void cpu_init(void);
+void cpu_get_kstack(stack_t * stack);
 #endif

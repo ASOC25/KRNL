@@ -8,6 +8,7 @@
 #include <krnl/libraries/std/string.h>
 #include <krnl/mem/vmm.h>
 #include <krnl/boot/bootloaders/bootloader.h>
+#include <krnl/debug/debug.h>
 
 #define SIMD_CONTEXT_SIZE 512
 #define CR0_MONITOR_COPROC (1 << 1)
@@ -20,7 +21,6 @@ extern uint8_t getApicId(void);
 extern void reload_gs_fs(void);
 extern void set_cpu_gs_base(uint64_t addr);
 extern void syscall_enable(uint16_t kernel_cs, uint16_t user_cs);
-
 typedef struct core_context {
     uint64_t core_id;
     context_info_t * cinfo;

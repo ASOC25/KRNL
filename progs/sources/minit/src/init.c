@@ -18,6 +18,20 @@ void print_args(int argc, char* argv[], char* envp[]) {
     printf("\n");
 }
 
+void fork_stress() {
+    int pid = sys_fork();
+    if (pid < 0) {
+        printf("Fork failed in stress test.\n");
+        return;
+    } else if (pid == 0) {
+        // Child process
+        int local_counter = sys_getpid();
+        while (1) {
+            printf("P%d\n", local_counter);
+            sys_sched();
+        }
+    }
+}
 
 int main(int argc, char* argv[], char* envp[]) {
     minilibc_init();
@@ -44,17 +58,8 @@ int main(int argc, char* argv[], char* envp[]) {
     sys_close(fd);
 
     printf("Testing fork and execve:\n");
-    int pid = sys_fork();
-    if (pid < 0) {
-        printf("Fork failed.\n");
-        sys_exit(1);
-    } else if (pid == 0) {
-        // Child process
-        printf("Child process!\n");
-        sys_exit(1);
-    } else {
-        // Parent process
-        printf("Parent process, child PID: %d\n", pid);
+    for (int i = 0; i < 300; i++) {
+        fork_stress();
     }
     while (1);
     return 0;

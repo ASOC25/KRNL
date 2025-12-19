@@ -9,6 +9,5 @@ define hook-stop
   x/10ig $rip
 end
 hbreak boot_startup
-b *0x00000000001006dc
 hbreak main
 c

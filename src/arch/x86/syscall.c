@@ -281,12 +281,12 @@ int64_t syscall_tell(thread_t * thread, cpu_context_t * context) {
 int64_t syscall_schedule_yield(thread_t * thread, cpu_context_t * context) {
     (void)thread;
     uint8_t cpu_id = getApicId();
+    kprintf("syscall_schedule_yield: CPU %d yielding\n", cpu_id);
     scheduler_handler(context, cpu_id);
     return 0;
 }
 
 int64_t syscall_fork(thread_t * thread, cpu_context_t * context) {
-    (void)context; // Unused
     process_t * parent_proc = (process_t *)thread->process;
     scheduler_save_context(context);
     process_t * child_proc = process_fork(parent_proc, thread);
@@ -332,6 +332,12 @@ int64_t syscall_waitpid(thread_t * thread, cpu_context_t * context) {
     return (int64_t)pid;
 }
 
+int64_t syscall_getpid(thread_t * thread, cpu_context_t * context) {
+    (void)context; // Unused
+    process_t * proc = (process_t *)thread->process;
+    return (int64_t)proc->pid;
+}
+
 static syscall_handler_t handlers[SYS_COUNT] = { 
     syscall_read, //0
     syscall_write,
@@ -350,7 +356,8 @@ static syscall_handler_t handlers[SYS_COUNT] = {
     syscall_tell,
     syscall_fork, //15
     syscall_execve,
-    syscall_waitpid
+    syscall_waitpid,
+    syscall_getpid
 
 /*
     syscall_dup,
