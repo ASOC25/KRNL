@@ -319,16 +319,7 @@ int64_t syscall_waitpid(thread_t * thread, cpu_context_t * context) {
     int * status = (int *)SYSCALL_ARG1(context);
     int options = (int)SYSCALL_ARG2(context);
     process_t * proc = (process_t *)thread->process;
-
-    if (pid < -1 || pid == 0) {
-        return -EINVAL;
-    }
-
-    status_t st = process_waitpid(proc, pid, status, options);
-    if (st != SUCCESS) {
-        return -ECHILD;
-    }
-    return (int64_t)pid;
+    return process_waitpid(proc, pid, status, options);
 }
 
 int64_t syscall_getpid(thread_t * thread, cpu_context_t * context) {

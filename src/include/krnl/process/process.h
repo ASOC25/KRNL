@@ -10,6 +10,12 @@
 #include <krnl/mem/vmarea.h>
 #include <krnl/mem/allocator.h>
 
+#define PROCESS_STATUS_RUNABLE 0x1
+#define PROCESS_STATUS_INTERRUPTIBLE_SLEEP 0x2
+#define PROCESS_STATUS_UNINTERRUPTIBLE_SLEEP 0x3
+#define PROCESS_STATUS_STOPPED 0x4
+#define PROCESS_STATUS_ZOMBIE 0x5
+
 #define NEW_PROCESS_STACK_SIZE 0x4000 //16KB
 #define MAX_THREADS_PER_PROCESS 16
 #define MAX_OPEN_FILES 32
@@ -33,6 +39,7 @@ typedef struct thread_t {
     stack_t * kstack;
     farlands_stack_t * ustack;
     uint64_t stack_size;
+    uint8_t state;
 } thread_t;
 
 typedef struct process_t {

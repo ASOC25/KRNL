@@ -10,6 +10,7 @@
 #include <krnl/mem/allocator.h>
 #include <krnl/process/loader.h>
 #include <krnl/mem/mmap.h>
+#include <krnl/libraries/std/errno.h>
 
 extern void set_cpu_fs_base(uint64_t base);
 
@@ -35,14 +36,9 @@ int process_allocate_fd_slot(process_t *proc) {
 }
 
 status_t process_waitpid(process_t * proc, int pid, int * status, int options) {
-    if (!proc) {
-        return FAILURE;
+    if (pid < -1 || pid == 0) {
+        return -EINVAL;
     }
-    (void)pid;
-    (void)status;
-    (void)options;
-    panic("process_waitpid: Not yet implemented");
-    return SUCCESS;
 }
 
 void create_args(process_t * process, const char ** argv, const char ** envp, struct auxv ** out_auxv, uint64_t * out_auxv_size) {
@@ -332,6 +328,7 @@ thread_t * duplicate_thread(process_t * parent, thread_t * og) {
     memcpy(new_ctx->simd_ctx, og->context->simd_ctx, 512);
     new_thread->context = new_ctx;
     new_thread->entry = og->entry;
+    new_thread->state = og->state;
     new_thread->process = (void *)parent;
 
     return new_thread;
@@ -510,6 +507,7 @@ thread_t * process_create_thread(process_t * process, void * entry_point) {
     memset(new_thread->context->simd_ctx, 0, 512);
     new_thread->process = (void *)process;
     new_thread->entry = entry_point;
+    new_thread->state = THREAD_STATE_RUNABLE;
     new_thread->stack_size = NEW_PROCESS_STACK_SIZE; // 16 KB stack
 
     new_thread->kstack = kstackalloc(process->vmm, KERNEL_STACK_SIZE);
