@@ -23,6 +23,8 @@
 
 #define GET_THREAD_PROCESS(thread) ((process_t *)((thread)->process))
 
+#define GET_PROC(thread) ((process_t *)((thread)->process))
+
 //Type for pid
 typedef int16_t pid_t;
 
@@ -32,14 +34,21 @@ typedef struct {
     uint64_t fs_base;
 } context_t;
 
+typedef struct thread_event_queue {
+    int event;
+    struct thread_event_queue * next;
+} thread_event_queue_t;
+
 typedef struct thread_t {
     context_t* context;
     void * entry;
     void * process;
     stack_t * kstack;
     farlands_stack_t * ustack;
+    thread_event_queue_t * event_queue;
     uint64_t stack_size;
     uint8_t state;
+    long prio;
 } thread_t;
 
 typedef struct process_t {
@@ -58,7 +67,6 @@ typedef struct process_t {
     int exit_code;
 
     long nice;
-    long current_nice;
 
     vfs_file_descriptor_t open_files[MAX_OPEN_FILES];
     int open_file_count;
@@ -85,5 +93,8 @@ void context_restore(context_t* ctx, cpu_context_t* cpu_ctx);
 status_t process_execve(process_t * process, const char * filename, const char ** argv, const char ** envp);
 process_t * process_fork(process_t * parent, thread_t * forking_thread);
 status_t process_waitpid(process_t * proc, int pid, int * status, int options);
+status_t process_enqueue_event(thread_t * thread, int event);
+status_t process_dequeue_event(thread_t * thread, int * out_event);
+status_t process_exit(process_t * process, int code);
 void process_init();
 #endif

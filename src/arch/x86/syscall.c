@@ -140,9 +140,8 @@ extern uint8_t getApicId(void);
 int64_t syscall_exit(thread_t * thread, cpu_context_t * context) {
     int code = (int)SYSCALL_ARG0(context);
     process_t * proc = (process_t *)thread->process;
-    uint8_t cpu_id = getApicId();
-    process_set_exit_code(proc, code);
-    scheduler_exit_process(proc, context, cpu_id);
+    process_exit(proc, code);
+    scheduler_handler(context, getApicId());
     panic("syscall_exit: Returned from scheduler_exit_process");
     return 0;
 }
@@ -287,12 +286,13 @@ int64_t syscall_schedule_yield(thread_t * thread, cpu_context_t * context) {
 
 int64_t syscall_fork(thread_t * thread, cpu_context_t * context) {
     process_t * parent_proc = (process_t *)thread->process;
-    scheduler_save_context(context);
+
+    context_save(context->ctx_info->thread->context, context);
     process_t * child_proc = process_fork(parent_proc, thread);
     if (!child_proc) {
         return -EAGAIN;
     }
-    status_t std = scheduler_add_process(child_proc, SCHEDULER_QUEUE_RUNABLE);
+    status_t std = scheduler_add(child_proc->main_thread);
     if (std != SUCCESS) {
         process_destroy(child_proc);
         return -EAGAIN;

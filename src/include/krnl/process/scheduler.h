@@ -11,34 +11,24 @@
 #define SCHEDULER_SOURCE_YIELD_SYSCALL 1
 #define SCHEDULER_SOURCE_OTHER 2
 
-typedef enum {
-    SCHEDULER_QUEUE_RUNABLE,
-    SCHEDULER_QUEUE_SLEEPING,
-    SCHEDULER_QUEUE_STOPPED,
-    SCHEDULER_QUEUE_ZOMBIE,
-} scheduler_queue_id_t;
+#define SCHEDULER_STATUS_RUNABLE 0
+#define SCHEDULER_STATUS_INTERRUPTIBLE_SLEEP 1
+#define SCHEDULER_STATUS_UNINTERRUPTIBLE_SLEEP 2
+#define SCHEDULER_STATUS_STOPPED 3
+#define SCHEDULER_STATUS_ZOMBIE 4
 
-typedef struct scheduler_queue {
-    process_t * process;
-    struct scheduler_queue * next;
-} scheduler_queue_t;
-
-void scheduler_exit_process(process_t * process, cpu_context_t* ctx, uint8_t cpu_id);
-thread_t * scheduler_get_current_thread();
-process_t * scheduler_get_next_process();
-thread_t * scheduler_get_next_thread(process_t * process);
 void scheduler_handler(cpu_context_t* ctx, uint8_t cpu_id);
-void scheduler_save_context(cpu_context_t* ctx);
-
-scheduler_queue_t * scheduler_get_process_queue(scheduler_queue_id_t queue);
-status_t scheduler_add_process(process_t * process, scheduler_queue_id_t queue);
-status_t scheduler_move_process(process_t * process, scheduler_queue_id_t queue);
-status_t scheduler_remove_process(process_t * process);
-status_t scheduler_flush_queue(scheduler_queue_id_t queue);
-
-status_t scheduler_send_event_to_queue(scheduler_queue_id_t queue, int event);
-status_t scheduler_send_event_to_process(process_t * process, int event);
 
 thread_t * scheduler_get_current_thread();
 
+status_t scheduler_add(thread_t * thread);
+status_t scheduler_remove(thread_t * thread);
+
+//who values:
+// Positive numbers > 100: Send to all threads in the process with the given PID
+// 3: Send to all threads in all processes
+// 2: Send to all threads in the current process
+// 1: Send to current thread
+// 0 and negative numbers: Send to all threads with the state equal to the absolute value of who
+status_t scheduler_send_event(int event, int who);
 #endif

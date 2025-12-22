@@ -68,9 +68,9 @@ void remove(sleeping_thread_t * node) {
 
 void sleep(thread_t * thread, int condition) {
     new(condition, thread, NULL, NULL);
-    thread->state = THREAD_STATE_SLEEPING;
+    thread->state = PROCESS_STATUS_INTERRUPTIBLE_SLEEP;
 }
 
 void wakeup(int condition) {
-
+    (void)condition;
 }

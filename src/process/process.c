@@ -36,9 +36,13 @@ int process_allocate_fd_slot(process_t *proc) {
 }
 
 status_t process_waitpid(process_t * proc, int pid, int * status, int options) {
+    (void)options; // Unused for now
+    (void)status; // Unused for now
+    (void)proc;   // Unused for now
     if (pid < -1 || pid == 0) {
         return -EINVAL;
     }
+    return -ECHILD;
 }
 
 void create_args(process_t * process, const char ** argv, const char ** envp, struct auxv ** out_auxv, uint64_t * out_auxv_size) {
@@ -135,7 +139,6 @@ process_t * process_create(process_t * parent, const char * filename, const char
     new_process->thread_count = 0;
     new_process->current_thread = NULL;
     new_process->nice = 0xA;
-    new_process->current_nice = 0xA;
     new_process->main_thread = NULL;
     new_process->pid = -1; // Will be set by scheduler
 
@@ -243,7 +246,7 @@ thread_t * duplicate_thread(process_t * parent, thread_t * og) {
         return NULL;
     }
     memset(new_thread, 0, sizeof(thread_t));
-
+    new_thread->event_queue = NULL;
     new_thread->stack_size = og->stack_size;
     new_thread->kstack = kmalloc(sizeof(stack_t));
     if (!new_thread->kstack) {
@@ -264,6 +267,7 @@ thread_t * duplicate_thread(process_t * parent, thread_t * og) {
         kfree(new_thread);
         return NULL;
     }
+    new_thread->prio = og->prio;
 
     new_ctx_info->thread = new_thread;
     new_ctx_info->kernel_stack = new_thread->kstack->top;
@@ -388,7 +392,6 @@ process_t * process_fork(process_t * parent, thread_t * forking_thread) {
     child->uid = parent->uid;
     child->gid = parent->gid;
     child->nice = parent->nice;
-    child->current_nice = parent->current_nice;
     child->binary_entry = parent->binary_entry;
     child->exit_code = 0;
     for (int i = 0; i < parent->open_file_count; i++) {
@@ -451,6 +454,56 @@ status_t process_execve(process_t * process, const char * filename, const char *
     return SUCCESS;
 }
 
+status_t process_enqueue_event(thread_t * thread, int event) {
+    //Make sure thread is valid and the event is not already in the queue (no duplicates)
+    if (!thread) {
+        panic("process_enqueue_event: thread is NULL");
+        return FAILURE;
+    }
+    thread_event_queue_t * current = thread->event_queue;
+    while (current != NULL) {
+        if (current->event == event) {
+            //Event already in queue
+            return SUCCESS;
+        }
+        current = current->next;
+    }
+    thread_event_queue_t * new_event = kmalloc(sizeof(thread_event_queue_t));
+    if (!new_event) {
+        panic("process_enqueue_event: Failed to allocate memory for new event");
+        return FAILURE;
+    }
+    new_event->event = event;
+    new_event->next = NULL;
+
+    if (!thread->event_queue) {
+        thread->event_queue = new_event;
+    } else {
+        thread_event_queue_t * current = thread->event_queue;
+        while (current->next != NULL) {
+            current = current->next;
+        }
+        current->next = new_event;
+    }
+    return SUCCESS;
+}
+
+status_t process_dequeue_event(thread_t * thread, int * out_event) {
+    //Pop the first event from the thread's event queue
+    if (!thread || !out_event) {
+        panic("process_dequeue_event: thread or out_event is NULL");
+        return FAILURE;
+    }
+    if (!thread->event_queue) {
+        return FAILURE; // No events
+    }
+    thread_event_queue_t * event_node = thread->event_queue;
+    *out_event = event_node->event;
+    thread->event_queue = event_node->next;
+    kfree(event_node);
+    return SUCCESS;
+}
+
 void parse_stack(void * stack) {
     //Print the argc, argv, envp, auxv from the stack
     size_t * pointer_table = (size_t *)stack;
@@ -507,9 +560,10 @@ thread_t * process_create_thread(process_t * process, void * entry_point) {
     memset(new_thread->context->simd_ctx, 0, 512);
     new_thread->process = (void *)process;
     new_thread->entry = entry_point;
-    new_thread->state = THREAD_STATE_RUNABLE;
+    new_thread->state = SCHEDULER_STATUS_RUNABLE;
+    new_thread->prio = process->nice;
     new_thread->stack_size = NEW_PROCESS_STACK_SIZE; // 16 KB stack
-
+    new_thread->event_queue = NULL;
     new_thread->kstack = kstackalloc(process->vmm, KERNEL_STACK_SIZE);
     if (!new_thread->kstack) {
         panic("context_init: Failed to allocate kernel stack for process");
@@ -588,6 +642,19 @@ status_t process_destroy(process_t * process) {
     return SUCCESS;
 }
 
+status_t process_exit(process_t * process, int code) {
+    if (!process) {
+        panic("process_exit: process is NULL");
+        return FAILURE;
+    }
+    process_set_exit_code(process, code);
+    //Change all threads to ZOMBIE
+    for (int i = 0; i < process->thread_count; i++) {
+        process->threads[i].state = SCHEDULER_STATUS_ZOMBIE;
+    }
+    return SUCCESS;
+}
+
 void process_init(const char * INIT_PROCESS, const char * INIT_TTY) {
     process_t * init_process = process_create(INIT_PROCESS_PARENT_CODE, INIT_PROCESS, INIT_TTY, NULL, NULL);
     if (!init_process) {
@@ -603,7 +670,7 @@ void process_init(const char * INIT_PROCESS, const char * INIT_TTY) {
         panic("process_init: Failed to initialize init thread context");
     }
 
-    st = scheduler_add_process(init_process, SCHEDULER_QUEUE_RUNABLE);
+    st = scheduler_add(init_process->main_thread);
     if (st != SUCCESS) {
         panic("process_init: Failed to add init process to scheduler");
     }
