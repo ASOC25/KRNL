@@ -5,6 +5,8 @@
 #include <krnl/arch/x86/acpi.h>
 #include <krnl/mem/vmm.h>
 #include <krnl/debug/debug.h>
+#include <krnl/libraries/lock/spinlock.h>
+#include <krnl/libraries/assert/assert.h>
 
 #define HPET_TIMER_OFFSET_GENERAL_CAPABILITIES_ID               0x0
 #define HPET_TIMER_OFFSET_GENERAL_CONFIGURATION                 0x10
@@ -22,6 +24,7 @@
 static void* hpet_base;
 static uint64_t hpet_frequency;
 uint8_t hpet_is_initialized = 0;
+spinlock_t hpet_lock = SPINLOCK_INIT;
 
 
 static uint64_t hpet_read_register(uint64_t offset){
@@ -65,12 +68,24 @@ uint64_t micro_to_femo(uint64_t micro){
 }
 
 uint64_t hpet_get_current_time(void){
-    return femo_to_micro(hpet_read_register(HPET_TIMER_OFFSET_MAIN_COUNTER_VALUES) * hpet_frequency);
+    assert(hpet_is_initialized);
+    assert(!spinlock_acquire(&hpet_lock));
+    uint64_t current_time = femo_to_micro(hpet_read_register(HPET_TIMER_OFFSET_MAIN_COUNTER_VALUES) * hpet_frequency);
+    spinlock_release(&hpet_lock);
+    return current_time;
 }
 
 void hpet_sleep(uint64_t us){
+    assert(hpet_is_initialized);
+
+    assert(!spinlock_acquire(&hpet_lock));
     uint64_t end = hpet_read_register(HPET_TIMER_OFFSET_MAIN_COUNTER_VALUES) + (micro_to_femo(us)) / hpet_frequency;
-    while(hpet_read_register(HPET_TIMER_OFFSET_MAIN_COUNTER_VALUES) <= end){
+
+    do {
+        spinlock_release(&hpet_lock);
         __asm__ volatile ("pause" : : : "memory");
-    }
+        assert(!spinlock_acquire(&hpet_lock));
+    } while(hpet_read_register(HPET_TIMER_OFFSET_MAIN_COUNTER_VALUES) < end);
+
+    spinlock_release(&hpet_lock);
 }

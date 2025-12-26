@@ -36,7 +36,6 @@ status_t vmarea_munmap(process_t * process, void * address);
 status_t vmarea_fork(process_t * destination, process_t * source);
 status_t vmarea_addforeign(process_t * process, void * addr, uint64_t length, uint8_t prot, uint8_t flags);
 status_t vmarea_try_cow(process_t * process, void * address);
-vm_area_t* vmarea_find(process_t* process, void * address);
 void vmarea_remove_all(process_t * process);
 void vmarea_sync(process_t * process);
 #endif

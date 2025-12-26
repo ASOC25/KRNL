@@ -41,11 +41,30 @@ void idt_init(void) {
     idt_initialized = 1;
 }
 
+struct stackframe {
+  struct stackframe* rbp;
+  uint64_t rip;
+};
+
+void tracestacktrace(unsigned int max_frames)
+{
+    struct stackframe *stk;
+    __asm__ ("movq %%rbp,%0" : "=r"(stk) ::);
+    ktrace("Stack trace:\n");
+    for(unsigned int frame = 0; stk && frame < max_frames; ++frame)
+    {
+        // Unwind to previous stack frame
+        ktrace("0x%llx\n", stk->rip);
+        stk = stk->rbp;
+    }
+}
+
 void exception(cpu_context_t * ctx) {
     //Print cr2 , offending address
     uint64_t cr2;
+    tracestacktrace(10);
     __asm__ volatile("mov %%cr2, %0" : "=r"(cr2));
-    panic("CPU EXCEPTION: %d | Stacktrace (CR2: 0x%016x):", ctx->interrupt_number, cr2);
+    panic("CPU EXCEPTION: %d | Stacktrace (CR2: 0x%llx):", ctx->interrupt_number, cr2);
 }
 
 void interrupt_handler(cpu_context_t* ctx, uint8_t cpu_id) {
@@ -56,7 +75,7 @@ void interrupt_handler(cpu_context_t* ctx, uint8_t cpu_id) {
             uint64_t cr2;
             __asm__ volatile("mov %%cr2, %0" : "=r"(cr2));
             process_t * current_process = 0x0;
-            thread_t *  current_thread = (thread_t *)scheduler_get_current_thread();
+            thread_t *  current_thread = (thread_t *)ctx->ctx_info->thread;
             if (current_thread) {
                 current_process = current_thread->process;
             } else {

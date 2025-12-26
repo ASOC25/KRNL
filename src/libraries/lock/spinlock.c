@@ -1,9 +1,13 @@
 #include <krnl/libraries/lock/spinlock.h>
 
+int global_spinlock_counter = 0;
+
 __attribute__((noinline)) int spinlock_acquire(spinlock_t *lock) {
     volatile size_t deadlock_counter = 0;
     for (;;) {
         if (spinlock_test_and_acq(lock)) {
+            __asm__("cli");
+            global_spinlock_counter++;
             break;
         }
         if (++deadlock_counter >= 10000000) {

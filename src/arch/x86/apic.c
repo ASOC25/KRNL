@@ -6,6 +6,8 @@
 #include <krnl/arch/x86/io.h>
 #include <krnl/mem/vmm.h>
 #include <krnl/debug/debug.h>
+#include <krnl/libraries/lock/spinlock.h>
+#include <krnl/libraries/assert/assert.h>
 
 struct apic_context actx = {0};
 
@@ -53,10 +55,14 @@ void io_change_irq_state(uint8_t irq, uint8_t io_apic_id, uint8_t is_enable){
 }
 
 uint8_t apic_ioapic_mask(uint8_t irq, uint8_t enable) {
+    assert(actx.initialized);
+    assert(!spinlock_acquire(&actx.lock));
     if(irq >= 0x20 && (actx.ioapic_entries[0].max_interrupts + 0x20) > irq) {
         io_change_irq_state(irq - 0x20, 0, enable);
+        spinlock_release(&actx.lock);
         return 1;
     }
+    spinlock_release(&actx.lock);
     return 0;
 }
 
@@ -220,7 +226,8 @@ uint32_t create_register_value_interrupts(struct local_apic_interrupt_register r
 }
 
 void apic_start_lapic_timer(void){
-
+    assert(actx.initialized);
+    assert(!spinlock_acquire(&actx.lock));
     void * lapic_address = actx.lapic_addresses[getApicId()].virtual_address;
     // setup local apic timer
     write_lapic_register(lapic_address, local_apic_register_offset_divide, 0x3); // divide by 16    
@@ -247,9 +254,13 @@ void apic_start_lapic_timer(void){
     write_lapic_register(lapic_address, local_apic_register_offset_initial_count, ticksin10ms * 10); // set timer for 10ms
 
     actx.lapic_timer_ticks_per_ms = ticksin10ms / 10;
+    spinlock_release(&actx.lock);
 }
 
 void apic_arm_lapic_timer(uint8_t cpu_id, uint32_t ms) {
+    assert(cpu_id < actx.lapic_count);
+    assert(ms > 0);
+    assert(!spinlock_acquire(&actx.lock));
     if (!actx.initialized || !actx.lapic_addresses[cpu_id].virtual_address) {
         panic("apic_arm_lapic_timer: Invalid CPU ID or LAPIC address not initialized");
     }
@@ -259,15 +270,23 @@ void apic_arm_lapic_timer(uint8_t cpu_id, uint32_t ms) {
     uint32_t remaining_ticks = read_lapic_register(lapic_address, local_apic_register_offset_curent_count);
     uint32_t remaining_ms = remaining_ticks / actx.lapic_timer_ticks_per_ms;
     //Print ms remaining ticks and total ticks
-    kprintf("APIC Timer Arm: CPU %d, remaining ms: %d, rearming for %d ms \n", cpu_id, remaining_ms, ms);
     write_lapic_register(lapic_address, local_apic_register_offset_initial_count, ticks);
+    spinlock_release(&actx.lock);
+    kprintf("APIC Timer Arm: CPU %d, remaining ms: %d, rearming for %d ms \n", cpu_id, remaining_ms, ms);
+
 }
 
 void apic_init(void) {
     if (actx.initialized) {
+        actx.lock.lock = 0;
+        actx.lock.last_acquirer = NULL;
+        assert(!spinlock_acquire(&actx.lock));
         apic_enable_for_cpu(getApicId());
+        spinlock_release(&actx.lock);
         return;
     }
+
+    assert(!spinlock_acquire(&actx.lock));
 
     acpi_madt_header_t* madt = acpi_get_headers()->madt_header;
     if (madt == 0) {
@@ -286,10 +305,15 @@ void apic_init(void) {
     for (uint64_t i = 0; i < actx.ioapic_count; i++) {
         ioapic_init(i);
     }
-
+    spinlock_release(&actx.lock);
     actx.initialized = 1;
 }
 
 void apic_local_eoi(uint8_t cpu_id) {
+    assert(actx.initialized);
+    assert(cpu_id < actx.lapic_count);
+    assert(actx.lapic_addresses[cpu_id].virtual_address != NULL);
+    assert(!spinlock_acquire(&actx.lock));
     write_lapic_register(actx.lapic_addresses[cpu_id].virtual_address, LAPIC_EOI, 0);
+    spinlock_release(&actx.lock);
 }

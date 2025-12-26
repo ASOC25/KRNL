@@ -67,7 +67,6 @@ uint64_t vmm_from_device_map(uint64_t address);
 
 uint8_t vmm_check_and_clean_dirty(vmm_root_t * root, uint64_t virtual_address, uint64_t pages, uint64_t page_size);
 
-
 void vmm_set_root(vmm_root_t * root);
 void vmm_free_root(vmm_root_t * root);
 vmm_root_t * vmm_get_root(void);

@@ -9,5 +9,6 @@ define hook-stop
   x/10ig $rip
 end
 hbreak boot_startup
+hbreak exception
 hbreak main
 c

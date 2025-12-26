@@ -19,8 +19,6 @@
 
 void scheduler_handler(cpu_context_t* ctx, uint8_t cpu_id);
 
-thread_t * scheduler_get_current_thread();
-
 status_t scheduler_add(thread_t * thread);
 status_t scheduler_remove(thread_t * thread);
 
@@ -31,4 +29,6 @@ status_t scheduler_remove(thread_t * thread);
 // 1: Send to current thread
 // 0 and negative numbers: Send to all threads with the state equal to the absolute value of who
 status_t scheduler_send_event(int event, int who);
+
+void scheduler_inhibit(uint8_t inhibit);
 #endif

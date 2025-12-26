@@ -81,7 +81,7 @@ status_t ramdisk_init_pnp(void) {
     ramdisk_devices[0].start_address = (uint64_t)RAMDISK_START;
     ramdisk_devices[0].size = ramdisk_size;
 
-    if (devices_new_device(RAMDISK_DRIVER_MAJOR, 0) != SUCCESS) {
+    if (devices_new_device(RAMDISK_DRIVER_MAJOR, 0, DEVICES_SPINLOCK) != SUCCESS) {
         silent_panic();
     }
 

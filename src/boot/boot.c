@@ -2,6 +2,7 @@
 #include <krnl/boot/bootloaders/bootloader.h>
 #include <krnl/drivers/serial/serial.h>
 #include <krnl/drivers/ramdisk/ramdisk.h>
+#include <krnl/drivers/framebuffer/framebuffer.h>
 #include <krnl/devices/devices.h>
 #include <krnl/libraries/std/string.h>
 #include <krnl/libraries/std/stddef.h>
@@ -16,12 +17,12 @@
 #include <krnl/fs/tty/tty.h>
 #include <krnl/vfs/vfs.h>
 #include <krnl/arch/x86/apic.h>
+#include <krnl/process/scheduler.h>
 
 extern uint8_t getApicId(void);
 
 void boot_startup() {
-    __asm__("cli");
-
+    scheduler_inhibit(1);
     //Init the bootloader
     init_bootloader();
     //Optionally init the framebuffer
@@ -31,8 +32,9 @@ void boot_startup() {
     //Init the early debugger over dcon or serial
     serial_init_pnp();
     ramdisk_init_pnp();
-    debug_init(3, 0); //Major 3 is debug console [¡¡¡¡¡¡¡¡¡THIS MAY CHANGE!!!!!!!!]
+    framebuffer_init_pnp();
     //Init memory management subsystem
+    ktrace("This is a fucking test...\n");
     mem_init();
     //Init the CPU subsystem
     cpu_init();
@@ -61,5 +63,6 @@ void boot_startup() {
 
     process_init("/init.elf", "/dev/tty0");
     __asm__("sti");
+    scheduler_inhibit(0);
     while (1);
 }

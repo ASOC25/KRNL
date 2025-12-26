@@ -9,6 +9,7 @@
 #include <krnl/libraries/std/elf.h>
 #include <krnl/mem/vmarea.h>
 #include <krnl/mem/allocator.h>
+#include <krnl/libraries/lock/spinlock.h>
 
 #define PROCESS_STATUS_RUNABLE 0x1
 #define PROCESS_STATUS_INTERRUPTIBLE_SLEEP 0x2
@@ -34,10 +35,10 @@ typedef struct {
     uint64_t fs_base;
 } context_t;
 
-typedef struct thread_event_queue {
+typedef struct event_queue {
     int event;
-    struct thread_event_queue * next;
-} thread_event_queue_t;
+    struct event_queue * next;
+} event_queue_t;
 
 typedef struct thread_t {
     context_t* context;
@@ -45,7 +46,7 @@ typedef struct thread_t {
     void * process;
     stack_t * kstack;
     farlands_stack_t * ustack;
-    thread_event_queue_t * event_queue;
+    event_queue_t * event_queue;
     uint64_t stack_size;
     uint8_t state;
     long prio;
@@ -54,11 +55,13 @@ typedef struct thread_t {
 typedef struct process_t {
     vmm_root_t * vmm;
     vm_area_t *vm_areas;
+    spinlock_t vm_area_lock;
 
     thread_t threads[MAX_THREADS_PER_PROCESS];
     int thread_count;
     thread_t * current_thread;
     thread_t * main_thread;
+    event_queue_t * event_queue;
 
     pid_t pid;
     pid_t ppid;
@@ -80,21 +83,19 @@ typedef struct process_t {
     uint64_t auxv_size;
 } process_t;
 
-void process_set_exit_code(process_t * process, int code);
 vfs_file_descriptor_t * process_get_fd(process_t *proc, int fd);
 int process_allocate_fd_slot(process_t *proc);
-process_t * process_create(process_t * parent, const char * filename, const char * tty, const char ** argv, const char ** envp);
-thread_t * process_create_thread(process_t * process, void * entry_point);
-status_t process_init_thread_context(context_t * context, vmm_root_t* root, void * pc, void * stack_top, char ** args, thread_t * thread);
-status_t process_destroy(process_t * process);
 
 void context_save(context_t* ctx, cpu_context_t* cpu_ctx);
 void context_restore(context_t* ctx, cpu_context_t* cpu_ctx);
+
 status_t process_execve(process_t * process, const char * filename, const char ** argv, const char ** envp);
 process_t * process_fork(process_t * parent, thread_t * forking_thread);
 status_t process_waitpid(process_t * proc, int pid, int * status, int options);
 status_t process_enqueue_event(thread_t * thread, int event);
 status_t process_dequeue_event(thread_t * thread, int * out_event);
 status_t process_exit(process_t * process, int code);
+status_t process_destroy(process_t * process);
+
 void process_init();
 #endif

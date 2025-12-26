@@ -4,6 +4,9 @@
 #include <krnl/vfs/vfs.h>
 #include <krnl/debug/debug.h>
 #include <krnl/libraries/std/string.h>
+#include <krnl/libraries/lock/spinlock.h>
+#include <krnl/libraries/assert/assert.h>
+spinlock_t vmarea_global_lock = SPINLOCK_INIT;
 
 vm_area_t* vmarea_find(process_t* process, void * address) {
     vm_area_t * current = process->vm_areas;
@@ -48,7 +51,7 @@ status_t vmarea_fork(process_t * destination, process_t * source) {
     if (!destination || !source) {
         panic("vmarea_fork: destination or source is NULL");
     }
-
+    assert(!spinlock_acquire(&vmarea_global_lock));
     vm_area_t * current = source->vm_areas;
     while (current) {
         vm_area_t * copy = vmarea_create(
@@ -91,6 +94,8 @@ status_t vmarea_fork(process_t * destination, process_t * source) {
         }
         current = current->next;
     }
+
+    spinlock_release(&vmarea_global_lock);
 
     return SUCCESS;;
 }
@@ -136,6 +141,7 @@ status_t vmarea_try_cow(process_t * process, void * address) {
     //Copy the data
     memcpy((void*)vma->start ,(void*)vmm_to_identity_map(original_physical), vma->size);
     vma->cow = 0;
+
     return SUCCESS;
 }
 
@@ -181,6 +187,7 @@ void * vmarea_find_space(process_t * process, void * hint, uint64_t size, uint64
 }
 
 void vmarea_sync(process_t * process) {
+    assert(!spinlock_acquire(&process->vm_area_lock));
     vm_area_t * current = process->vm_areas;
     while (current) {
         if (current->fd == -1) goto advance;
@@ -198,14 +205,18 @@ void vmarea_sync(process_t * process) {
 advance:
         current = current->next;
     }
+
+    spinlock_release(&process->vm_area_lock);
 }
 
 status_t vmarea_addforeign(process_t * process, void * addr, uint64_t length, uint8_t prot, uint8_t flags) {
+    assert(!spinlock_acquire(&process->vm_area_lock));
     vmarea_create(process, addr, length, VMM_PAGE_SIZE_4KB, flags, prot, -1, 0);
+    spinlock_release(&process->vm_area_lock);
     return SUCCESS;
 }
 
-status_t vmarea_remove(process_t * process, void * address) {
+status_t vmarea_remove_locked(process_t * process, void * address) {
     vm_area_t * current = process->vm_areas;
     vm_area_t * previous = 0;
     while (current) {
@@ -224,7 +235,15 @@ status_t vmarea_remove(process_t * process, void * address) {
     return FAILURE;
 }
 
+status_t vmarea_remove(process_t * process, void * address) {
+    assert(!spinlock_acquire(&process->vm_area_lock));
+    status_t st = vmarea_remove_locked(process, address);
+    spinlock_release(&process->vm_area_lock);
+    return st;
+}
+
 void vmarea_remove_all(process_t * process) {
+    assert(!spinlock_acquire(&process->vm_area_lock));
     vm_area_t * current = process->vm_areas;
     while (current) {
         vm_area_t * next = current->next;
@@ -232,9 +251,11 @@ void vmarea_remove_all(process_t * process) {
         current = next;
     }
     process->vm_areas = 0;
+    spinlock_release(&process->vm_area_lock);
 }
 
 status_t vmarea_mprotect(process_t * process, void * address, uint64_t size, uint8_t new_prot) {
+    assert(!spinlock_acquire(&process->vm_area_lock));
     vm_area_t * current = process->vm_areas;
     while (current) {
         if (address >= current->start && (uint64_t)address + size <= (uint64_t)(current->start + current->size)) {
@@ -255,6 +276,7 @@ status_t vmarea_mprotect(process_t * process, void * address, uint64_t size, uin
         }
         current = current->next;
     }
+    spinlock_release(&process->vm_area_lock);
     return FAILURE;
 }
 
@@ -262,9 +284,13 @@ void * vmarea_mmap(process_t * process, void * addr, uint64_t length, uint8_t pr
     if (process == NULL) {
         panic("vmarea_mmap: process is NULL");
     }
+
+    assert(!spinlock_acquire(&process->vm_area_lock));
+
     if (addr == 0) {
         addr = vmarea_find_space(process, addr, length, VMM_PAGE_SIZE_4KB);
         if (addr == MAP_FAILED) {
+            spinlock_release(&process->vm_area_lock);
             return MAP_FAILED;
         }
     } else {
@@ -280,6 +306,7 @@ void * vmarea_mmap(process_t * process, void * addr, uint64_t length, uint8_t pr
         };
         vm_area_t * collision = vmarea_collides(process, &desired_vma);
         if (collision) {
+            spinlock_release(&process->vm_area_lock);
             return MAP_FAILED;
         }
     }
@@ -313,13 +340,15 @@ void * vmarea_mmap(process_t * process, void * addr, uint64_t length, uint8_t pr
         file_desc->position = saved_position;
     }
 
+    spinlock_release(&process->vm_area_lock);
     return addr;
-    
 }
 
 status_t vmarea_munmap(process_t * process, void * address) {
+    assert(!spinlock_acquire(&process->vm_area_lock));
     vm_area_t * vma = vmarea_find(process, address);
     if (!vma) {
+        spinlock_release(&process->vm_area_lock);
         return FAILURE;
     }
 
@@ -327,10 +356,12 @@ status_t vmarea_munmap(process_t * process, void * address) {
     free(process->vmm, address);
 
     //Remove vm area
-    status_t st = vmarea_remove(process, address);
+    status_t st = vmarea_remove_locked(process, address);
     if (st != SUCCESS) {
+        spinlock_release(&process->vm_area_lock);
         return st;
     }
 
+    spinlock_release(&process->vm_area_lock);
     return SUCCESS;
 }

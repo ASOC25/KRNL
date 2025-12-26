@@ -11,20 +11,30 @@
 #include <krnl/process/loader.h>
 #include <krnl/mem/mmap.h>
 #include <krnl/libraries/std/errno.h>
+#include <krnl/libraries/lock/spinlock.h>
+#include <krnl/libraries/assert/assert.h>
 
 extern void set_cpu_fs_base(uint64_t base);
 
+spinlock_t process_global_lock = SPINLOCK_INIT;
+
 vfs_file_descriptor_t * process_get_fd(process_t *proc, int fd) {
     if (!proc) return NULL;
-    if (fd < 0 || fd >= MAX_OPEN_FILES) return NULL;
+    assert(!spinlock_acquire(&process_global_lock));
+    if (fd < 0 || fd >= MAX_OPEN_FILES) {
+        spinlock_release(&process_global_lock);
+        return NULL;
+    }
     vfs_file_descriptor_t *desc = &proc->open_files[fd];
     if (desc->mount == NULL && desc->native_path == NULL) {
+        spinlock_release(&process_global_lock); 
         return NULL; // unused slot
     }
+    spinlock_release(&process_global_lock);
     return desc;
 }
 
-int process_allocate_fd_slot(process_t *proc) {
+int process_allocate_fd_slot_locked(process_t *proc) {
     if (!proc) return -1;
     for (int i = 0; i < MAX_OPEN_FILES; ++i) {
         vfs_file_descriptor_t *d = &proc->open_files[i];
@@ -35,13 +45,25 @@ int process_allocate_fd_slot(process_t *proc) {
     return -1;
 }
 
+int process_allocate_fd_slot(process_t *proc) {
+    if (!proc) return -1;
+    assert(!spinlock_acquire(&process_global_lock));
+    int slot = process_allocate_fd_slot_locked(proc);
+    spinlock_release(&process_global_lock);
+    return slot;
+}
+
+
 status_t process_waitpid(process_t * proc, int pid, int * status, int options) {
     (void)options; // Unused for now
     (void)status; // Unused for now
     (void)proc;   // Unused for now
+    assert(!spinlock_acquire(&process_global_lock));
     if (pid < -1 || pid == 0) {
+        spinlock_release(&process_global_lock);
         return -EINVAL;
     }
+    spinlock_release(&process_global_lock);
     return -ECHILD;
 }
 
@@ -91,7 +113,7 @@ void create_args(process_t * process, const char ** argv, const char ** envp, st
 void process_open_stdfiles(process_t * process, const char * tty) {
     // Open stdin, stdout, stderr to the given tty
     for (int fd = 0; fd < 3; fd++) {
-        int slot = process_allocate_fd_slot(process);
+        int slot = process_allocate_fd_slot_locked(process);
         if (slot < 0) {
             panic("process_open_stdfiles: Unable to allocate fd slot");
         }
@@ -139,6 +161,7 @@ process_t * process_create(process_t * parent, const char * filename, const char
     new_process->thread_count = 0;
     new_process->current_thread = NULL;
     new_process->nice = 0xA;
+    new_process->event_queue = NULL;
     new_process->main_thread = NULL;
     new_process->pid = -1; // Will be set by scheduler
 
@@ -223,16 +246,19 @@ void simd_save_context(void* ctx) {
 void simd_restore_context(void* ctx) {
     __asm__ volatile("fxrstor (%0) "::"r"(ctx));
 }
-
 void context_save(context_t* ctx, cpu_context_t* cpu_ctx){
+    assert(!spinlock_acquire(&process_global_lock));
     simd_save_context(ctx->simd_ctx);
     memcpy(&ctx->cpu_ctx, cpu_ctx, sizeof(cpu_context_t));
+    spinlock_release(&process_global_lock);
 }
 
 void context_restore(context_t* ctx, cpu_context_t* cpu_ctx){
+    assert(!spinlock_acquire(&process_global_lock));
     simd_restore_context(ctx->simd_ctx);
     set_cpu_fs_base(ctx->fs_base);
     memcpy(cpu_ctx, &ctx->cpu_ctx, sizeof(cpu_context_t));
+    spinlock_release(&process_global_lock);
 }
 
 thread_t * duplicate_thread(process_t * parent, thread_t * og) {
@@ -342,11 +368,13 @@ process_t * process_fork(process_t * parent, thread_t * forking_thread) {
     if (!parent || !forking_thread) {
         return NULL;
     }
+    assert(!spinlock_acquire(&process_global_lock));
     kprintf("Process %d is forking thread %p\n", parent->pid, forking_thread);
 
     process_t * child = kmalloc(sizeof(process_t));
     if (!child) {
         panic("process_fork: Failed to allocate memory for child process");
+        spinlock_release(&process_global_lock);
         return NULL;
     }
     memset(child, 0, sizeof(process_t));
@@ -355,12 +383,14 @@ process_t * process_fork(process_t * parent, thread_t * forking_thread) {
     if (!parent->vmm) {
         panic("process_fork: Parent process has no VMM");
         kfree(child);
+        spinlock_release(&process_global_lock);
         return NULL;
     } else {
         child->vmm = vmm_duplicate_fullspace(parent->vmm);
         if (!child->vmm) {
             panic("process_fork: Failed to duplicate VMM for child process");
             kfree(child);
+            spinlock_release(&process_global_lock);
             return NULL;
         }
     }
@@ -370,6 +400,7 @@ process_t * process_fork(process_t * parent, thread_t * forking_thread) {
         panic("process_fork: Failed to duplicate VM areas for child process");
         vmm_free_root(child->vmm);
         kfree(child);
+        spinlock_release(&process_global_lock);
         return NULL;
     }
 
@@ -380,6 +411,7 @@ process_t * process_fork(process_t * parent, thread_t * forking_thread) {
         vmarea_remove_all(child);
         vmm_free_root(child->vmm);
         kfree(child);
+        spinlock_release(&process_global_lock);
         return NULL;
     }
 
@@ -392,6 +424,7 @@ process_t * process_fork(process_t * parent, thread_t * forking_thread) {
     child->uid = parent->uid;
     child->gid = parent->gid;
     child->nice = parent->nice;
+    child->event_queue = NULL;
     child->binary_entry = parent->binary_entry;
     child->exit_code = 0;
     for (int i = 0; i < parent->open_file_count; i++) {
@@ -401,107 +434,8 @@ process_t * process_fork(process_t * parent, thread_t * forking_thread) {
 
     create_args(child, (const char **)parent->argv, (const char **)parent->envp, &parent->auxv, &parent->auxv_size);
     child_thread->context->cpu_ctx.rax = 0; // Child process gets 0 return value from fork
+    spinlock_release(&process_global_lock);
     return child;
-}
-
-status_t process_execve(process_t * process, const char * filename, const char ** argv, const char ** envp) {
-    if (!process) {
-        panic("process_execve: process is NULL");
-        return FAILURE;
-    }
-
-    process->vmm = vmm_duplicate_kspace();
-    if (!process->vmm) {
-        panic("process_execve: Failed to duplicate kernel space VMM");
-        return FAILURE;
-    }
-    vmarea_remove_all(process);
-
-    loaded_elf_t * elf = elf_load_elf(process, filename);
-    if (!elf) {
-        panic("process_execve: Failed to load ELF binary");
-        return FAILURE;
-    }
-
-    create_args(process, argv, envp, &elf->auxv, &elf->auxv_size);
-
-    process->binary_entry = (void *)elf->ehdr->e_entry;
-
-    thread_t * new_thread = process_create_thread(process, process->binary_entry);
-    if (!new_thread) {
-        panic("process_execve: Failed to create main thread");
-        return FAILURE;
-    }
-
-    process->main_thread = new_thread;
-    process->current_thread = new_thread;
-    process->threads[0] = *new_thread;
-    process->thread_count = 1;
-
-    status_t st = process_init_thread_context(
-        new_thread->context,
-        process->vmm,
-        process->binary_entry,
-        (void *)new_thread->ustack->top,
-        process->argv,
-        new_thread
-    );
-
-    if (st != SUCCESS) {
-        panic("process_execve: Failed to initialize main thread context");
-    }
-
-    return SUCCESS;
-}
-
-status_t process_enqueue_event(thread_t * thread, int event) {
-    //Make sure thread is valid and the event is not already in the queue (no duplicates)
-    if (!thread) {
-        panic("process_enqueue_event: thread is NULL");
-        return FAILURE;
-    }
-    thread_event_queue_t * current = thread->event_queue;
-    while (current != NULL) {
-        if (current->event == event) {
-            //Event already in queue
-            return SUCCESS;
-        }
-        current = current->next;
-    }
-    thread_event_queue_t * new_event = kmalloc(sizeof(thread_event_queue_t));
-    if (!new_event) {
-        panic("process_enqueue_event: Failed to allocate memory for new event");
-        return FAILURE;
-    }
-    new_event->event = event;
-    new_event->next = NULL;
-
-    if (!thread->event_queue) {
-        thread->event_queue = new_event;
-    } else {
-        thread_event_queue_t * current = thread->event_queue;
-        while (current->next != NULL) {
-            current = current->next;
-        }
-        current->next = new_event;
-    }
-    return SUCCESS;
-}
-
-status_t process_dequeue_event(thread_t * thread, int * out_event) {
-    //Pop the first event from the thread's event queue
-    if (!thread || !out_event) {
-        panic("process_dequeue_event: thread or out_event is NULL");
-        return FAILURE;
-    }
-    if (!thread->event_queue) {
-        return FAILURE; // No events
-    }
-    thread_event_queue_t * event_node = thread->event_queue;
-    *out_event = event_node->event;
-    thread->event_queue = event_node->next;
-    kfree(event_node);
-    return SUCCESS;
 }
 
 void parse_stack(void * stack) {
@@ -596,6 +530,118 @@ thread_t * process_create_thread(process_t * process, void * entry_point) {
     return new_thread;
 }
 
+status_t process_execve(process_t * process, const char * filename, const char ** argv, const char ** envp) {
+    if (!process) {
+        panic("process_execve: process is NULL");
+        return FAILURE;
+    }
+    assert(!spinlock_acquire(&process_global_lock));
+    process->vmm = vmm_duplicate_kspace();
+    if (!process->vmm) {
+        panic("process_execve: Failed to duplicate kernel space VMM");
+        spinlock_release(&process_global_lock);
+        return FAILURE;
+    }
+    vmarea_remove_all(process);
+
+    loaded_elf_t * elf = elf_load_elf(process, filename);
+    if (!elf) {
+        panic("process_execve: Failed to load ELF binary");
+        spinlock_release(&process_global_lock);
+        return FAILURE;
+    }
+
+    create_args(process, argv, envp, &elf->auxv, &elf->auxv_size);
+
+    process->binary_entry = (void *)elf->ehdr->e_entry;
+
+    thread_t * new_thread = process_create_thread(process, process->binary_entry);
+    if (!new_thread) {
+        panic("process_execve: Failed to create main thread");
+        spinlock_release(&process_global_lock);
+        return FAILURE;
+    }
+
+    process->main_thread = new_thread;
+    process->current_thread = new_thread;
+    process->threads[0] = *new_thread;
+    process->thread_count = 1;
+
+    status_t st = process_init_thread_context(
+        new_thread->context,
+        process->vmm,
+        process->binary_entry,
+        (void *)new_thread->ustack->top,
+        process->argv,
+        new_thread
+    );
+
+    if (st != SUCCESS) {
+        panic("process_execve: Failed to initialize main thread context");
+        spinlock_release(&process_global_lock);
+    }
+    spinlock_release(&process_global_lock);
+    return SUCCESS;
+}
+
+status_t process_enqueue_event(thread_t * thread, int event) {
+    //Make sure thread is valid and the event is not already in the queue (no duplicates)
+    if (!thread) {
+        panic("process_enqueue_event: thread is NULL");
+        return FAILURE;
+    }
+    assert(!spinlock_acquire(&process_global_lock));
+    event_queue_t * current = thread->event_queue;
+    while (current != NULL) {
+        if (current->event == event) {
+            //Event already in queue
+            spinlock_release(&process_global_lock);
+            return SUCCESS;
+        }
+        current = current->next;
+    }
+    event_queue_t * new_event = kmalloc(sizeof(event_queue_t));
+    if (!new_event) {
+        panic("process_enqueue_event: Failed to allocate memory for new event");
+        spinlock_release(&process_global_lock);
+        return FAILURE;
+    }
+    new_event->event = event;
+    new_event->next = NULL;
+
+    if (!thread->event_queue) {
+        thread->event_queue = new_event;
+    } else {
+        event_queue_t * current = thread->event_queue;
+        while (current->next != NULL) {
+            current = current->next;
+        }
+        current->next = new_event;
+    }
+    spinlock_release(&process_global_lock);
+    return SUCCESS;
+}
+
+status_t process_dequeue_event(thread_t * thread, int * out_event) {
+    //Pop the first event from the thread's event queue
+    if (!thread || !out_event) {
+        panic("process_dequeue_event: thread or out_event is NULL");
+        return FAILURE;
+    }
+
+    assert(!spinlock_acquire(&process_global_lock));
+    if (!thread->event_queue) {
+        spinlock_release(&process_global_lock);
+        return FAILURE; // No events
+    }
+    event_queue_t * event_node = thread->event_queue;
+    *out_event = event_node->event;
+    thread->event_queue = event_node->next;
+    kfree(event_node);
+    spinlock_release(&process_global_lock);
+    return SUCCESS;
+}
+
 void process_set_exit_code(process_t * process, int code) {
     if (!process) {
         panic("process_set_exit_code: process is NULL");
@@ -609,7 +655,7 @@ status_t process_destroy_thread(process_t * process, thread_t * thread) {
         panic("process_destroy_thread: thread is NULL");
         return FAILURE;
     }
-
+    
     if (thread->context) {
         simd_free_context(thread->context->simd_ctx);
         kfree(thread->context->cpu_ctx.ctx_info);
@@ -631,7 +677,7 @@ status_t process_destroy(process_t * process) {
         panic("process_destroy: process is NULL");
         return FAILURE;
     }
-
+    assert(!spinlock_acquire(&process_global_lock));
     for (int i = 0; i < process->thread_count; i++) {
         process_destroy_thread(process, &process->threads[i]);
     }
@@ -639,6 +685,7 @@ status_t process_destroy(process_t * process) {
     vmarea_remove_all(process);
     vmm_free_root(process->vmm);
     kfree(process);
+    spinlock_release(&process_global_lock);
     return SUCCESS;
 }
 
@@ -647,15 +694,18 @@ status_t process_exit(process_t * process, int code) {
         panic("process_exit: process is NULL");
         return FAILURE;
     }
+    assert(!spinlock_acquire(&process_global_lock));
     process_set_exit_code(process, code);
     //Change all threads to ZOMBIE
     for (int i = 0; i < process->thread_count; i++) {
         process->threads[i].state = SCHEDULER_STATUS_ZOMBIE;
     }
+    spinlock_release(&process_global_lock);
     return SUCCESS;
 }
 
 void process_init(const char * INIT_PROCESS, const char * INIT_TTY) {
+    assert(INIT_PROCESS != NULL);
     process_t * init_process = process_create(INIT_PROCESS_PARENT_CODE, INIT_PROCESS, INIT_TTY, NULL, NULL);
     if (!init_process) {
         panic("process_init: Failed to create init process");
@@ -674,4 +724,5 @@ void process_init(const char * INIT_PROCESS, const char * INIT_TTY) {
     if (st != SUCCESS) {
         panic("process_init: Failed to add init process to scheduler");
     }
+    spinlock_release(&process_global_lock);
 }

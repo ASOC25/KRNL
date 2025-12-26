@@ -44,7 +44,7 @@ status_t tty_ioctl(device_major_t major, device_minor_t minor, const char * path
 void tty_init(void) {
     vfs_fs_t *tty_ops = (vfs_fs_t *)kmalloc(sizeof(vfs_fs_t));
     if (!tty_ops) {
-        panic("x1fs_init: Unable to allocate memory for TTY operations");
+        panic("tty_init: Unable to allocate memory for TTY operations");
     }
 
     memset(tty_ops->name, 0, 32);

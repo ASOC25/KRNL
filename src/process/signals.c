@@ -69,8 +69,16 @@ void remove(sleeping_thread_t * node) {
 void sleep(thread_t * thread, int condition) {
     new(condition, thread, NULL, NULL);
     thread->state = PROCESS_STATUS_INTERRUPTIBLE_SLEEP;
+    while (thread->state == PROCESS_STATUS_INTERRUPTIBLE_SLEEP) {
+        
+    }
 }
 
 void wakeup(int condition) {
     (void)condition;
+}
+
+void signal(process_t * process, int signal) {
+    (void)process;
+    (void)signal;
 }
