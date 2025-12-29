@@ -3,7 +3,6 @@
 #include <krnl/mem/allocator.h>
 #include <krnl/debug/debug.h>
 #include <krnl/libraries/std/string.h>
-#include <krnl/libraries/lock/spinlock.h>
 #include <krnl/libraries/assert/assert.h>
 
 struct allocation {
@@ -27,8 +26,6 @@ struct alloc_buffer {
 
 struct allocation * allocations_head = NULL;
 struct alloc_buffer current_alloc_buffer = {0};
-spinlock_t allocator_spinlock = SPINLOCK_INIT;
-spinlock_t allocator_stack_spinlock = SPINLOCK_INIT;
 
 void add_allocation(vmm_root_t* root, void * physical_address, vmm_root_t * access_root, void * access_address, void * virtual_address, uint64_t size, uint8_t permisions) {
     if (current_alloc_buffer.buffer_base_address == NULL || current_alloc_buffer.buffer_free_allocations == 0) {
@@ -94,7 +91,6 @@ uint8_t should_deallocate_pmm(vmm_root_t * root, void * physical_address) {
 }
 
 void * kmalloc(uint64_t size) {
-    assert(!spinlock_acquire(&allocator_spinlock));
     void * phys_addr = pmm_alloc_pages((size + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE);
     if (phys_addr == NULL) {
         panic("kmalloc: Failed to allocate physical memory");
@@ -103,13 +99,11 @@ void * kmalloc(uint64_t size) {
     memset(virt_addr, 0, (size + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE * PMM_PAGE_SIZE);
     add_allocation(vmm_get_root(), phys_addr, NULL, 0x0, virt_addr, size, 0x3); //RW permisions
     
-    spinlock_release(&allocator_spinlock);
     return virt_addr;
 }
 
 //VERY IMPORTANT: WE ASUME THAT STACKS GROW DOWNWARDS, ALSO KERNEL STACKS CANNOT GROW
 stack_t * kstackalloc(vmm_root_t * root, uint64_t size) {
-    assert(!spinlock_acquire(&allocator_stack_spinlock));
     void * phys_addr = pmm_alloc_pages((size + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE);
     if (phys_addr == 0x0) {
         panic("kstackalloc: Failed to allocate physical memory");
@@ -130,12 +124,10 @@ stack_t * kstackalloc(vmm_root_t * root, uint64_t size) {
     stk->top = (void *)(top_address);
     stk->base = (void *)(base_address);
     stk->flags = VMM_WRITE_BIT;
-    spinlock_release(&allocator_stack_spinlock);
     return stk;
 }
 
 void kfree(void * virtual_address) {
-    assert(!spinlock_acquire(&allocator_spinlock));
     //Find the allocation
     struct allocation * current = allocations_head;
 
@@ -145,17 +137,14 @@ void kfree(void * virtual_address) {
             pmm_free_pages(current->physical_address, (current->size + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE);
             //remove the allocation from the list
             remove_allocation(NULL, virtual_address);
-            spinlock_release(&allocator_spinlock);
             return;
         }
         current = current->next;
     }
-    spinlock_release(&allocator_spinlock);
     panic("kfree: Allocation not found for pointer %p\n", virtual_address);
 }
 
 void kstackfree(stack_t * stk) {
-    assert(!spinlock_acquire(&allocator_stack_spinlock));
     //Find the allocation
     struct allocation * current = allocations_head;
 
@@ -166,17 +155,14 @@ void kstackfree(stack_t * stk) {
             //remove the allocation from the list
             remove_allocation(NULL, stk->base);
             kfree(stk);
-            spinlock_release(&allocator_stack_spinlock);
             return;
         }
         current = current->next;
     }
-    spinlock_release(&allocator_stack_spinlock);
     panic("kstackfree: Allocation not found for pointer %p\n", stk->base);
 }
 
 status_t malloc(vmm_root_t * root, uint64_t size, uint64_t vaddr, uint8_t flags, farlands_t * farlands) {
-    assert(!spinlock_acquire(&allocator_spinlock));
     void * phys_addr = pmm_alloc_pages((size + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE);
     if (phys_addr == NULL) {
         panic("kmalloc: Failed to allocate physical memory");
@@ -202,13 +188,11 @@ status_t malloc(vmm_root_t * root, uint64_t size, uint64_t vaddr, uint8_t flags,
     memset(farlands->handle, 0, (size + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE * PMM_PAGE_SIZE);
 
     add_allocation(root, phys_addr, vmm_get_root(), farlands->handle, farlands->address, size, flags);
-    spinlock_release(&allocator_spinlock);
     return SUCCESS;
 }
 
 status_t stackalloc(vmm_root_t * root, uint64_t size, uint64_t vaddr, uint8_t flags, farlands_stack_t * farstack) {
     
-    assert(!spinlock_acquire(&allocator_stack_spinlock));
     uint64_t pages = (size + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE;
     void * phys_addr = pmm_alloc_pages(pages);
     if (phys_addr == NULL) {
@@ -251,12 +235,10 @@ status_t stackalloc(vmm_root_t * root, uint64_t size, uint64_t vaddr, uint8_t fl
     //farstack->handle_top = (void *)aligned_handle_top;
 
     add_allocation(root, phys_addr, vmm_get_root(), farstack->handle_base, farstack->base, size, flags);
-    spinlock_release(&allocator_stack_spinlock);
     return SUCCESS;
 }
 
 void free(vmm_root_t * cr3, void * virtual_address) {
-    assert(!spinlock_acquire(&allocator_spinlock));
     //Find the allocation
     struct allocation * current = allocations_head;
     while (current != NULL) {
@@ -268,17 +250,14 @@ void free(vmm_root_t * cr3, void * virtual_address) {
 
             //remove the allocation from the list
             remove_allocation(cr3, virtual_address);
-            spinlock_release(&allocator_spinlock);
             return;
         }
         current = current->next;
     }
-    spinlock_release(&allocator_spinlock);
     panic("free: Allocation not found for pointer %p\n", virtual_address);
 }
 
 void stackfree(vmm_root_t * cr3, farlands_stack_t * farstack) {
-    assert(!spinlock_acquire(&allocator_stack_spinlock));
     //Find the allocation
     struct allocation * current = allocations_head;
     while (current != NULL) {
@@ -289,17 +268,14 @@ void stackfree(vmm_root_t * cr3, farlands_stack_t * farstack) {
             }
             //remove the allocation from the list
             remove_allocation(cr3, farstack->base);
-            spinlock_release(&allocator_stack_spinlock);
             return;
         }
         current = current->next;
     }
-    spinlock_release(&allocator_stack_spinlock);
     panic("stackfree: Allocation not found for pointer %p\n", farstack->base);
 }
 
 stack_t * copy_kstack(vmm_root_t * dest_root, stack_t * source) {
-    assert(!spinlock_acquire(&allocator_stack_spinlock));
     uint64_t stack_size = ((uint64_t)source->top - (uint64_t)source->base);
     uint64_t pages = (stack_size + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE;
     void * phys_addr = pmm_alloc_pages(pages);
@@ -330,12 +306,10 @@ stack_t * copy_kstack(vmm_root_t * dest_root, stack_t * source) {
         panic("copy_stack: Failed to map new stack pages");
     }
 
-    spinlock_release(&allocator_stack_spinlock);
     return source;
 }
 
 farlands_stack_t * copy_stack(vmm_root_t * dest_root, farlands_stack_t * source) {
-    assert(!spinlock_acquire(&allocator_stack_spinlock));
     uint64_t stack_size = ((uint64_t)source->top - (uint64_t)source->base);
     uint64_t pages = (stack_size + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE;
     void * phys_addr = pmm_alloc_pages(pages);
@@ -365,6 +339,5 @@ farlands_stack_t * copy_stack(vmm_root_t * dest_root, farlands_stack_t * source)
     if (st != SUCCESS) {
         panic("copy_stack: Failed to map new stack pages");
     }
-    spinlock_release(&allocator_stack_spinlock);
     return source;
 }

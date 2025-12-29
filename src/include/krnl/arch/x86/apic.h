@@ -2,7 +2,6 @@
 #define _APIC_H
 
 #include <krnl/libraries/std/stdint.h>
-#include <krnl/libraries/lock/spinlock.h>
 
 #define APIC_ENTRIES_HARD_LIMIT 256
 
@@ -176,7 +175,6 @@ struct ioapic_redirection_entry {
 }__attribute__((packed));
 
 struct apic_context {
-    spinlock_t lock;
     struct lapic lapic_entries[APIC_ENTRIES_HARD_LIMIT];
     struct lapic_address lapic_addresses[APIC_ENTRIES_HARD_LIMIT];
     uint16_t lapic_count;

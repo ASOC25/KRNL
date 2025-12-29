@@ -22,7 +22,6 @@
 extern uint8_t getApicId(void);
 
 void boot_startup() {
-    scheduler_inhibit(1);
     //Init the bootloader
     init_bootloader();
     //Optionally init the framebuffer
@@ -63,6 +62,5 @@ void boot_startup() {
 
     process_init("/init.elf", "/dev/tty0");
     __asm__("sti");
-    scheduler_inhibit(0);
     while (1);
 }

@@ -9,7 +9,6 @@
 #include <krnl/libraries/std/elf.h>
 #include <krnl/mem/vmarea.h>
 #include <krnl/mem/allocator.h>
-#include <krnl/libraries/lock/spinlock.h>
 
 #define PROCESS_STATUS_RUNABLE 0x1
 #define PROCESS_STATUS_INTERRUPTIBLE_SLEEP 0x2
@@ -55,7 +54,6 @@ typedef struct thread_t {
 typedef struct process_t {
     vmm_root_t * vmm;
     vm_area_t *vm_areas;
-    spinlock_t vm_area_lock;
 
     thread_t threads[MAX_THREADS_PER_PROCESS];
     int thread_count;

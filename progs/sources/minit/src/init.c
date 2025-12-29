@@ -20,6 +20,7 @@ void print_args(int argc, char* argv[], char* envp[]) {
 
 void __attribute__ ((noinline)) fork_stress() {
     int pid = sys_fork();
+    int pid2 = sys_getpid();
     if (pid < 0) {
         printf("Fork failed in stress test.\n");
         return;
@@ -29,6 +30,11 @@ void __attribute__ ((noinline)) fork_stress() {
         while (1) {
             printf("P%d\n", local_counter);
             sys_sched();
+        }
+    }
+    if (pid2 != 101) {
+        while (1) {
+            printf("Parent process PID mismatch in stress test. Expected 101, got %d\n", pid2);
         }
     }
 }

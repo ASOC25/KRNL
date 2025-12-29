@@ -48,7 +48,6 @@ syscall_entry:
     push qword [rbp + 0x10] ; ss
     push qword [gs:0x10]   ; rsp
 
-    sti
     push r11             ; saved rflags
     push qword [rbp + 0x8] ; cs
     push rcx             ; current IP
@@ -105,7 +104,6 @@ syscall_entry:
     mov r11, [rsp + 0x20]
     mov rcx, [rsp + 0x10]
 
-    cli
     mov rsp, [rsp + 0x28]
     swapgs
     o64 sysret

@@ -732,7 +732,7 @@ status_t framebuffer_init_pnp(void) {
         fb_info[i].bc = FB_BC; // Black background
         fb_info[i].fc = FB_FC; // White foreground
 
-        if (devices_new_device(FRAMEBUFFER_DRIVER_MAJOR, i, DEVICES_NO_SPINLOCK) != SUCCESS) {
+        if (devices_new_device(FRAMEBUFFER_DRIVER_MAJOR, i) != SUCCESS) {
             silent_panic();
         }
     }

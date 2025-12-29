@@ -30,5 +30,4 @@ status_t scheduler_remove(thread_t * thread);
 // 0 and negative numbers: Send to all threads with the state equal to the absolute value of who
 status_t scheduler_send_event(int event, int who);
 
-void scheduler_inhibit(uint8_t inhibit);
 #endif

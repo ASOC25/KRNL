@@ -2,9 +2,9 @@
 #include <krnl/mem/vmm.h>
 #include <krnl/mem/pmm.h>
 #include <krnl/debug/debug.h>
-#include <krnl/libraries/lock/spinlock.h>
+
 #include <krnl/libraries/assert/assert.h>
-spinlock_t vmm_global_lock = SPINLOCK_INIT;
+
 
 status_t vmm_map_pages(vmm_root_t * root, uint64_t virtual_address_start, uint64_t physical_address_start, uint64_t pages, uint64_t page_size, uint8_t flags) {
     if (root == 0) {
@@ -13,7 +13,7 @@ status_t vmm_map_pages(vmm_root_t * root, uint64_t virtual_address_start, uint64
     if (virtual_address_start % page_size != 0 || physical_address_start % page_size != 0) {
         panic("vmm_map_pages: Addresses must be aligned to page size");
     }
-    assert(!spinlock_acquire(&vmm_global_lock));
+
     for (uint64_t i = 0; i < pages; i++) {
         uint64_t virtual_address = virtual_address_start + (i * page_size);
         uint64_t physical_address = physical_address_start + (i * page_size);
@@ -22,7 +22,7 @@ status_t vmm_map_pages(vmm_root_t * root, uint64_t virtual_address_start, uint64
             panic("vmm_map_pages: Failed to map page %llu", i);
         }
     }
-    spinlock_release(&vmm_global_lock);
+
     return SUCCESS;
 }
 
@@ -33,7 +33,7 @@ status_t vmm_unmap_pages(vmm_root_t * root, uint64_t virtual_address_start, uint
     if (virtual_address_start % page_size != 0) {
         panic("vmm_unmap_pages: Virtual address must be aligned to page size");
     }
-    assert(!spinlock_acquire(&vmm_global_lock));
+
     for (uint64_t i = 0; i < pages; i++) {
         uint64_t virtual_address = virtual_address_start + (i * page_size);
         status_t status = vm_unmap_address((vm_dir *)root, virtual_address);
@@ -41,7 +41,7 @@ status_t vmm_unmap_pages(vmm_root_t * root, uint64_t virtual_address_start, uint
             panic("vmm_unmap_pages: Failed to unmap page %llu", i);
         }
     }
-    spinlock_release(&vmm_global_lock);
+
     return SUCCESS;
 }
 
@@ -52,7 +52,7 @@ status_t vmm_mprotect_pages(vmm_root_t * root, uint64_t virtual_address_start, u
     if (virtual_address_start % page_size != 0) {
         panic("vmm_mprotect_pages: Virtual address must be aligned to page size");
     }
-    assert(!spinlock_acquire(&vmm_global_lock));
+
     for (uint64_t i = 0; i < pages; i++) {
         uint64_t virtual_address = virtual_address_start + (i * page_size);
         status_t status = vm_mprotect_address((vm_dir *)root, virtual_address, new_flags);
@@ -61,7 +61,7 @@ status_t vmm_mprotect_pages(vmm_root_t * root, uint64_t virtual_address_start, u
         }
     }
 
-    spinlock_release(&vmm_global_lock);
+
     return SUCCESS;
 }
 
@@ -70,94 +70,94 @@ void vmm_remap(uint64_t offset) {
 }
 
 vmm_root_t * vmm_get_root() {
-    assert(!spinlock_acquire(&vmm_global_lock));
+
     vmm_root_t * current_pml4 = (vmm_root_t *)vm_get_current_pml4();
-    spinlock_release(&vmm_global_lock);
+
     return current_pml4;
 }
 
 void vmm_set_root(vmm_root_t * root) {
-    assert(!spinlock_acquire(&vmm_global_lock));
+
     vm_set_current_pml4((vm_dir *)root);
-    spinlock_release(&vmm_global_lock);
+
 }
 
 vmm_root_t * vmm_duplicate_kspace() {
     vmm_root_t * current_pml4 = vmm_get_root();
-    assert(!spinlock_acquire(&vmm_global_lock));
+
     vmm_root_t * duplicate = (vmm_root_t *)vm_duplicate_pml4((vm_dir *)current_pml4, VM_COPY_KERNEL_ONLY);
-    spinlock_release(&vmm_global_lock);
+
     return duplicate;
 }
 
 vmm_root_t * vmm_duplicate_fullspace(vmm_root_t * original) {
-    assert(!spinlock_acquire(&vmm_global_lock));
+
     vmm_root_t * duplicate = (vmm_root_t *)vm_duplicate_pml4((vm_dir *)original, VM_COPY_ALL);
-    spinlock_release(&vmm_global_lock);
+
     return duplicate;
 }
 
 void vmm_free_root(vmm_root_t * root) {
-    assert(!spinlock_acquire(&vmm_global_lock));
+
     vm_deallocate_vspace((vm_dir *)root);
-    spinlock_release(&vmm_global_lock);
+
 }
 
 uint64_t vmm_to_identity_map(uint64_t address) {
-    assert(!spinlock_acquire(&vmm_global_lock));
+
     uint64_t result = vm_to_identity_map(address);
-    spinlock_release(&vmm_global_lock);
+
     return result;
 }
 
 uint64_t vmm_from_identity_map(uint64_t address) {
-    assert(!spinlock_acquire(&vmm_global_lock));
+
     uint64_t result = vm_from_identity_map(address);
-    spinlock_release(&vmm_global_lock);
+
     return result;
 }
 
 uint64_t vmm_to_device_map(uint64_t address) {
-    assert(!spinlock_acquire(&vmm_global_lock));
+
     uint64_t result = (uint64_t)(address + VMM_REGION_K_DEVICES);
-    spinlock_release(&vmm_global_lock);
+
     return result;
 }
 
 uint64_t vmm_from_device_map(uint64_t address) {
-    assert(!spinlock_acquire(&vmm_global_lock));
+
     uint64_t result = (uint64_t)(address - VMM_REGION_K_DEVICES);
-    spinlock_release(&vmm_global_lock);
+
     return result;
 }
 
 status_t vmm_get_physical_address(vmm_root_t * root, uint64_t virtual_address, uint64_t * physical_address) {
-    assert(!spinlock_acquire(&vmm_global_lock));
+
     status_t status = vm_get_physical_address((vm_dir *)root, virtual_address, physical_address);
-    spinlock_release(&vmm_global_lock);
+
     return status;
 }
 
 uint8_t vmm_check_and_clean_dirty(vmm_root_t * root, uint64_t virtual_address, uint64_t pages, uint64_t page_size) {
-    assert(!spinlock_acquire(&vmm_global_lock));
+
     for (uint64_t i = 0; i < pages; i++) {
         uint64_t va = virtual_address + (i * page_size);
         uint8_t dirty = vm_check_and_clean_dirty((vm_dir *)root, va);
         if (dirty == 1) {
-            spinlock_release(&vmm_global_lock);
+
             return 1;
         }
     }
-    spinlock_release(&vmm_global_lock);
+
     return 0;
 }
 
 status_t vmm_get_page_info(vmm_root_t * root, uint64_t virtual_address, vmm_info * info) {
-    assert(!spinlock_acquire(&vmm_global_lock));
+
     struct page_info inf;
     status_t st = vm_get_page_info((vm_dir *)root, virtual_address, &inf);
     if (st != SUCCESS) {
-        spinlock_release(&vmm_global_lock);
+
         return st;
     }
 

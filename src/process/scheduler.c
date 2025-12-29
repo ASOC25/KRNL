@@ -6,7 +6,7 @@
 #include <krnl/libraries/std/stddef.h>
 #include <krnl/process/process.h>
 #include <krnl/arch/x86/apic.h>
-#include <krnl/libraries/lock/spinlock.h>
+
 #include <krnl/libraries/assert/assert.h>
 
 typedef struct scheduler_queue {
@@ -17,10 +17,6 @@ typedef struct scheduler_queue {
 scheduler_queue_t * sched_queue = NULL;
 thread_t * current_thread = NULL;
 
-static spinlock_t scheduler_spinlock = SPINLOCK_INIT;
-int scheduler_inhibited = 0;
-
-// Internal helper: must be called with scheduler_spinlock already held
 static pid_t scheduler_get_free_pid_locked(void) {
     static pid_t last_pid = 100; // Start from 100 to avoid reserved PIDs
     scheduler_queue_t * current = sched_queue;
@@ -47,9 +43,9 @@ static pid_t scheduler_get_free_pid_locked(void) {
 
 pid_t scheduler_get_free_pid() {
     pid_t pid;
-    assert(!spinlock_acquire(&scheduler_spinlock));
+
     pid = scheduler_get_free_pid_locked();
-    spinlock_release(&scheduler_spinlock);
+
     return pid;
 }
 
@@ -98,7 +94,7 @@ status_t scheduler_add(thread_t * thread) {
         panic("scheduler_add: thread is NULL");
         return FAILURE;
     }
-    assert(!spinlock_acquire(&scheduler_spinlock));
+
 
     //If parent process's pid is -1, assign a new pid
     process_t * process = (process_t *)thread->process;
@@ -109,7 +105,7 @@ status_t scheduler_add(thread_t * thread) {
     scheduler_queue_t * new_node = kmalloc(sizeof(scheduler_queue_t));
     if (!new_node) {    
         panic("scheduler_add: Failed to allocate memory for scheduler queue node");
-        spinlock_release(&scheduler_spinlock);
+
         return FAILURE;
     }
     new_node->thread = thread;
@@ -124,7 +120,7 @@ status_t scheduler_add(thread_t * thread) {
         }
         current->next = new_node;
     }
-    spinlock_release(&scheduler_spinlock);
+
     return SUCCESS;
 }
 
@@ -133,7 +129,7 @@ status_t scheduler_remove(thread_t * thread) {
         panic("scheduler_remove: thread is NULL");
         return FAILURE;
     }
-    assert(!spinlock_acquire(&scheduler_spinlock));
+
     scheduler_queue_t * current = sched_queue;
     scheduler_queue_t * prev = NULL;
     while (current != NULL) {
@@ -145,7 +141,7 @@ status_t scheduler_remove(thread_t * thread) {
                 prev->next = current->next;
             }
             kfree(current);
-            spinlock_release(&scheduler_spinlock);
+
             return SUCCESS;
         }
         prev = current;
@@ -153,7 +149,7 @@ status_t scheduler_remove(thread_t * thread) {
     }
     panic("scheduler_remove: Thread not found in scheduler queue");
     
-    spinlock_release(&scheduler_spinlock);
+
     return FAILURE;
 }
 
@@ -171,7 +167,7 @@ status_t thread_send_event(thread_t * thread, int event) {
 status_t scheduler_send_event(int event, int who) {
     if (who <= 0) {
         // 0 and negative numbers: Send to all threads with the state equal to the absolute value of who
-        assert(!spinlock_acquire(&scheduler_spinlock));
+
         scheduler_queue_t * current = sched_queue;
         while (current != NULL) {
             thread_t * thread = current->thread;
@@ -181,25 +177,25 @@ status_t scheduler_send_event(int event, int who) {
             }
             current = current->next;
         }
-        spinlock_release(&scheduler_spinlock);
+
         return SUCCESS;
     }
     if (who == 1) {
-        assert(!spinlock_acquire(&scheduler_spinlock));
+
         // 1: Send to the current thread
         thread_t * current_thread = scheduler_get_current_thread();
         if (current_thread) {
             status_t res = thread_send_event(current_thread, event);
-            spinlock_release(&scheduler_spinlock);
+
             return res;
         } else {
             panic("scheduler_send_event: No current thread");
-            spinlock_release(&scheduler_spinlock);
+
             return FAILURE;
         }
     }
     if (who == 2) {
-        assert(!spinlock_acquire(&scheduler_spinlock));
+
         //Send to all threads in the current process
         thread_t * current_thread = scheduler_get_current_thread();
         if (current_thread) {
@@ -213,30 +209,30 @@ status_t scheduler_send_event(int event, int who) {
                     }
                     current = current->next;
                 }
-                spinlock_release(&scheduler_spinlock);
+
                 return SUCCESS;
             }
         }
         panic("scheduler_send_event: No current thread or process");
-        spinlock_release(&scheduler_spinlock);
+
         return FAILURE;
     }
     if (who == 3) {
         //Send to all threads
-        assert(!spinlock_acquire(&scheduler_spinlock));
+
         scheduler_queue_t * current = sched_queue;
         while (current != NULL) {
             thread_t * thread = current->thread;
             thread_send_event(thread, event);
             current = current->next;
         }
-        spinlock_release(&scheduler_spinlock);
+
         return SUCCESS;
     }
     if (who > 100) {
         // >100: Send to all threads in the process with the given PID
         pid_t target_pid = (pid_t)who;
-        assert(!spinlock_acquire(&scheduler_spinlock));
+
         scheduler_queue_t * current = sched_queue;
         while (current != NULL) {
             thread_t * thread = current->thread;
@@ -246,7 +242,7 @@ status_t scheduler_send_event(int event, int who) {
             }
             current = current->next;
         }
-        spinlock_release(&scheduler_spinlock);
+
         return SUCCESS;
     }
     panic("scheduler_send_event: Invalid 'who' parameter");
@@ -265,13 +261,6 @@ void scheduler_handler(cpu_context_t* ctx, uint8_t cpu_id) {
     if (ctx->ctx_info == NULL) {
         panic("scheduler_handler: ctx->ctx_info is NULL");
     }
-
-    if (scheduler_inhibited) {
-        apic_arm_lapic_timer(cpu_id, SCHEDULER_TIMESLICE_MS);
-        return;
-    }
-
-    assert(!spinlock_acquire(&scheduler_spinlock));
 
     thread_t * ending_thread = ctx->ctx_info->thread;
     process_t * ending_process = NULL;
@@ -298,9 +287,5 @@ void scheduler_handler(cpu_context_t* ctx, uint8_t cpu_id) {
     
     context_restore(next_thread->context, ctx);
     apic_arm_lapic_timer(cpu_id, SCHEDULER_TIMESLICE_MS);
-    spinlock_release(&scheduler_spinlock);
-}
 
-void scheduler_inhibit(uint8_t inhibit) {
-    scheduler_inhibited = inhibit;
 }

@@ -3,14 +3,10 @@
 
 #include <krnl/libraries/std/stddef.h>
 #include <krnl/libraries/std/stdint.h>
-#include <krnl/libraries/lock/spinlock.h>
 #include <krnl/libraries/assert/assert.h>
 
 #define DEVICES_MAX_DEVICES 256
 #define DEVICES_MAX_DRIVERS 256
-
-#define DEVICES_SPINLOCK 1
-#define DEVICES_NO_SPINLOCK 0
 
 typedef int64_t device_addr_t;
 typedef int32_t device_major_t;
@@ -25,16 +21,13 @@ struct device_driver {
 };
 
 struct device_subsystem {
-    spinlock_t global_lock;
     device_addr_t devices[DEVICES_MAX_DRIVERS][DEVICES_MAX_DEVICES];
     struct device_driver drivers[DEVICES_MAX_DRIVERS];
-    spinlock_t devices_lock[DEVICES_MAX_DRIVERS][DEVICES_MAX_DEVICES];
-    uint64_t devices_use_spinlock[DEVICES_MAX_DRIVERS][DEVICES_MAX_DEVICES];
 };
 
 void devices_init(void);
 
-device_minor_t devices_new_device(device_major_t major_number, device_addr_t internal_address, uint64_t use_spinlock); //-1 on error | returns: minor number assigned
+device_minor_t devices_new_device(device_major_t major_number, device_addr_t internal_address); //-1 on error | returns: minor number assigned
 status_t devices_remove_device(device_major_t major_number, device_minor_t minor_number); 
 
 status_t devices_new_driver(device_major_t major_number, struct device_driver ops);

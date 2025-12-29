@@ -6,10 +6,7 @@
 #include <krnl/debug/debug.h>
 #include <krnl/mem/mmap.h>
 #include <krnl/mem/allocator.h>
-#include <krnl/libraries/lock/spinlock.h>
 #include <krnl/libraries/assert/assert.h>
-
-spinlock_t syscall_global_lock = SPINLOCK_INIT;
 
 #define SYSCALL_NUMBER(context) ((context)->rax)
 #define SYSCALL_ARG0(context)   ((context)->rdi)
@@ -289,21 +286,18 @@ int64_t syscall_schedule_yield(thread_t * thread, cpu_context_t * context) {
 }
 
 int64_t syscall_fork(thread_t * thread, cpu_context_t * context) {
-    assert(!spinlock_acquire(&syscall_global_lock));
     process_t * parent_proc = (process_t *)thread->process;
-    scheduler_handler(context, getApicId());
+    
+    context_save(thread->context, context);
     process_t * child_proc = process_fork(parent_proc, thread);
     if (!child_proc) {
-        spinlock_release(&syscall_global_lock);
         return -EAGAIN;
     }
     status_t std = scheduler_add(child_proc->main_thread);
     if (std != SUCCESS) {
         process_destroy(child_proc);
-        spinlock_release(&syscall_global_lock);
         return -EAGAIN;
     }
-    spinlock_release(&syscall_global_lock);
     return (int64_t)child_proc->pid;
 }
 

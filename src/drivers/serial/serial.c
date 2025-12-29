@@ -205,7 +205,7 @@ status_t serial_init_pnp(void) {
             dev->parity = 'N';
             dev->interrupt_enable = 0x00; //Disable interrupts by default
 
-            if (devices_new_device(SERIAL_DRIVER_MAJOR, i, DEVICES_SPINLOCK) != SUCCESS) {
+            if (devices_new_device(SERIAL_DRIVER_MAJOR, i) != SUCCESS) {
                 dev->port_base = 0; //Mark as unused
             } else {
                 valid_ports++;

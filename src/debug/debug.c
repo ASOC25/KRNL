@@ -2,28 +2,22 @@
 #include <krnl/libraries/std/stdio.h>
 #include <krnl/libraries/std/stdint.h>
 #include <krnl/libraries/std/string.h>
-#include <krnl/libraries/lock/spinlock.h>
 #include <krnl/libraries/assert/assert.h>
 #include <krnl/drivers/framebuffer/framebuffer.h>
 #include <krnl/drivers/serial/serial.h>
 
 #include <krnl/devices/devices.h>
 
-spinlock_t debug_spinlock = SPINLOCK_INIT;
 uint8_t panic_expected = 0;
 uint8_t panicked = 0;
 
 void expect_panic(uint8_t should_panic) {
-    assert(!spinlock_acquire(&debug_spinlock));
     panic_expected = should_panic;
-    spinlock_release(&debug_spinlock);
 }
 
 uint8_t check_and_clear_panicked(void) {
-    assert(!spinlock_acquire(&debug_spinlock));
     uint8_t has_panicked = panicked;
     panicked = 0;
-    spinlock_release(&debug_spinlock);
     return has_panicked;
 }
 
@@ -57,15 +51,12 @@ void panic(const char* format, ...) {
 
 void silent_panic(void) {
     // Similar to panic but does not output any message
-    assert(!spinlock_acquire(&debug_spinlock));
     while (1) {
         __asm__ volatile ("hlt");
     }
-    spinlock_release(&debug_spinlock);
 }
 
 void kprintf(const char* format, ...) {
-    assert(!spinlock_acquire(&debug_spinlock));
     char buffer[1024];
     va_list args;
     va_start(args, format);
@@ -74,7 +65,6 @@ void kprintf(const char* format, ...) {
     if (len > 0) {
         devices_write(SERIAL_DRIVER_MAJOR, 0, 0, (uint64_t)len, (const uint8_t *)buffer);
     }
-    spinlock_release(&debug_spinlock);
 }
 
 void ktrace(const char * format, ...) {
