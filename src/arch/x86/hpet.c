@@ -6,6 +6,7 @@
 #include <krnl/mem/vmm.h>
 #include <krnl/debug/debug.h>
 #include <krnl/libraries/assert/assert.h>
+#include <krnl/arch/x86/apic.h>
 
 #define HPET_TIMER_OFFSET_GENERAL_CAPABILITIES_ID               0x0
 #define HPET_TIMER_OFFSET_GENERAL_CONFIGURATION                 0x10
@@ -18,11 +19,13 @@
 #define HPET_TIMER_OFFSET_TIMER_CONFIG_CAPABILITY_REGISTER      0x0
 #define HPET_TIMER_OFFSET_TIMER_COMPARATOR_VALUE_REGISTER       0x8
 #define HPET_TIMER_OFFSET_TIMER_FSB_INTERRUPT_ROUTE_REGISTER    0x10
+#define COMPARATOR_0_REGS                                      0x100
 
 
 static void* hpet_base;
 static uint64_t hpet_frequency;
 uint8_t hpet_is_initialized = 0;
+uint8_t hpet_is_enabled = 0;
 
 
 static uint64_t hpet_read_register(uint64_t offset){
@@ -54,6 +57,7 @@ void hpet_init(){
     hpet_write_register(HPET_TIMER_OFFSET_MAIN_COUNTER_VALUES, 0);
     hpet_change_main_timer_interrupt_state(1);
     hpet_is_initialized = 1;
+    hpet_is_enabled = 1;
 
 }   
 
@@ -80,4 +84,37 @@ void hpet_sleep(uint64_t us){
         __asm__ volatile ("pause" : : : "memory");
     } while(hpet_read_register(HPET_TIMER_OFFSET_MAIN_COUNTER_VALUES) < end);
 
+}
+
+//Setup the hpet to generate periodic interrupts every femtos femtoseconds
+//Use interrupt vector INT_SLEEP (0x41)
+void arm_hpet_interrupt_timer(size_t us) {
+    assert(hpet_is_initialized);
+
+    hpet_change_main_timer_interrupt_state(0);
+    hpet_write_register(HPET_TIMER_OFFSET_MAIN_COUNTER_VALUES, 0);
+    //Configure timer 0
+    uint64_t timer0_config = hpet_read_register(HPET_TIMER_OFFSET_TIMER_SPACE_DATA_START + 0 * HPET_TIMER_OFFSET_TIMER_SPACE_SIZE + HPET_TIMER_OFFSET_TIMER_CONFIG_CAPABILITY_REGISTER);
+    //Set periodic mode and enable interrupts
+    timer0_config |= (1 << 3); // Set periodic mode
+    timer0_config |= (1 << 2); // Enable interrupts
+    hpet_write_register(HPET_TIMER_OFFSET_TIMER_SPACE_DATA_START + 0 * HPET_TIMER_OFFSET_TIMER_SPACE_SIZE + HPET_TIMER_OFFSET_TIMER_CONFIG_CAPABILITY_REGISTER, timer0_config);
+    //Set comparator value
+    uint64_t comparator_value = (micro_to_femo(us)) / hpet_frequency;
+    hpet_write_register(HPET_TIMER_OFFSET_TIMER_SPACE_DATA_START + 0 * HPET_TIMER_OFFSET_TIMER_SPACE_SIZE + HPET_TIMER_OFFSET_TIMER_COMPARATOR_VALUE_REGISTER, comparator_value);
+    hpet_change_main_timer_interrupt_state(1);
+}
+
+void hpet_enable() {
+    if (hpet_is_enabled) return;
+    hpet_change_main_timer_interrupt_state(1);
+    apic_ioapic_mask(HPET_TIMER_IRQ, 1);
+    hpet_is_enabled = 1;
+}
+
+void hpet_disable() {
+    if (!hpet_is_enabled) return;
+    hpet_change_main_timer_interrupt_state(0);
+    apic_ioapic_mask(HPET_TIMER_IRQ, 0);
+    hpet_is_enabled = 0;
 }

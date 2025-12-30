@@ -253,7 +253,7 @@ void match() {
     kprintf("Scheduler match function called\n");
 }
 
-void scheduler_handler(cpu_context_t* ctx, uint8_t cpu_id) {
+void scheduler_handler(cpu_context_t* ctx, uint8_t cpu_id, uint8_t is_kernel_ctx) {
     if (ctx == NULL) {
         panic("scheduler_handler: ctx is NULL");
     }
@@ -263,10 +263,15 @@ void scheduler_handler(cpu_context_t* ctx, uint8_t cpu_id) {
     }
 
     thread_t * ending_thread = ctx->ctx_info->thread;
-    process_t * ending_process = NULL;
+    //process_t * ending_process = NULL;
     if (ending_thread) {
-        context_save(ending_thread->context, ctx);
-        ending_process = (process_t*)ending_thread->process;
+        if (is_kernel_ctx) {
+            context_save(ending_thread->kcontext, ctx);
+            ending_thread->kcontext_pending = 1;
+        } else {
+            context_save(ending_thread->context, ctx);
+        }
+        //ending_process = (process_t*)ending_thread->process;
     }
 
     thread_t * next_thread = scheduler_get_next_thread();
@@ -280,12 +285,18 @@ void scheduler_handler(cpu_context_t* ctx, uint8_t cpu_id) {
 
     if (next_process->pid == 101) match();
 
-    if (ending_process)
-        kprintf("ROBERT, ITS PISSING ME OFF from %d to %d\n", ending_process->pid, next_process->pid);
-    else
-        kprintf("ROBERT, ITS PISSING ME OFF from NULL to %d\n", next_process->pid);
+    //if (ending_process)
+    //    kprintf("ROBERT, ITS PISSING ME OFF from %d to %d\n", ending_process->pid, next_process->pid);
+    //else
+    //    kprintf("ROBERT, ITS PISSING ME OFF from NULL to %d\n", next_process->pid);
     
-    context_restore(next_thread->context, ctx);
+    if (next_thread->kcontext_pending) {
+        next_thread->kcontext_pending = 0;
+        context_restore(next_thread->kcontext, ctx);
+    } else {
+        context_restore(next_thread->context, ctx);
+    }
+    
     apic_arm_lapic_timer(cpu_id, SCHEDULER_TIMESLICE_MS);
 
 }

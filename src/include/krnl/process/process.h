@@ -41,6 +41,8 @@ typedef struct event_queue {
 
 typedef struct thread_t {
     context_t* context;
+    context_t* kcontext;
+    uint8_t kcontext_pending;
     void * entry;
     void * process;
     stack_t * kstack;

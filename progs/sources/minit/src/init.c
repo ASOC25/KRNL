@@ -29,7 +29,8 @@ void __attribute__ ((noinline)) fork_stress() {
         int local_counter = sys_getpid();
         while (1) {
             printf("P%d\n", local_counter);
-            sys_sched();
+            struct timespec duration = { .tv_sec = 1, .tv_nsec = 0 };
+            sys_nanosleep(&duration, NULL); // Sleep for 1 second
         }
     }
     if (pid2 != 101) {
@@ -64,12 +65,12 @@ int main(int argc, char* argv[], char* envp[]) {
     sys_close(fd);
 
     printf("Testing fork and execve:\n");
-    for (int i = 0; i < 300; i++) {
+    for (int i = 0; i < 1; i++) {
         fork_stress();
     }
     printf("Entering scheduling loop.\n");
     while (1) {
-        printf("IM A RESOURCE HOG!\n");
+        //printf("IM A RESOURCE HOG!\n");
     }
     return 0;
 }

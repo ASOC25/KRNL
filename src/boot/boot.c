@@ -18,6 +18,7 @@
 #include <krnl/vfs/vfs.h>
 #include <krnl/arch/x86/apic.h>
 #include <krnl/process/scheduler.h>
+#include <krnl/arch/x86/hpet.h>
 
 extern uint8_t getApicId(void);
 

@@ -260,12 +260,11 @@ void apic_arm_lapic_timer(uint8_t cpu_id, uint32_t ms) {
 
     uint32_t ticks = actx.lapic_timer_ticks_per_ms * ms;
     void * lapic_address = actx.lapic_addresses[cpu_id].virtual_address;
-    uint32_t remaining_ticks = read_lapic_register(lapic_address, local_apic_register_offset_curent_count);
-    uint32_t remaining_ms = remaining_ticks / actx.lapic_timer_ticks_per_ms;
+    //uint32_t remaining_ticks = read_lapic_register(lapic_address, local_apic_register_offset_curent_count);
+    //uint32_t remaining_ms = remaining_ticks / actx.lapic_timer_ticks_per_ms;
     //Print ms remaining ticks and total ticks
     write_lapic_register(lapic_address, local_apic_register_offset_initial_count, ticks);
-    kprintf("APIC Timer Arm: CPU %d, remaining ms: %d, rearming for %d ms \n", cpu_id, remaining_ms, ms);
-
+    //kprintf("APIC Timer Arm: CPU %d, remaining ms: %d, rearming for %d ms \n", cpu_id, remaining_ms, ms);
 }
 
 void apic_init(void) {

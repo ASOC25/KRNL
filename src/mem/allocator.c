@@ -220,19 +220,19 @@ status_t stackalloc(vmm_root_t * root, uint64_t size, uint64_t vaddr, uint8_t fl
     memset(farstack->handle_base, 0, pages * PMM_PAGE_SIZE);
 
     //Make sure top and handle top are aligned to 16 bytes
-    //uint64_t aligned_top = (uint64_t)farstack->top;
-    //if (aligned_top % 0x10) {
-    //    aligned_top -= aligned_top % 0x10;
-    //}
-    //aligned_top -= 0x8;
-    //farstack->top = (void *)aligned_top;
-//
-    //uint64_t aligned_handle_top = (uint64_t)farstack->handle_top;
-    //if (aligned_handle_top % 0x10) {
-    //    aligned_handle_top -= aligned_handle_top % 0x10;
-    //}
-    //aligned_handle_top -= 0x8;
-    //farstack->handle_top = (void *)aligned_handle_top;
+    uint64_t aligned_top = (uint64_t)farstack->top;
+    if (aligned_top % 0x10) {
+        aligned_top -= aligned_top % 0x10;
+    }
+    aligned_top -= 0x8;
+    farstack->top = (void *)aligned_top;
+
+    uint64_t aligned_handle_top = (uint64_t)farstack->handle_top;
+    if (aligned_handle_top % 0x10) {
+        aligned_handle_top -= aligned_handle_top % 0x10;
+    }
+    aligned_handle_top -= 0x8;
+    farstack->handle_top = (void *)aligned_handle_top;
 
     add_allocation(root, phys_addr, vmm_get_root(), farstack->handle_base, farstack->base, size, flags);
     return SUCCESS;

@@ -80,7 +80,11 @@ void cpu_init_id(uint64_t cpu_id, uint64_t lapic_id) {
     cpu_context_init();
     syscall_enable(GDT_KERNEL_CODE * sizeof(gdt_entry_t), GDT_USER_CODE * sizeof(gdt_entry_t));
     hpet_init();
+    //Enable preemptive scheduler timer
     apic_start_lapic_timer();
+    //Enable internal system timer (HPET)
+    arm_hpet_interrupt_timer(HPET_SYSTEM_TASK_FEMTOS);
+    apic_ioapic_mask(HPET_TIMER_IRQ, 1); //Unmask HPET IRQ
 }
 
 void cpu_init() {

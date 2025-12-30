@@ -7,6 +7,7 @@
 #include <krnl/mem/mmap.h>
 #include <krnl/mem/allocator.h>
 #include <krnl/libraries/assert/assert.h>
+#include <krnl/process/signals.h>
 
 #define SYSCALL_NUMBER(context) ((context)->rax)
 #define SYSCALL_ARG0(context)   ((context)->rdi)
@@ -142,7 +143,7 @@ int64_t syscall_exit(thread_t * thread, cpu_context_t * context) {
     int code = (int)SYSCALL_ARG0(context);
     process_t * proc = (process_t *)thread->process;
     process_exit(proc, code);
-    scheduler_handler(context, getApicId());
+    scheduler_handler(context, getApicId(), CONTEXT_SAVE_USPACE);
     panic("syscall_exit: Returned from scheduler_exit_process");
     return 0;
 }
@@ -281,7 +282,7 @@ int64_t syscall_tell(thread_t * thread, cpu_context_t * context) {
 int64_t syscall_schedule_yield(thread_t * thread, cpu_context_t * context) {
     (void)thread;
     uint8_t cpu_id = getApicId();
-    scheduler_handler(context, cpu_id);
+    scheduler_handler(context, cpu_id, CONTEXT_SAVE_USPACE);
     return context->rax;
 }
 
@@ -322,6 +323,23 @@ int64_t syscall_waitpid(thread_t * thread, cpu_context_t * context) {
     return process_waitpid(proc, pid, status, options);
 }
 
+int64_t syscall_nanosleep(thread_t * thread, cpu_context_t * context) {
+    struct timespec *duration = (struct timespec *)SYSCALL_ARG0(context);
+    struct timespec *rem = (struct timespec *)SYSCALL_ARG1(context);
+    if (!duration) {
+        return -EINVAL;
+    }
+    if (duration->tv_sec < 0 || duration->tv_nsec < 0 || duration->tv_nsec >= 1000000000) {
+        return -EINVAL;
+    }
+
+    status_t st = nanosleep(thread, (struct timespec *)duration, rem);
+    if (st != SUCCESS) {
+        return -EINTR;
+    }
+    return 0;
+}
+
 int64_t syscall_getpid(thread_t * thread, cpu_context_t * context) {
     (void)context; // Unused
     process_t * proc = (process_t *)thread->process;
@@ -347,7 +365,8 @@ static syscall_handler_t handlers[SYS_COUNT] = {
     syscall_fork, //15
     syscall_execve,
     syscall_waitpid,
-    syscall_getpid
+    syscall_getpid,
+    syscall_nanosleep
 
 /*
     syscall_dup,

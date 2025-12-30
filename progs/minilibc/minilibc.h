@@ -1,5 +1,6 @@
 
 #include <stdint.h>
+#include <time.h>
 
 #define MAP_FAILED ((void *)-1)
 
@@ -79,3 +80,4 @@ int sys_fork();
 int sys_execve(const char * filename, char ** argv, char ** envp);
 int sys_waitpid(int pid, int * status, int options);
 int sys_getpid();
+int sys_nanosleep(struct timespec * duration, struct timespec * rem);

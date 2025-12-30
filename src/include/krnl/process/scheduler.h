@@ -7,6 +7,9 @@
 
 #define SCHEDULER_TIMESLICE_MS 100
 
+#define CONTEXT_SAVE_USPACE 0
+#define CONTEXT_SAVE_KSPACE 1
+
 #define SCHEDULER_SOURCE_TIMER_INTERRUPT 0
 #define SCHEDULER_SOURCE_YIELD_SYSCALL 1
 #define SCHEDULER_SOURCE_OTHER 2
@@ -17,7 +20,7 @@
 #define SCHEDULER_STATUS_STOPPED 3
 #define SCHEDULER_STATUS_ZOMBIE 4
 
-void scheduler_handler(cpu_context_t* ctx, uint8_t cpu_id);
+void scheduler_handler(cpu_context_t* ctx, uint8_t cpu_id, uint8_t is_kernel_ctx);
 
 status_t scheduler_add(thread_t * thread);
 status_t scheduler_remove(thread_t * thread);

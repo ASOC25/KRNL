@@ -356,6 +356,32 @@ thread_t * duplicate_thread(process_t * parent, thread_t * og) {
         return NULL;
     }
     memcpy(new_ctx->simd_ctx, og->context->simd_ctx, 512);
+
+    new_thread->kcontext = kmalloc(sizeof(context_t));
+    if (!new_thread->kcontext) {
+        panic("duplicate_thread: Failed to allocate memory for kernel context_t");
+        simd_free_context(new_ctx->simd_ctx);
+        kfree(new_ctx);
+        kfree(new_cpu_ctx);
+        kfree(new_ctx_info);
+        kfree(new_thread);
+        return NULL;
+    }
+    memset(new_thread->kcontext, 0, sizeof(context_t));
+    new_thread->kcontext_pending = 0;
+    new_thread->kcontext->simd_ctx = kmalloc(512);
+    if (!new_thread->kcontext->simd_ctx) {
+        panic("duplicate_thread: Failed to allocate memory for kernel SIMD context");
+        kfree(new_thread->kcontext);
+        simd_free_context(new_ctx->simd_ctx);
+        kfree(new_ctx);
+        kfree(new_cpu_ctx);
+        kfree(new_ctx_info);
+        kfree(new_thread);
+        return NULL;
+    }
+    memset(new_thread->kcontext->simd_ctx, 0, 512);
+    
     new_thread->context = new_ctx;
     new_thread->entry = og->entry;
     new_thread->state = og->state;
@@ -485,6 +511,13 @@ thread_t * process_create_thread(process_t * process, void * entry_point) {
         return NULL;
     }
     memset(new_thread->context, 0, sizeof(context_t));
+    new_thread->kcontext = kmalloc(sizeof(context_t));
+    new_thread->kcontext_pending = 0;
+    if (!new_thread->kcontext) {
+        panic("process_create_thread: Failed to allocate kernel CPU context");
+        return NULL;
+    }
+    memset(new_thread->kcontext, 0, sizeof(context_t));
 
     new_thread->context->simd_ctx = simd_create_context();
     if (!new_thread->context->simd_ctx) {
@@ -492,6 +525,14 @@ thread_t * process_create_thread(process_t * process, void * entry_point) {
         return NULL;
     }
     memset(new_thread->context->simd_ctx, 0, 512);
+
+    new_thread->kcontext->simd_ctx = simd_create_context();
+    if (!new_thread->kcontext->simd_ctx) {
+        panic("process_create_thread: Failed to allocate kernel SIMD context");
+        return NULL;
+    }
+    memset(new_thread->kcontext->simd_ctx, 0, 512);
+
     new_thread->process = (void *)process;
     new_thread->entry = entry_point;
     new_thread->state = SCHEDULER_STATUS_RUNABLE;

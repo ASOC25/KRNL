@@ -4,7 +4,9 @@
 #include <krnl/arch/x86/cpu.h>
 #include <krnl/debug/debug.h>
 #include <krnl/process/scheduler.h>
+#include <krnl/arch/x86/hpet.h>
 #include <krnl/mem/mmap.h>
+#include <krnl/process/signals.h>
 
 extern void* __interrupt_vector[IDT_ENTRY_COUNT];
 static __attribute__((aligned(IDT_PAGE_SIZE))) idt_t global_idt = {};
@@ -68,34 +70,38 @@ void exception(cpu_context_t * ctx) {
 }
 
 void interrupt_handler(cpu_context_t* ctx, uint8_t cpu_id) {
-
-    if (ctx->interrupt_number < 32) {
-        if (ctx->interrupt_number == 14) {
-            //Page fault
-            uint64_t cr2;
-            __asm__ volatile("mov %%cr2, %0" : "=r"(cr2));
-            process_t * current_process = 0x0;
-            thread_t *  current_thread = (thread_t *)ctx->ctx_info->thread;
-            if (current_thread) {
-                current_process = current_thread->process;
-            } else {
-                exception(ctx);
-            }
-            status_t status = vmarea_try_cow(current_process, (void *)cr2);
-            if (status == SUCCESS) {
-                apic_local_eoi(cpu_id);
-                return;
-            } else {
-                exception(ctx);
-            }
-        }
+    if (ctx->interrupt_number == 13) {
+        //General Protection Fault
+        kprintf("General Protection Fault on CPU %d\n", cpu_id);
         exception(ctx);
-    } else if (ctx->interrupt_number >= 32 && ctx->interrupt_number < 48) {
-        panic("Unhandled IRQ: %d", ctx->interrupt_number - 32);
-        //apic_handle_interrupt(ctx->interrupt_number, cpu_id);
+    } else if (ctx->interrupt_number == 14) {
+        //Page fault
+        uint64_t cr2;
+        __asm__ volatile("mov %%cr2, %0" : "=r"(cr2));
+        process_t * current_process = 0x0;
+        thread_t *  current_thread = (thread_t *)ctx->ctx_info->thread;
+        if (current_thread) {
+            current_process = current_thread->process;
+        } else {
+            exception(ctx);
+        }
+        status_t status = vmarea_try_cow(current_process, (void *)cr2);
+        if (status == SUCCESS) {
+            apic_local_eoi(cpu_id);
+            return;
+        } else {
+            exception(ctx);
+        }
+    } else if (ctx->interrupt_number == HPET_TIMER_IRQ) {
+        //HPET System Timer Interrupt
+        update_counters();
     } else if (ctx->interrupt_number == INT_SCHEDULE_APIC_TIMER) {
-        kprintf("Timer Interrupt on CPU %d\n", cpu_id);
-        scheduler_handler(ctx, cpu_id);
+        scheduler_handler(ctx, cpu_id, CONTEXT_SAVE_USPACE);
+    } else if (ctx->interrupt_number == SIGNAL_SLEEP_INTERRUPT) {
+        kprintf("Sleep signal on CPU %d\n", cpu_id);
+        scheduler_handler(ctx, cpu_id, CONTEXT_SAVE_KSPACE);
+    } else if (ctx->interrupt_number < 32) {
+        exception(ctx);
     } else {
         panic("Unknown Interrupt: %d", ctx->interrupt_number);
     }

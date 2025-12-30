@@ -3,6 +3,7 @@
 #include <minilibc.h>
 #include <auxv.h>
 #include <stdio.h>
+#include <time.h>
 
 struct minilibc_data {
     uint8_t loaded;
@@ -99,4 +100,8 @@ int sys_waitpid(int pid, int * status, int options) {
 
 int sys_getpid() {
     return (int)syscall(18, 0, 0, 0, 0, 0, 0);
+}
+
+int sys_nanosleep(struct timespec * duration, struct timespec * rem) {
+    return (int)syscall(19, (uint64_t)duration, (uint64_t)rem, 0, 0, 0, 0);
 }
