@@ -83,7 +83,7 @@ void cpu_init_id(uint64_t cpu_id, uint64_t lapic_id) {
     //Enable preemptive scheduler timer
     apic_start_lapic_timer();
     //Enable internal system timer (HPET)
-    arm_hpet_interrupt_timer(HPET_SYSTEM_TASK_FEMTOS);
+    arm_hpet_interrupt_timer(77000);
     apic_ioapic_mask(HPET_TIMER_IRQ, 1); //Unmask HPET IRQ
 }
 

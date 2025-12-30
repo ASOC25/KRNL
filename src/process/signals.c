@@ -4,6 +4,7 @@
 #include <krnl/debug/debug.h>
 #include <krnl/libraries/std/time.h>
 #include <krnl/arch/x86/hpet.h>
+#include <krnl/process/scheduler.h>
 
 typedef struct snode {
     int id;
@@ -11,7 +12,7 @@ typedef struct snode {
     struct timespec duration;
     struct timespec rem;
 
-    uint64_t elapsed_femtos;
+    uint64_t elapsed_nanos;
 
     struct snode * next;
     struct snode * prev;
@@ -29,7 +30,7 @@ void new(int id, thread_t * thread, struct timespec *duration, struct timespec *
     }
     new_node->id = id;
     new_node->thread = thread;
-    new_node->elapsed_femtos = 0;
+    new_node->elapsed_nanos = 0;
     if (duration) {
         new_node->duration.tv_sec = duration->tv_sec;
         new_node->duration.tv_nsec = duration->tv_nsec;
@@ -92,31 +93,37 @@ void remove(sleeping_thread_t * node) {
 }
 
 void update_counters() {
-    //Iterate through sleeping threads and update their elapsed_femtos by HPET_SYSTEM_TASK_FEMTOS
+    //Iterate through sleeping threads and update their elapsed_nanos by HPET_SYSTEM_TASK_NANO
     if (!sleeping_threads_head) {hpet_disable(); return;} //Disable HPET interrupts if no sleeping threads
     sleeping_thread_t * current = sleeping_threads_head;
     
     while (current) {
-        current->elapsed_femtos += HPET_SYSTEM_TASK_FEMTOS;
+        current->elapsed_nanos += HPET_SYSTEM_TASK_NANO;
         //Check if the thread has slept enough
-        uint64_t total_femtos = (current->duration.tv_sec * 1000000000000ULL) + (current->duration.tv_nsec * 1000ULL);
-        if (current->elapsed_femtos >= total_femtos) {
+        uint64_t total_nanos = (current->duration.tv_sec * 1000000000ULL) + (current->duration.tv_nsec);
+        if (current->elapsed_nanos >= total_nanos) {
             //Wake up the thread
-            current->thread->state = PROCESS_STATUS_RUNABLE;
+            current->thread->state = SCHEDULER_STATUS_RUNABLE;
             sleeping_thread_t * to_remove = current;
             current = current->next;
             remove(to_remove);
-            kprintf("Woke up thread %d\n", to_remove->id);
+            //kprintf("Woke up thread %d\n", to_remove->id);
         } else {
+            //Print remaining time
+            //uint64_t remaining_nanos = total_nanos - current->elapsed_nanos;
+            //uint64_t rem_sec = remaining_nanos / 1000000000ULL;
+            //uint64_t rem_nsec = remaining_nanos % 1000000000ULL;
+            //kprintf("Thread %d sleeping, remaining time: %llu sec %llu nsec\n", current->id, rem_sec, rem_nsec);
             current = current->next;
         }
     }
+    //kprintf("CUAK\n");
 }
 
 void sleep(thread_t * thread, int condition) {
     new(condition, thread, NULL, NULL);
-    thread->state = PROCESS_STATUS_INTERRUPTIBLE_SLEEP;
-    while (thread->state == PROCESS_STATUS_INTERRUPTIBLE_SLEEP) {
+    thread->state = SCHEDULER_STATUS_INTERRUPTIBLE_SLEEP;
+    while (thread->state == SCHEDULER_STATUS_INTERRUPTIBLE_SLEEP) {
         __asm__ volatile("int $0x81");
     }
 }
@@ -137,8 +144,8 @@ int generate_id(thread_t* thread) {
 
 status_t nanosleep(thread_t * thread, struct timespec *duration, struct timespec *rem) {
     new(generate_id(thread), thread, duration, rem);
-    thread->state = PROCESS_STATUS_INTERRUPTIBLE_SLEEP;
-    while (thread->state == PROCESS_STATUS_INTERRUPTIBLE_SLEEP) {
+    thread->state = SCHEDULER_STATUS_INTERRUPTIBLE_SLEEP;
+    while (thread->state == SCHEDULER_STATUS_INTERRUPTIBLE_SLEEP) {
         __asm__ volatile("int $0x81");
     }
     return SUCCESS;
@@ -149,11 +156,11 @@ void wakeup(int condition) {
     sleeping_thread_t * current = waiting_threads_head;
     while (current) {
         if (current->id == condition) {
-            current->thread->state = PROCESS_STATUS_RUNABLE;
+            current->thread->state = SCHEDULER_STATUS_RUNABLE;
             sleeping_thread_t * to_remove = current;
             current = current->next;
             remove(to_remove);
-            kprintf("Woke up thread %d from condition %d\n", to_remove->id, condition);
+            //kprintf("Woke up thread %d from condition %d\n", to_remove->id, condition);
         } else {
             current = current->next;
         }

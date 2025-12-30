@@ -88,20 +88,21 @@ void hpet_sleep(uint64_t us){
 
 //Setup the hpet to generate periodic interrupts every femtos femtoseconds
 //Use interrupt vector INT_SLEEP (0x41)
-void arm_hpet_interrupt_timer(size_t us) {
+void arm_hpet_interrupt_timer(uint64_t us) {
     assert(hpet_is_initialized);
 
     hpet_change_main_timer_interrupt_state(0);
+    hpet_write_register(HPET_TIMER_OFFSET_GENERAL_CONFIGURATION, 0);
+    uint64_t counter_clk_perioid = hpet_read_register(HPET_TIMER_OFFSET_GENERAL_CAPABILITIES_ID) >> HPET_GENERAL_CAPABILITIES_ID_COUNTER_PERIOD;
+    uint64_t ticks_per_ms = (micro_to_femo(us) / counter_clk_perioid);
+    kprintf("HPET: Setting timer to interrupt every %llu microseconds (%llu ticks)\n", us, ticks_per_ms);
     hpet_write_register(HPET_TIMER_OFFSET_MAIN_COUNTER_VALUES, 0);
-    //Configure timer 0
-    uint64_t timer0_config = hpet_read_register(HPET_TIMER_OFFSET_TIMER_SPACE_DATA_START + 0 * HPET_TIMER_OFFSET_TIMER_SPACE_SIZE + HPET_TIMER_OFFSET_TIMER_CONFIG_CAPABILITY_REGISTER);
-    //Set periodic mode and enable interrupts
-    timer0_config |= (1 << 3); // Set periodic mode
-    timer0_config |= (1 << 2); // Enable interrupts
-    hpet_write_register(HPET_TIMER_OFFSET_TIMER_SPACE_DATA_START + 0 * HPET_TIMER_OFFSET_TIMER_SPACE_SIZE + HPET_TIMER_OFFSET_TIMER_CONFIG_CAPABILITY_REGISTER, timer0_config);
-    //Set comparator value
-    uint64_t comparator_value = (micro_to_femo(us)) / hpet_frequency;
-    hpet_write_register(HPET_TIMER_OFFSET_TIMER_SPACE_DATA_START + 0 * HPET_TIMER_OFFSET_TIMER_SPACE_SIZE + HPET_TIMER_OFFSET_TIMER_COMPARATOR_VALUE_REGISTER, comparator_value);
+    uint64_t timer0_config = (1 << 15) | (1 << 9) | (1 << 6) | (1 << 3) | (1 << 2); //Set periodic mode, enable interrupts, set interrupt type to level triggered, set to use main counter, enable timer
+    hpet_write_register(COMPARATOR_0_REGS + HPET_TIMER_OFFSET_TIMER_CONFIG_CAPABILITY_REGISTER, timer0_config);
+    hpet_write_register(COMPARATOR_0_REGS + HPET_TIMER_OFFSET_TIMER_COMPARATOR_VALUE_REGISTER, ticks_per_ms);
+    //Write general configuration to enable hpet and legacy replacement
+    uint64_t general_configuration = (1 << 0) | (1 << 1);
+    hpet_write_register(HPET_TIMER_OFFSET_GENERAL_CONFIGURATION, general_configuration);
     hpet_change_main_timer_interrupt_state(1);
 }
 

@@ -69,6 +69,8 @@ void exception(cpu_context_t * ctx) {
     panic("CPU EXCEPTION: %d | Stacktrace (CR2: 0x%llx):", ctx->interrupt_number, cr2);
 }
 
+
+//uint64_t last_us = 0;
 void interrupt_handler(cpu_context_t* ctx, uint8_t cpu_id) {
     if (ctx->interrupt_number == 13) {
         //General Protection Fault
@@ -94,11 +96,14 @@ void interrupt_handler(cpu_context_t* ctx, uint8_t cpu_id) {
         }
     } else if (ctx->interrupt_number == HPET_TIMER_IRQ) {
         //HPET System Timer Interrupt
+        //uint64_t current_us = hpet_get_current_time();
+        //kprintf("Elapsed: %llu microseconds\n", current_us - last_us);
+        //last_us = current_us;
         update_counters();
     } else if (ctx->interrupt_number == INT_SCHEDULE_APIC_TIMER) {
         scheduler_handler(ctx, cpu_id, CONTEXT_SAVE_USPACE);
     } else if (ctx->interrupt_number == SIGNAL_SLEEP_INTERRUPT) {
-        kprintf("Sleep signal on CPU %d\n", cpu_id);
+        //kprintf("Sleep signal on CPU %d\n", cpu_id);
         scheduler_handler(ctx, cpu_id, CONTEXT_SAVE_KSPACE);
     } else if (ctx->interrupt_number < 32) {
         exception(ctx);

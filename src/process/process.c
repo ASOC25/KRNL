@@ -442,6 +442,7 @@ process_t * process_fork(process_t * parent, thread_t * forking_thread) {
     }
 
     child->threads[0] = *child_thread;
+    child->threads[0].context->cpu_ctx.ctx_info->thread = &child->threads[0]; //UTTERLY STUPID
     child->thread_count = 1;
     child->main_thread = &child->threads[0];
     child->current_thread = &child->threads[0];
