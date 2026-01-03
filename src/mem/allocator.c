@@ -53,12 +53,34 @@ void add_allocation(vmm_root_t* root, void * physical_address, vmm_root_t * acce
     current_alloc_buffer.buffer_free_allocations--;
 }
 
+void allocmatch() {
+    kprintf("Allocation matches !!!\n");
+}
+
+#define TARGET_ALLOC 0xffffb0000017e000
+
+//Test if the allocation contains TARGET_ALLOC
+void detect_area(vmm_root_t * root) {
+    struct allocation * current = allocations_head;
+
+    while (current != NULL) {
+        if (current->virtual_address <= (void *)TARGET_ALLOC &&
+            (uint64_t)current->virtual_address + current->size > TARGET_ALLOC &&
+            (current->root == root || root == NULL)) { //Null means any root
+            allocmatch();
+            return;
+        }
+        current = current->next;
+    }
+}
+
 void remove_allocation(vmm_root_t * root, void * ptr) {
     struct allocation * current = allocations_head;
 
     while (current != NULL) {
         if (current->virtual_address == ptr && (current->root == root || root == NULL)) { //Null means any root
             // Found the allocation to remove
+            detect_area(root);
             if (current->prev != NULL) {
                 current->prev->next = current->next;
             } else {
@@ -306,6 +328,8 @@ stack_t * copy_kstack(vmm_root_t * dest_root, stack_t * source) {
         panic("copy_stack: Failed to map new stack pages");
     }
 
+    //add allocation
+    add_allocation(dest_root, phys_addr, NULL, 0x0, source->base, stack_size, source->flags);
     return source;
 }
 
@@ -339,5 +363,8 @@ farlands_stack_t * copy_stack(vmm_root_t * dest_root, farlands_stack_t * source)
     if (st != SUCCESS) {
         panic("copy_stack: Failed to map new stack pages");
     }
+
+    //add allocation
+    add_allocation(dest_root, phys_addr, vmm_get_root(), source->handle_base, source->base, stack_size, source->flags);
     return source;
 }

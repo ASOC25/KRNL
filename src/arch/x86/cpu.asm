@@ -1,4 +1,4 @@
-global reload_gs_fs, get_cpu_context, cpu_get_apicid, set_cpu_context, get_cpu_context, set_cpu_gs_base, set_cpu_gs_kernel_base, set_cpu_fs_base, cpu_get_user_stack_before_syscall, getApicId
+global reload_gs_fs, get_cpu_context, cpu_get_apicid, set_cpu_context, get_cpu_context, set_cpu_gs_base, set_cpu_gs_kernel_base, set_cpu_fs_base, get_cpu_gs_base, cpu_get_user_stack_before_syscall, getApicId
 
 %define fs_base             0xc0000100
 %define gs_base             0xc0000101
@@ -16,6 +16,14 @@ set_cpu_gs_base:
 	mov		edx, edi
     mov		ecx, gs_base	
 	wrmsr
+    ret
+
+;extern uint64_t get_cpu_gs_base(void);
+get_cpu_gs_base:
+    mov     ecx, gs_base
+    rdmsr
+    shl     rdx, 32
+    or      rax, rdx
     ret
 
 set_cpu_gs_kernel_base:

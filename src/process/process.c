@@ -11,12 +11,11 @@
 #include <krnl/process/loader.h>
 #include <krnl/mem/mmap.h>
 #include <krnl/libraries/std/errno.h>
+#include <krnl/process/signals.h>
 
 #include <krnl/libraries/assert/assert.h>
 
 extern void set_cpu_fs_base(uint64_t base);
-
-
 
 vfs_file_descriptor_t * process_get_fd(process_t *proc, int fd) {
     if (!proc) return NULL;
@@ -51,20 +50,6 @@ int process_allocate_fd_slot(process_t *proc) {
     int slot = process_allocate_fd_slot_locked(proc);
 
     return slot;
-}
-
-
-status_t process_waitpid(process_t * proc, int pid, int * status, int options) {
-    (void)options; // Unused for now
-    (void)status; // Unused for now
-    (void)proc;   // Unused for now
-
-    if (pid < -1 || pid == 0) {
-
-        return -EINVAL;
-    }
-
-    return -ECHILD;
 }
 
 void create_args(process_t * process, const char ** argv, const char ** envp, struct auxv ** out_auxv, uint64_t * out_auxv_size) {
@@ -161,6 +146,7 @@ process_t * process_create(process_t * parent, const char * filename, const char
     new_process->thread_count = 0;
     new_process->current_thread = NULL;
     new_process->nice = 0xA;
+    new_process->state = SCHEDULER_STATUS_RUNABLE;
     new_process->event_queue = NULL;
     new_process->main_thread = NULL;
     new_process->pid = -1; // Will be set by scheduler
@@ -274,11 +260,12 @@ thread_t * duplicate_thread(process_t * parent, thread_t * og) {
     memset(new_thread, 0, sizeof(thread_t));
     new_thread->event_queue = NULL;
     new_thread->stack_size = og->stack_size;
-    new_thread->kstack = kmalloc(sizeof(stack_t));
+    new_thread->kstack = kstackalloc(parent->vmm, KERNEL_STACK_SIZE);
+
     if (!new_thread->kstack) {
         panic("duplicate_thread: Failed to allocate memory for new kstack");
     }
-    memcpy(new_thread->kstack, og->kstack, sizeof(stack_t));
+    memcpy((void*)((uint64_t)new_thread->kstack->base), og->kstack->base, KERNEL_STACK_SIZE);
 
     new_thread->ustack = copy_stack(parent->vmm, og->ustack);
     if (!new_thread->kstack || !new_thread->ustack) {
@@ -346,7 +333,7 @@ thread_t * duplicate_thread(process_t * parent, thread_t * og) {
     memset(new_ctx, 0, sizeof(context_t));
     new_ctx->cpu_ctx = *new_cpu_ctx;
     new_ctx->fs_base = og->context->fs_base;
-    new_ctx->simd_ctx = kmalloc(512);
+    new_ctx->simd_ctx = simd_create_context();
     if (!new_ctx->simd_ctx) {
         panic("duplicate_thread: Failed to allocate memory for SIMD context");
         kfree(new_ctx);
@@ -454,6 +441,7 @@ process_t * process_fork(process_t * parent, thread_t * forking_thread) {
     child->event_queue = NULL;
     child->binary_entry = parent->binary_entry;
     child->exit_code = 0;
+    child->state = SCHEDULER_STATUS_RUNABLE;
     for (int i = 0; i < parent->open_file_count; i++) {
         child->open_files[i] = parent->open_files[i];
     }
@@ -704,6 +692,12 @@ status_t process_destroy_thread(process_t * process, thread_t * thread) {
         kfree(thread->context);
     }
 
+    if (thread->kcontext) {
+        simd_free_context(thread->kcontext->simd_ctx);
+        kfree(thread->kcontext->cpu_ctx.ctx_info);
+        kfree(thread->kcontext);
+    }
+
     if (thread->ustack) {
         stackfree(process->vmm, thread->ustack);
     }
@@ -742,7 +736,8 @@ status_t process_exit(process_t * process, int code) {
     for (int i = 0; i < process->thread_count; i++) {
         process->threads[i].state = SCHEDULER_STATUS_ZOMBIE;
     }
-
+    process->state = SCHEDULER_STATUS_ZOMBIE;
+    wakeup(SIGNAL_WAITPID);
     return SUCCESS;
 }
 

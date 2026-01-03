@@ -20,6 +20,7 @@
 extern uint8_t getApicId(void);
 extern void reload_gs_fs(void);
 extern void set_cpu_gs_base(uint64_t addr);
+extern uint64_t get_cpu_gs_base(void);
 extern void syscall_enable(uint16_t kernel_cs, uint16_t user_cs);
 typedef struct core_context {
     uint64_t core_id;
@@ -60,6 +61,11 @@ void cpu_context_init() {
     reload_gs_fs();
     set_cpu_gs_base((uint64_t)ctx);
     cpu_tss_init(ctx);
+}
+
+void cpu_set_context_info(context_info_t* info) {
+    core_context_t * ctx = (core_context_t *)get_cpu_gs_base();
+    ctx->cinfo = info;
 }
 
 void callback(boot_smp_info_t *lcpu) {

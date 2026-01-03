@@ -62,7 +62,7 @@ typedef struct process_t {
     int16_t uid;
     int16_t gid;
     int exit_code;
-
+    int state;
     long nice;
 
     vfs_file_descriptor_t open_files[MAX_OPEN_FILES];
@@ -85,7 +85,6 @@ void context_restore(context_t* ctx, cpu_context_t* cpu_ctx);
 
 status_t process_execve(process_t * process, const char * filename, const char ** argv, const char ** envp);
 process_t * process_fork(process_t * parent, thread_t * forking_thread);
-status_t process_waitpid(process_t * proc, int pid, int * status, int options);
 status_t process_enqueue_event(thread_t * thread, int event);
 status_t process_dequeue_event(thread_t * thread, int * out_event);
 status_t process_exit(process_t * process, int code);

@@ -1,6 +1,7 @@
 #include <minilibc.h>
 #include <stdio.h>
 #include <string.h>
+#include <wait.h>
 
 void print_args(int argc, char* argv[], char* envp[]) {
     printf("Argc: %d", argc);
@@ -18,6 +19,104 @@ void print_args(int argc, char* argv[], char* envp[]) {
     printf("\n");
 }
 
+void __attribute__ ((noinline)) waitpid_test() {
+    //Test waitpid all cases
+    printf("testing waitpid with pid < -1 (gid = abs(pid))\n");
+    int pid = sys_fork();
+    if (pid < 0) {
+        printf("Fork failed in waitpid test.\n");
+        return;
+    } else if (pid == 0) {
+        // Child process
+        printf("child process sleeping for 2 seconds...\n");
+        sys_nanosleep(&(struct timespec){.tv_sec=2, .tv_nsec=0}, NULL);
+        printf("child process exiting with code 42.\n");
+        sys_exit(42);
+    } else {
+        int status;
+        int ret = sys_waitpid(0 - 1, &status, 0);
+        if (ret != pid) {
+            printf("waitpid test failed: expected return pid %d, got %d\n", pid, ret);
+            while (1);
+        } else {
+            if (WIFEXITED(status)) {
+                int exit_code = WEXITSTATUS(status);
+                if (exit_code != 42) {
+                    printf("waitpid test failed: expected exit code 42, got %d\n", exit_code);
+                    while (1);
+                    return;
+                }
+            } else {
+                printf("waitpid test failed: child did not exit normally.\n");
+                while (1);
+                return;
+            }
+            printf("waitpid test passed for pid < -1 case.\n");
+        }
+    }
+    printf("testing waitpid with pid < -1 completed.\n");
+    printf("testing waitpid with pid == -1\n");
+    pid = sys_fork();
+    if (pid < 0) {
+        printf("Fork failed in waitpid test.\n");
+        return;
+    } else if (pid == 0) {
+        // Child process
+        printf("child process sleeping for 2 seconds...\n");
+        sys_nanosleep(&(struct timespec){.tv_sec=2, .tv_nsec=0}, NULL);
+        sys_exit(43);
+    } else {
+        int status;
+        int ret = sys_waitpid(-1, &status, 0);
+        if (ret != pid) {
+            printf("waitpid test failed: expected return pid %d, got %d\n", pid, ret);
+        } else {
+            printf("waitpid test passed for pid == -1 case.\n");
+        }
+    }
+    printf("testing waitpid with pid == -1 completed.\n");
+    printf("testing waitpid with pid == 0\n");
+    pid = sys_fork();
+    if (pid < 0) {
+        printf("Fork failed in waitpid test.\n");
+        return;
+    } else if (pid == 0) {
+        // Child process
+        printf("child process sleeping for 2 seconds...\n");
+        sys_nanosleep(&(struct timespec){.tv_sec=2, .tv_nsec=0}, NULL);
+        sys_exit(44);
+    } else {
+        int status;
+        int ret = sys_waitpid(0, &status, 0);
+        if (ret != pid) {
+            printf("waitpid test failed: expected return pid %d, got %d\n", pid, ret);
+        } else {
+            printf("waitpid test passed for pid == 0 case.\n");
+        }
+    }
+    printf("testing waitpid with pid == 0 completed.\n");
+    printf("testing waitpid with pid > 0\n");
+    pid = sys_fork();
+    if (pid < 0) {
+        printf("Fork failed in waitpid test.\n");
+        return;
+    } else if (pid == 0) {
+        // Child process
+        printf("child process sleeping for 2 seconds...\n");
+        sys_nanosleep(&(struct timespec){.tv_sec=2, .tv_nsec=0}, NULL);
+        sys_exit(45);
+    } else {
+        int status;
+        int ret = sys_waitpid(pid, &status, 0);
+        if (ret != pid) {
+            printf("waitpid test failed: expected return pid %d, got %d\n", pid, ret);
+        } else {
+            printf("waitpid test passed for pid > 0 case.\n");
+        }
+    }
+    printf("testing waitpid with pid > 0 completed.\n");
+}
+
 void __attribute__ ((noinline)) fork_stress() {
     int pid = sys_fork();
     int pid2 = sys_getpid();
@@ -28,9 +127,11 @@ void __attribute__ ((noinline)) fork_stress() {
         // Child process
         int local_counter = sys_getpid();
         while (1) {
-            printf("P%d\n", local_counter);
+            printf("Entering child process %d\n", local_counter);
             struct timespec duration = { .tv_sec = 5, .tv_nsec = 0 };
             sys_nanosleep(&duration, NULL); // Sleep for 5 seconds
+            printf("Exiting child process %d\n", local_counter);
+            sys_exit(0);
         }
     }
     if (pid2 != 101) {
@@ -38,6 +139,14 @@ void __attribute__ ((noinline)) fork_stress() {
             printf("Parent process PID mismatch in stress test. Expected 101, got %d\n", pid2);
         }
     }
+    int status;
+    int ret = sys_waitpid(pid, &status, 0);
+    if (ret != pid) {
+        printf("Fork stress test failed: expected return pid %d, got %d\n", pid, ret);
+    } else {
+        printf("Fork stress test child process %d exited successfully.\n", pid);
+    }
+    printf("Fork stress test completed.\n");
 }
 
 int main(int argc, char* argv[], char* envp[]) {
@@ -64,10 +173,21 @@ int main(int argc, char* argv[], char* envp[]) {
     sys_munmap(buffer, size + 1);
     sys_close(fd);
 
-    printf("Testing fork and execve:\n");
-    for (int i = 0; i < 300; i++) {
-        fork_stress();
+    //Create idle process:
+    int idle_pid = sys_fork();
+    if (idle_pid < 0) {
+        printf("Failed to create idle process. Exiting.\n");
+        sys_exit(1);
+    } else if (idle_pid == 0) {
+        //Idle process
+        while (1) {
+        }
     }
+    printf("Idle process created with PID %d\n", idle_pid);
+    printf("Starting fork stress test (press Ctrl+C to stop)...\n");
+    fork_stress();
+    printf("Starting waitpid test...\n");
+    waitpid_test();
     printf("Entering scheduling loop.\n");
     while (1) {
         //printf("IM A RESOURCE HOG!\n");

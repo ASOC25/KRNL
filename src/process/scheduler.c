@@ -6,8 +6,9 @@
 #include <krnl/libraries/std/stddef.h>
 #include <krnl/process/process.h>
 #include <krnl/arch/x86/apic.h>
-
+#include <krnl/process/signals.h>
 #include <krnl/libraries/assert/assert.h>
+#include <krnl/libraries/std/errno.h>
 
 typedef struct scheduler_queue {
     thread_t * thread;
@@ -47,6 +48,103 @@ pid_t scheduler_get_free_pid() {
     pid = scheduler_get_free_pid_locked();
 
     return pid;
+}
+
+uint8_t comparator_alpha(process_t * caller, process_t * iterated, int pid) {
+    //return if any child process such that  gid = abs(pid) has exited
+    return (iterated->ppid == caller->pid && iterated->gid == (pid_t)(-pid));
+}
+    //return if any child process has exited
+uint8_t comparator_beta(process_t * caller, process_t * iterated, int pid) {
+    (void)pid;
+    return (iterated->ppid == caller->pid);
+}
+uint8_t comparator_gamma(process_t * caller, process_t * iterated, int pid) {
+    (void)pid;
+    //return if any child gid=gid of caller has exited
+    return (iterated->ppid == caller->pid && iterated->gid == caller->gid);
+}
+uint8_t comparator_delta(process_t * caller, process_t * iterated, int pid) {
+    //return if specific pid has exited
+    return (iterated->ppid == caller->pid && iterated->pid == (pid_t)(pid));
+}
+int generate_status(int exit_code, int signal) {
+    return (exit_code & 0xFF) | ((signal & 0x7F) << 8);
+}
+
+//Used for waitpid
+int scheduler_waitpid(thread_t * caller, int pid, int * status, int options) {
+	//values for pid:
+    //under -1 = return if any child process such that  gid = abs(pid) has exited
+	//exactly -1 = return if any child process has exited
+	//exactly 0 = return if any child gid=gid of caller has exited
+	//over 0 = return if specific pid has exited
+    uint8_t (*comparator)(process_t *, process_t *, int) = NULL;
+    switch (pid) {
+        case -1:
+            comparator = comparator_beta;
+            break;
+        case 0:
+            comparator = comparator_gamma;
+            break;
+        default:
+            if (pid < -1) {
+                comparator = comparator_alpha;
+            } else {
+                comparator = comparator_delta;
+            }
+            break;
+    }
+    
+    int changed_pid = 0;
+    while (!changed_pid) {
+        uint8_t found_one = 0;
+        //iterate over all threads in the scheduler queue
+        scheduler_queue_t * current = sched_queue;
+        while (current != NULL) {
+            process_t * iterated_process = GET_PROC(current->thread);
+            process_t * caller_process = GET_PROC(caller);
+            if (comparator(caller_process, iterated_process, pid)) {
+                found_one = 1;
+
+                if (options & WNOHANG) {
+                    if (iterated_process->state == SCHEDULER_STATUS_ZOMBIE) {
+                        //Reap process
+                        if (status) {
+                            *status = generate_status(iterated_process->exit_code, 0);
+                        }
+                        process_destroy(iterated_process);
+                    }
+                    changed_pid = iterated_process->pid;
+                } else if ((options & WUNTRACED) && iterated_process->state == SCHEDULER_STATUS_STOPPED) {
+                    if (status) {
+                        *status = generate_status(0, SIGSTOP);
+                    }
+                    changed_pid = iterated_process->pid;
+                } else if ((options & WCONTINUED) && iterated_process->state == SCHEDULER_STATUS_CONTINUED) {
+                    if (status) {
+                        *status = generate_status(0, SIGCONT);
+                    }
+                    changed_pid = iterated_process->pid;
+                } else {
+                    if (iterated_process->state == SCHEDULER_STATUS_ZOMBIE) {
+                        //Reap process
+                        if (status) {
+                            *status = generate_status(iterated_process->exit_code, 0);
+                        }
+                        process_destroy(iterated_process);
+                        changed_pid = iterated_process->pid;
+                    }
+                }
+            }
+            current = current->next;
+        }
+        if (!found_one) return -ECHILD;
+        //No matching exited process found, sleep the caller thread
+        if (!changed_pid) sleep(caller, SIGNAL_WAITPID);
+    }
+
+    return changed_pid;
 }
 
 thread_t * scheduler_get_next_thread() {
@@ -283,12 +381,14 @@ void scheduler_handler(cpu_context_t* ctx, uint8_t cpu_id, uint8_t is_kernel_ctx
         panic("scheduler_handler: No next process found");
     }
 
-    //if (next_process->pid == 101) match();
+    if (next_process->pid == 101) match();
 
-    //if (ending_process)
-    //    kprintf("ROBERT, ITS PISSING ME OFF from %d to %d\n", ending_process->pid, next_process->pid);
-    //else
-    //    kprintf("ROBERT, ITS PISSING ME OFF from NULL to %d\n", next_process->pid);
+    if (next_thread->state != SCHEDULER_STATUS_RUNABLE) {
+        panic("scheduler_handler: Next thread is not runable");
+    }
+    if (next_process->state != SCHEDULER_STATUS_RUNABLE) {
+        panic("scheduler_handler: Next process is not runable");
+    }
     
     if (next_thread->kcontext_pending) {
         next_thread->kcontext_pending = 0;
@@ -296,6 +396,18 @@ void scheduler_handler(cpu_context_t* ctx, uint8_t cpu_id, uint8_t is_kernel_ctx
     } else {
         context_restore(next_thread->context, ctx);
     }
+    cpu_set_context_info(ctx->ctx_info);
+
+    //if (ending_process) {
+    //    kprintf("ROBERT, ITS PISSING ME OFF from %d to %d\n", ending_process->pid, next_process->pid);
+    //    kprintf("Setting cpu kstack to 0x%llx\n", (uint64_t)next_thread->kstack->top);
+    //} else {
+    //    kprintf("ROBERT, ITS PISSING ME OFF from NULL to %d\n", next_process->pid);
+    //    kprintf("Setting cpu kstack to 0x%llx\n", (uint64_t)next_thread->kstack->top);
+    //}
+    //void cpu_context_update_stacks(uint64_t kernel_syscall_stack, uint64_t kernel_interrupt_stack, uint64_t user_interrupt_stack);
+    //cpu_context_update_stacks((uint64_t)next_thread->kstack->top);
+
     
     apic_arm_lapic_timer(cpu_id, SCHEDULER_TIMESLICE_MS);
 

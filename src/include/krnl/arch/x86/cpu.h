@@ -68,5 +68,5 @@ typedef struct{
     uint64_t ss;
 }__attribute__((packed)) cpu_context_t; 
 void cpu_init(void);
-void cpu_get_kstack(stack_t * stack);
+void cpu_set_context_info(context_info_t* info);
 #endif

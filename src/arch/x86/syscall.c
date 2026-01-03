@@ -143,7 +143,7 @@ int64_t syscall_exit(thread_t * thread, cpu_context_t * context) {
     int code = (int)SYSCALL_ARG0(context);
     process_t * proc = (process_t *)thread->process;
     process_exit(proc, code);
-    scheduler_handler(context, getApicId(), CONTEXT_SAVE_USPACE);
+    __asm__ volatile("int $0x40"); // Trigger scheduler to switch process
     panic("syscall_exit: Returned from scheduler_exit_process");
     return 0;
 }
@@ -319,8 +319,7 @@ int64_t syscall_waitpid(thread_t * thread, cpu_context_t * context) {
     int pid = (int)SYSCALL_ARG0(context);
     int * status = (int *)SYSCALL_ARG1(context);
     int options = (int)SYSCALL_ARG2(context);
-    process_t * proc = (process_t *)thread->process;
-    return process_waitpid(proc, pid, status, options);
+    return scheduler_waitpid(thread, pid, status, options);
 }
 
 int64_t syscall_nanosleep(thread_t * thread, cpu_context_t * context) {

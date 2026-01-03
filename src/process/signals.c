@@ -124,8 +124,11 @@ void sleep(thread_t * thread, int condition) {
     new(condition, thread, NULL, NULL);
     thread->state = SCHEDULER_STATUS_INTERRUPTIBLE_SLEEP;
     while (thread->state == SCHEDULER_STATUS_INTERRUPTIBLE_SLEEP) {
+        kprintf("Sleeping thread %d on condition %d\n", GET_PROC(thread)->pid, condition);
         __asm__ volatile("int $0x81");
+        kprintf("Woke up thread %d from condition %d\n", GET_PROC(thread)->pid, condition);
     }
+    kprintf("Sleep finished for thread %d on condition %d\n", GET_PROC(thread)->pid, condition);
 }
 
 int generate_id(thread_t* thread) {
@@ -146,8 +149,11 @@ status_t nanosleep(thread_t * thread, struct timespec *duration, struct timespec
     new(generate_id(thread), thread, duration, rem);
     thread->state = SCHEDULER_STATUS_INTERRUPTIBLE_SLEEP;
     while (thread->state == SCHEDULER_STATUS_INTERRUPTIBLE_SLEEP) {
+        kprintf("Nanosleeping thread %d for %lld sec %lld nsec\n", GET_PROC(thread)->pid, duration->tv_sec, duration->tv_nsec);
         __asm__ volatile("int $0x81");
+        kprintf("Woke up thread %d from nanosleep\n", GET_PROC(thread)->pid);
     }
+    kprintf("Nanosleep finished for thread %d\n", GET_PROC(thread)->pid);
     return SUCCESS;
 }
 
