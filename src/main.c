@@ -1,3 +1,4 @@
+#include <krnl/globals.h>
 #include <krnl/boot/boot.h>
 
 __attribute__((noreturn)) void _halt() {

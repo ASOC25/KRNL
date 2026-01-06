@@ -1,9 +1,19 @@
+#include <krnl/globals.h>
 #include <krnl/mem/pmm.h>
 #include <krnl/mem/vmm.h>
 #include <krnl/mem/allocator.h>
 #include <krnl/debug/debug.h>
 #include <krnl/libraries/std/string.h>
 #include <krnl/libraries/assert/assert.h>
+
+#define STACKTRACE_SIZE 6
+#define DEALLOCATION_BUFFER_SIZE 0x1000
+
+struct deallocation {
+    void* allocation_stacktrace[STACKTRACE_SIZE];
+    void* deallocation_stacktrace[STACKTRACE_SIZE];
+    uint64_t address;
+};
 
 struct allocation {
     vmm_root_t * root;
@@ -15,6 +25,8 @@ struct allocation {
     uint64_t size;
     uint8_t permisions;
 
+    void* allocation_stacktrace[STACKTRACE_SIZE];
+
     struct allocation * next;
     struct allocation * prev;
 };
@@ -25,7 +37,38 @@ struct alloc_buffer {
 };
 
 struct allocation * allocations_head = NULL;
+struct deallocation deallocations[DEALLOCATION_BUFFER_SIZE];
+uint64_t deallocation_count = 0;
 struct alloc_buffer current_alloc_buffer = {0};
+
+void fill_stacktrace(void ** st) {
+    st[0] = __builtin_return_address(0);
+    if (st[0] == _start) return;
+    st[1] = __builtin_return_address(1);
+    if (st[1] == _start) return;
+    st[2] = __builtin_return_address(2);
+    if (st[2] == _start) return;
+    st[3] = __builtin_return_address(3);
+    if (st[3] == _start) return;
+    st[4] = __builtin_return_address(4);
+    if (st[4] == _start) return;
+    st[5] = __builtin_return_address(5);
+}
+
+//A reallocation may have been performed, if the deallocation exists for the given pointer, remove it from the deallocation list
+void remove_deallocation_if_realloc(void * ptr) {
+    for (uint64_t i = 0; i < deallocation_count; i++) {
+        struct deallocation * dealloc = &deallocations[i];
+        if (dealloc->address == (uint64_t)ptr) {
+            //Remove this deallocation by shifting all later deallocations back
+            for (uint64_t j = i; j < deallocation_count - 1; j++) {
+                deallocations[j] = deallocations[j + 1];
+            }
+            deallocation_count--;
+            return;
+        }
+    }
+}
 
 void add_allocation(vmm_root_t* root, void * physical_address, vmm_root_t * access_root, void * access_address, void * virtual_address, uint64_t size, uint8_t permisions) {
     if (current_alloc_buffer.buffer_base_address == NULL || current_alloc_buffer.buffer_free_allocations == 0) {
@@ -45,32 +88,98 @@ void add_allocation(vmm_root_t* root, void * physical_address, vmm_root_t * acce
     new_allocation->next = allocations_head;
     new_allocation->prev = NULL;
 
+    fill_stacktrace(new_allocation->allocation_stacktrace);
+
     if (allocations_head != NULL) {
         allocations_head->prev = new_allocation;
     }
 
     allocations_head = new_allocation;
     current_alloc_buffer.buffer_free_allocations--;
+
+    remove_deallocation_if_realloc(virtual_address);
+}
+
+//If the deallocation count exceeds DEALLOCATION_BUFFER_SIZE start writing over old deallocations
+void add_deallocation(void * address, void ** out_stacktrace) {
+    if (deallocation_count >= DEALLOCATION_BUFFER_SIZE) {
+        deallocation_count = 0;
+    }
+
+    struct deallocation * dealloc = &deallocations[deallocation_count++];
+    dealloc->address = (uint64_t)address;
+
+    fill_stacktrace(dealloc->deallocation_stacktrace);
+
+    dealloc->allocation_stacktrace[0] = out_stacktrace[0];
+    dealloc->allocation_stacktrace[1] = out_stacktrace[1];
+    dealloc->allocation_stacktrace[2] = out_stacktrace[2];
+    dealloc->allocation_stacktrace[3] = out_stacktrace[3];
+    dealloc->allocation_stacktrace[4] = out_stacktrace[4];
+    dealloc->allocation_stacktrace[5] = out_stacktrace[5];
+}
+
+void dump_deallocations() {
+    kprintf("Deallocation dump (most recent first):\n");
+    for (int64_t i = deallocation_count - 1; i >= 0; i--) {
+        struct deallocation * dealloc = &deallocations[i];
+        if (dealloc->address == 0) {
+            continue;
+        }
+        kprintf("Deallocated address: %p\n", (void *)dealloc->address);
+        kprintf(" Allocation stacktrace:\n");
+        for (int j = 0; j < STACKTRACE_SIZE; j++) {
+            if (dealloc->allocation_stacktrace[j] == NULL) {
+                break;
+            }
+            kprintf("  [%d] %p\n", j, dealloc->allocation_stacktrace[j]);
+        }
+        kprintf(" Deallocation stacktrace:\n");
+        for (int j = 0; j < STACKTRACE_SIZE; j++) {
+            if (dealloc->deallocation_stacktrace[j] == NULL) {
+                break;
+            }
+            kprintf("  [%d] %p\n", j, dealloc->deallocation_stacktrace[j]);
+        }
+    }
+}
+
+//Search specific deallocation and dump it
+void dump_deallocation(void * adddr) {
+    kprintf("Deallocation dump for address %p:\n", adddr);
+    for (uint64_t i = 0; i < deallocation_count; i++) {
+        struct deallocation * dealloc = &deallocations[i];
+        if (dealloc->address == (uint64_t)adddr) {
+            kprintf("Deallocated address: %p\n", (void *)dealloc->address);
+            kprintf(" Allocation stacktrace:\n");
+            for (int j = 0; j < STACKTRACE_SIZE; j++) {
+                if (dealloc->allocation_stacktrace[j] == NULL) {
+                    break;
+                }
+            }
+            kprintf(" Deallocation stacktrace:\n");
+            for (int j = 0; j < STACKTRACE_SIZE; j++) {
+                if (dealloc->deallocation_stacktrace[j] == NULL) {
+                    break;
+                }
+            }
+        }
+    }
 }
 
 void allocmatch() {
     kprintf("Allocation matches !!!\n");
 }
 
-#define TARGET_ALLOC 0xffffb0000017e000
-
-//Test if the allocation contains TARGET_ALLOC
-void detect_area(vmm_root_t * root) {
-    struct allocation * current = allocations_head;
-
-    while (current != NULL) {
-        if (current->virtual_address <= (void *)TARGET_ALLOC &&
-            (uint64_t)current->virtual_address + current->size > TARGET_ALLOC &&
-            (current->root == root || root == NULL)) { //Null means any root
-            allocmatch();
-            return;
+//Detect double free attempts and panic
+void detect_double_lok(void * ptr) {
+    struct deallocation * current = deallocations;
+    for (uint64_t i = 0; i < DEALLOCATION_BUFFER_SIZE; i++) {
+        if (current->address == (uint64_t)ptr) {
+            dump_deallocations();
+            panic("Double free detected for pointer %p\n", ptr);
         }
-        current = current->next;
+        current++;
     }
 }
 
@@ -79,8 +188,7 @@ void remove_allocation(vmm_root_t * root, void * ptr) {
 
     while (current != NULL) {
         if (current->virtual_address == ptr && (current->root == root || root == NULL)) { //Null means any root
-            // Found the allocation to remove
-            detect_area(root);
+
             if (current->prev != NULL) {
                 current->prev->next = current->next;
             } else {
@@ -91,12 +199,15 @@ void remove_allocation(vmm_root_t * root, void * ptr) {
                 current->next->prev = current->prev;
             }
 
+            // Found the allocation to remove
+            add_deallocation(ptr, current->allocation_stacktrace);
+            
             // Note: We do not free the allocation structure itself for simplicity
             return;
         }
         current = current->next;
     }
-
+    
     panic("remove_allocation: Allocation not found for pointer %p\n", ptr);
 }
 
@@ -113,6 +224,7 @@ uint8_t should_deallocate_pmm(vmm_root_t * root, void * physical_address) {
 }
 
 void * kmalloc(uint64_t size) {
+    
     void * phys_addr = pmm_alloc_pages((size + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE);
     if (phys_addr == NULL) {
         panic("kmalloc: Failed to allocate physical memory");
@@ -120,7 +232,7 @@ void * kmalloc(uint64_t size) {
     void * virt_addr = (void*)((uint64_t)VMM_REGION_K_IDENT + (uint64_t)phys_addr); //Map to identity region
     memset(virt_addr, 0, (size + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE * PMM_PAGE_SIZE);
     add_allocation(vmm_get_root(), phys_addr, NULL, 0x0, virt_addr, size, 0x3); //RW permisions
-    
+    kprintf("kmalloc: Allocated %d bytes at virtual address %p (physical %p)\n", size, virt_addr, phys_addr);
     return virt_addr;
 }
 
@@ -150,6 +262,7 @@ stack_t * kstackalloc(vmm_root_t * root, uint64_t size) {
 }
 
 void kfree(void * virtual_address) {
+    kprintf("kfree: Freeing pointer %p\n", virtual_address);
     //Find the allocation
     struct allocation * current = allocations_head;
 
@@ -163,6 +276,9 @@ void kfree(void * virtual_address) {
         }
         current = current->next;
     }
+
+    detect_double_lok(virtual_address);
+    dump_deallocations();
     panic("kfree: Allocation not found for pointer %p\n", virtual_address);
 }
 

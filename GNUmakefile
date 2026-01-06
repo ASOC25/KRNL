@@ -25,6 +25,7 @@ override CFLAGS +=       \
     -Wextra              \
     -Werror              \
     -fno-stack-protector \
+    -Wno-frame-address   \
     -march=x86-64        \
     -mabi=sysv           \
     -mno-80387           \

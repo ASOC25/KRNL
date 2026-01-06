@@ -11,4 +11,5 @@ end
 hbreak boot_startup
 hbreak exception
 hbreak main
+hbreak allocmatch
 c

@@ -118,6 +118,7 @@ process_t * process_create(process_t * parent, const char * filename, const char
     }
 
     process_t * new_process = kmalloc(sizeof(process_t));
+    kprintf("process_create: Creating process for %s\n", filename);
     if (!new_process) {
         panic("Failed to allocate memory for new process");
         return NULL;
@@ -199,6 +200,7 @@ status_t process_init_thread_context(context_t * ctx, vmm_root_t* root, void * p
     ctx->cpu_ctx.ss = GDT_USER_DATA * sizeof(gdt_entry_t) | 0x3;
 
     ctx->cpu_ctx.ctx_info = (context_info_t*)kmalloc(sizeof(context_info_t));
+    kprintf("context_init: Created context_info_t at %p\n", ctx->cpu_ctx.ctx_info);
     if (!ctx->cpu_ctx.ctx_info) {
         panic("context_init: Failed to allocate context_info_t");
         return FAILURE;
@@ -232,19 +234,23 @@ void simd_save_context(void* ctx) {
 void simd_restore_context(void* ctx) {
     __asm__ volatile("fxrstor (%0) "::"r"(ctx));
 }
-void context_save(context_t* ctx, cpu_context_t* cpu_ctx){
 
+//Save cpu_ctx in ctx
+void context_save(context_t* ctx, cpu_context_t* cpu_ctx){
+    context_info_t * old_info = ctx->cpu_ctx.ctx_info;
+    memcpy(old_info, cpu_ctx->ctx_info, sizeof(context_info_t));
     simd_save_context(ctx->simd_ctx);
     memcpy(&ctx->cpu_ctx, cpu_ctx, sizeof(cpu_context_t));
-
+    ctx->cpu_ctx.ctx_info = old_info;
 }
 
 void context_restore(context_t* ctx, cpu_context_t* cpu_ctx){
-
+    context_info_t * old_info = cpu_ctx->ctx_info;
+    memcpy(old_info, ctx->cpu_ctx.ctx_info, sizeof(context_info_t));
     simd_restore_context(ctx->simd_ctx);
     set_cpu_fs_base(ctx->fs_base);
     memcpy(cpu_ctx, &ctx->cpu_ctx, sizeof(cpu_context_t));
-
+    cpu_ctx->ctx_info = old_info;
 }
 
 thread_t * duplicate_thread(process_t * parent, thread_t * og) {
@@ -253,6 +259,7 @@ thread_t * duplicate_thread(process_t * parent, thread_t * og) {
     }
 
     thread_t * new_thread = kmalloc(sizeof(thread_t));
+    kprintf("duplicate_thread: Duplicating thread %p for process %d into new thread at %p\n", og, parent->pid, new_thread);
     if (!new_thread) {
         panic("duplicate_thread: Failed to allocate memory for new thread");
         return NULL;
@@ -275,6 +282,7 @@ thread_t * duplicate_thread(process_t * parent, thread_t * og) {
     }
 
     context_info_t * new_ctx_info = kmalloc(sizeof(context_info_t));
+    kprintf("duplicate_thread: Created new context_info_t at %p\n", new_ctx_info);
     if (!new_ctx_info) {
         panic("duplicate_thread: Failed to allocate memory for context_info_t");
         kfree(new_thread);
@@ -288,6 +296,7 @@ thread_t * duplicate_thread(process_t * parent, thread_t * og) {
     new_ctx_info->ss = og->context->cpu_ctx.ctx_info->ss;
 
     cpu_context_t * new_cpu_ctx = kmalloc(sizeof(cpu_context_t));
+    kprintf("duplicate_thread: Created new cpu_context_t at %p\n", new_cpu_ctx);
     if (!new_cpu_ctx) {
         panic("duplicate_thread: Failed to allocate memory for cpu_context_t");
         kfree(new_ctx_info);
@@ -323,6 +332,7 @@ thread_t * duplicate_thread(process_t * parent, thread_t * og) {
     new_cpu_ctx->ss = og->context->cpu_ctx.ss;
 
     context_t * new_ctx = kmalloc(sizeof(context_t));
+    kprintf("duplicate_thread: Created new context_t at %p\n", new_ctx);
     if (!new_ctx) {
         panic("duplicate_thread: Failed to allocate memory for context_t");
         kfree(new_cpu_ctx);
@@ -334,6 +344,7 @@ thread_t * duplicate_thread(process_t * parent, thread_t * og) {
     new_ctx->cpu_ctx = *new_cpu_ctx;
     new_ctx->fs_base = og->context->fs_base;
     new_ctx->simd_ctx = simd_create_context();
+    kprintf("duplicate_thread: Created new SIMD for process %d thread %p at %p\n", parent->pid, og, new_ctx->simd_ctx);
     if (!new_ctx->simd_ctx) {
         panic("duplicate_thread: Failed to allocate memory for SIMD context");
         kfree(new_ctx);
@@ -345,6 +356,7 @@ thread_t * duplicate_thread(process_t * parent, thread_t * og) {
     memcpy(new_ctx->simd_ctx, og->context->simd_ctx, 512);
 
     new_thread->kcontext = kmalloc(sizeof(context_t));
+    kprintf("duplicate_thread: Created new KERNEL context_t for process %d thread %p at %p\n", parent->pid, og, new_thread->kcontext);
     if (!new_thread->kcontext) {
         panic("duplicate_thread: Failed to allocate memory for kernel context_t");
         simd_free_context(new_ctx->simd_ctx);
@@ -356,7 +368,8 @@ thread_t * duplicate_thread(process_t * parent, thread_t * og) {
     }
     memset(new_thread->kcontext, 0, sizeof(context_t));
     new_thread->kcontext_pending = 0;
-    new_thread->kcontext->simd_ctx = kmalloc(512);
+    new_thread->kcontext->simd_ctx = simd_create_context();
+    kprintf("duplicate_thread: Created new KERNEL SIMD for process %d thread %p at %p\n", parent->pid, og, new_thread->kcontext->simd_ctx);
     if (!new_thread->kcontext->simd_ctx) {
         panic("duplicate_thread: Failed to allocate memory for kernel SIMD context");
         kfree(new_thread->kcontext);
@@ -368,7 +381,21 @@ thread_t * duplicate_thread(process_t * parent, thread_t * og) {
         return NULL;
     }
     memset(new_thread->kcontext->simd_ctx, 0, 512);
-    
+    new_thread->kcontext->cpu_ctx.ctx_info = (context_info_t*)kmalloc(sizeof(context_info_t));
+    kprintf("duplicate_thread: Created new KERNEL context_info_t for process %d thread %p at %p\n", parent->pid, og, new_thread->kcontext->cpu_ctx.ctx_info);
+    if (!new_thread->kcontext->cpu_ctx.ctx_info) {
+        panic("duplicate_thread: Failed to allocate memory for kernel context_info_t");
+        simd_free_context(new_thread->kcontext->simd_ctx);
+        kfree(new_thread->kcontext);
+        simd_free_context(new_ctx->simd_ctx);
+        kfree(new_ctx);
+        kfree(new_cpu_ctx);
+        kfree(new_ctx_info);
+        kfree(new_thread);
+        return NULL;
+    }
+    memset(new_thread->kcontext->cpu_ctx.ctx_info, 0, sizeof(context_info_t));
+
     new_thread->context = new_ctx;
     new_thread->entry = og->entry;
     new_thread->state = og->state;
@@ -385,6 +412,7 @@ process_t * process_fork(process_t * parent, thread_t * forking_thread) {
     kprintf("Process %d is forking thread %p\n", parent->pid, forking_thread);
 
     process_t * child = kmalloc(sizeof(process_t));
+    kprintf("process_fork: Allocated child process at %p\n", child);
     if (!child) {
         panic("process_fork: Failed to allocate memory for child process");
 
@@ -495,12 +523,14 @@ thread_t * process_create_thread(process_t * process, void * entry_point) {
     memset(new_thread, 0, sizeof(thread_t));
 
     new_thread->context = kmalloc(sizeof(context_t));
+    kprintf("process_create_thread: Created context for process %d thread at %p\n", process->pid, new_thread->context);
     if (!new_thread->context) {
         panic("process_create_thread: Failed to allocate CPU context");
         return NULL;
     }
     memset(new_thread->context, 0, sizeof(context_t));
     new_thread->kcontext = kmalloc(sizeof(context_t));
+    kprintf("process_create_thread: Created KERNEL context for process %d thread at %p\n", process->pid, new_thread->kcontext);
     new_thread->kcontext_pending = 0;
     if (!new_thread->kcontext) {
         panic("process_create_thread: Failed to allocate kernel CPU context");
@@ -509,13 +539,22 @@ thread_t * process_create_thread(process_t * process, void * entry_point) {
     memset(new_thread->kcontext, 0, sizeof(context_t));
 
     new_thread->context->simd_ctx = simd_create_context();
+    kprintf("process_create_thread: Created SIMD context for process %d thread at %p\n", process->pid, new_thread->context->simd_ctx);
     if (!new_thread->context->simd_ctx) {
         panic("process_create_thread: Failed to allocate SIMD context");
         return NULL;
     }
     memset(new_thread->context->simd_ctx, 0, 512);
 
+    new_thread->kcontext->cpu_ctx.ctx_info = (context_info_t*)kmalloc(sizeof(context_info_t));
+    kprintf("process_create_thread: Created KERNEL context_info_t for process %d thread at %p\n", process->pid, new_thread->kcontext->cpu_ctx.ctx_info);
+    if (!new_thread->kcontext->cpu_ctx.ctx_info) {
+        panic("process_create_thread: Failed to allocate kernel context_info_t");
+        return NULL;
+    }
+    memset(new_thread->kcontext->cpu_ctx.ctx_info, 0, sizeof(context_info_t));
     new_thread->kcontext->simd_ctx = simd_create_context();
+    kprintf("process_create_thread: Created KERNEL SIMD context for process %d thread at %p\n", process->pid, new_thread->kcontext->simd_ctx);
     if (!new_thread->kcontext->simd_ctx) {
         panic("process_create_thread: Failed to allocate kernel SIMD context");
         return NULL;
@@ -685,23 +724,58 @@ status_t process_destroy_thread(process_t * process, thread_t * thread) {
         panic("process_destroy_thread: thread is NULL");
         return FAILURE;
     }
+
+    if (thread->context && thread->kcontext) {
+        if (thread->context->simd_ctx == thread->kcontext->simd_ctx) {
+            panic("process_destroy_thread: thread context and kcontext SIMD contexts are the same");
+        }
+    }
     
     if (thread->context) {
-        simd_free_context(thread->context->simd_ctx);
-        kfree(thread->context->cpu_ctx.ctx_info);
+        if (thread->event_queue) {
+            event_queue_t * current = thread->event_queue;
+            while (current != NULL) {
+                event_queue_t * next = current->next;
+                kprintf("process_destroy_thread: Freeing event %d from thread %p\n", current->event, thread);
+                kfree(current);
+                current = next;
+            }
+            thread->event_queue = NULL;
+        }
+
+        if (thread->context->simd_ctx) {
+            kprintf("process_destroy_thread: Freeing SIMD context %p from thread %p\n", thread->context->simd_ctx, thread);
+            simd_free_context(thread->context->simd_ctx);
+        }
+        if (thread->context->cpu_ctx.ctx_info) {
+            kprintf("process_destroy_thread: Freeing context_info_t %p from thread %p\n", thread->context->cpu_ctx.ctx_info, thread);
+            kfree(thread->context->cpu_ctx.ctx_info);
+        }
+
+        kprintf("process_destroy_thread: Freeing context %p from thread %p\n", thread->context, thread);
         kfree(thread->context);
     }
 
     if (thread->kcontext) {
-        simd_free_context(thread->kcontext->simd_ctx);
-        kfree(thread->kcontext->cpu_ctx.ctx_info);
+        if (thread->kcontext->simd_ctx) {
+            kprintf("process_destroy_thread: Freeing KERNEL SIMD context %p from thread %p\n", thread->kcontext->simd_ctx, thread);
+            simd_free_context(thread->kcontext->simd_ctx);
+        }
+        if (thread->kcontext->cpu_ctx.ctx_info) {
+            kprintf("process_destroy_thread: Freeing KERNEL context_info_t %p from thread %p\n", thread->kcontext->cpu_ctx.ctx_info, thread);
+            kfree(thread->kcontext->cpu_ctx.ctx_info);
+        }
+
+        kprintf("process_destroy_thread: Freeing KERNEL context %p from thread %p\n", thread->kcontext, thread);
         kfree(thread->kcontext);
     }
 
     if (thread->ustack) {
+        kprintf("process_destroy_thread: Freeing user stack %p from thread %p\n", thread->ustack, thread);
         stackfree(process->vmm, thread->ustack);
     }
     if (thread->kstack) {
+        kprintf("process_destroy_thread: Freeing kernel stack %p from thread %p\n", thread->kstack, thread);
         kstackfree(thread->kstack);
     }
 
@@ -715,9 +789,11 @@ status_t process_destroy(process_t * process) {
     }
 
     for (int i = 0; i < process->thread_count; i++) {
+        kprintf("process_destroy: Destroying thread %d of process %d\n", i, process->pid);
         process_destroy_thread(process, &process->threads[i]);
     }
 
+    kprintf("process_destroy: Removing all VM areas for process %d\n", process->pid);
     vmarea_remove_all(process);
     vmm_free_root(process->vmm);
     kfree(process);
