@@ -39,7 +39,7 @@ typedef struct thread_t {
     void * entry;
     void * process;
     stack_t * kstack;
-    farlands_stack_t * ustack;
+    stack_t * ustack;
     uint64_t stack_size;
     uint8_t state;
     long prio;

@@ -2,6 +2,7 @@
 #include <krnl/boot/bootloaders/bootloader.h>
 #include <krnl/drivers/serial/serial.h>
 #include <krnl/drivers/ramdisk/ramdisk.h>
+#include <krnl/drivers/ps2/ps2.h>
 #include <krnl/drivers/framebuffer/framebuffer.h>
 #include <krnl/devices/devices.h>
 #include <krnl/libraries/std/string.h>
@@ -39,6 +40,7 @@ void boot_startup() {
     //Init the CPU subsystem
     cpu_init();
     //Initialize the disk drivers
+    ps2_init_pnp();
 
     //Register other devices (fifo, serial, tty, ps2, pci)
 
@@ -51,7 +53,6 @@ void boot_startup() {
     //Probe filesystems on disks
 
     //Start the core subsystem (manages processes, scheduling, uspace, etc)
-
     x1fs_init();
     tty_init();
     vfs_mount_t * root_mount = vfs_new_mount(4, 0, "/");

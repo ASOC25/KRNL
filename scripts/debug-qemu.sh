@@ -36,7 +36,7 @@ fi
 
 "$QEMU" \
   -machine "$MACHINE" \
-  -d cpu_reset \
+  -d int \
   -no-reboot \
   -no-shutdown \
   -cpu qemu64 \

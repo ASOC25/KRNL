@@ -132,9 +132,9 @@ void __attribute__ ((noinline)) fork_stress() {
             sys_exit(0);
         }
     }
-    if (pid2 != 101) {
+    if (pid2 != 102) {
         while (1) {
-            printf("Parent process PID mismatch in stress test. Expected 101, got %d\n", pid2);
+            printf("Parent process PID mismatch in stress test. Expected 102, got %d\n", pid2);
         }
     }
     int status;
@@ -145,6 +145,59 @@ void __attribute__ ((noinline)) fork_stress() {
         printf("Fork stress test child process %d exited successfully.\n", pid);
     }
     printf("Fork stress test completed.\n");
+}
+
+void __attribute__ ((noinline)) fork_execve_exit_test() {
+    // This test should fork a process, execve the shell prorgam which in turn will sleep for 5 seconds and exit with code 55
+    // We don't want to waitpid here, just verify that fork and execve work correctly
+    int pid = sys_fork();
+    if (pid < 0) {
+        printf("Fork failed in fork_execve_exit_test.\n");
+        return;
+    } else if (pid == 0) {
+        // Child process
+        const char* new_argv[] = { "shell.elf", NULL };
+        const char* new_envp[] = { "SHELL_ENV=MINISHELL", NULL };
+        sys_execve("/shell.elf", (char **)new_argv, (char **)new_envp);
+        // If execve returns, it failed
+        printf("execve failed in fork_execve_exit_test.\n");
+        sys_exit(1);
+    }
+    // Parent process
+    printf("Fork execve exit test: child process %d created.\n", pid);
+}
+
+void init() {
+    const char* new_argv[] = { "shell.elf", NULL };
+    const char* new_envp[] = { "SHELL_ENV=MINISHELL", NULL };
+    printf("Init process execveing shell.elf...\n");
+    sys_execve("/shell.elf", (char **)new_argv, (char **)new_envp);
+    printf("Init process execve failed!\n");
+    sys_exit(1);
+    //printf("Starting fork stress test (press Ctrl+C to stop)...\n");
+    //fork_stress();
+    //printf("Starting waitpid test...\n");
+    //waitpid_test();
+    //printf("Entering scheduling loop.\n");
+//
+    //printf("Starting fork_execve_exit_test 100 times...\n");
+    //for (int i = 0; i < 100; i++)
+    //    fork_execve_exit_test();
+//
+    ////Now waitpid for all children
+    //printf("Waiting for all child processes to exit...\n");
+    //while (1) {
+    //    int status;
+    //    int ret = sys_waitpid(-1, &status, 0);
+    //    if (ret < 0) {
+    //        printf("No more child processes to wait for. Exiting wait loop.\n");
+    //        break;
+    //    } else {
+    //        printf("Reaped child process %d with status %lx\n", ret, status);
+    //    }
+    //}
+//
+    //printf("All tests completed. Exiting main process.\n");
 }
 
 int main(int argc, char* argv[], char* envp[]) {
@@ -177,20 +230,13 @@ int main(int argc, char* argv[], char* envp[]) {
         printf("Failed to create idle process. Exiting.\n");
         sys_exit(1);
     } else if (idle_pid == 0) {
-        //Idle process
-        while (1) {
-        }
+        init();
+        printf("Main process exiting.\n");
+        sys_exit(0);
     }
     printf("Idle process created with PID %d\n", idle_pid);
-    //printf("Starting fork stress test (press Ctrl+C to stop)...\n");
-    //fork_stress();
-    //printf("Starting waitpid test...\n");
-    //waitpid_test();
-    //printf("Entering scheduling loop.\n");
 
-    const char* new_argv[] = { "shell.elf", NULL };
-    const char* new_envp[] = { "SHELL_ENV=MINISHELL", NULL };
-
-    sys_execve("/shell.elf", (char **)new_argv, (char **)new_envp);
-    return 0;
+    //Idle process
+    while (1) {}
+    return 0; //Never reached
 }

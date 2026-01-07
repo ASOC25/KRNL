@@ -27,7 +27,6 @@
 #define VMM_REGION_K_IDENT                  0xFFFFB00000000000
 #define VMM_REGION_K_DEVICES                0xFFFFC00000000000
 #define VDSO_BASE_ADDRESS                   0xFFFFD00000000000
-#define VMM_REGION_FARLANDS                 0xFFFFE00000000000
 
 typedef struct vmm_root_t {
     uint64_t entries[512];

@@ -56,4 +56,5 @@ void scheduler_handler(cpu_context_t* ctx, uint8_t cpu_id, uint8_t is_kernel_ctx
 status_t scheduler_add(thread_t * thread);
 status_t scheduler_remove(thread_t * thread);
 int scheduler_waitpid(thread_t * caller, int pid, int * status, int options);
+void dump_scheduler_status();
 #endif

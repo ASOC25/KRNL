@@ -19,9 +19,6 @@ struct allocation {
     vmm_root_t * root;
     void * physical_address;
     void * virtual_address;
-    vmm_root_t * access_root; //For farlands allocations
-    void * access_address; //For farlands allocations
-    //uint64_t page_size; //All pages allocated here are 0x1000 bytes
     uint64_t size;
     uint8_t permisions;
 
@@ -62,7 +59,7 @@ void remove_deallocation_if_realloc(void * ptr) {
     }
 }
 
-void add_allocation(vmm_root_t* root, void * physical_address, vmm_root_t * access_root, void * access_address, void * virtual_address, uint64_t size, uint8_t permisions) {
+void add_allocation(vmm_root_t* root, void * physical_address, void * virtual_address, uint64_t size, uint8_t permisions) {
     if (current_alloc_buffer.buffer_base_address == NULL || current_alloc_buffer.buffer_free_allocations == 0) {
         //Initialize the allocation buffer
         current_alloc_buffer.buffer_base_address = (void*)vmm_to_identity_map((uint64_t)pmm_alloc_pages(1)); //Allocate 1 page for the allocation buffer
@@ -72,8 +69,6 @@ void add_allocation(vmm_root_t* root, void * physical_address, vmm_root_t * acce
     struct allocation * new_allocation = (struct allocation *)current_alloc_buffer.buffer_base_address + ( (PMM_PAGE_SIZE / sizeof(struct allocation)) - current_alloc_buffer.buffer_free_allocations);
     new_allocation->root = root;
     new_allocation->physical_address = physical_address;
-    new_allocation->access_root = access_root;
-    new_allocation->access_address = access_address;
     new_allocation->virtual_address = virtual_address;
     new_allocation->size = size;
     new_allocation->permisions = permisions;
@@ -203,8 +198,10 @@ void remove_allocation(vmm_root_t * root, void * ptr) {
 uint8_t should_deallocate_pmm(vmm_root_t * root, void * physical_address) {
     struct allocation * current = allocations_head;
     while (current != NULL) {
+        //kprintf("Checking allocation at paddr %p (root %p) against: %p/r:%p\n", current->physical_address, current->root, physical_address, root);
         //Check if another process has the same address mapped
         if (current->physical_address == physical_address && current->root != root) {
+            //kprintf("It's a match !\n");
             return 0; //Another process is using this physical address
         }
         current = current->next;
@@ -220,7 +217,8 @@ void * kmalloc(uint64_t size) {
     }
     void * virt_addr = (void*)((uint64_t)VMM_REGION_K_IDENT + (uint64_t)phys_addr); //Map to identity region
     memset(virt_addr, 0, (size + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE * PMM_PAGE_SIZE);
-    add_allocation(vmm_get_root(), phys_addr, NULL, 0x0, virt_addr, size, 0x3); //RW permisions
+
+    add_allocation(vmm_get_root(), phys_addr, virt_addr, size, 0x3); //RW permisions
     //kprintf("kmalloc: Allocated %d bytes at virtual address %p (physical %p)\n", size, virt_addr, phys_addr);
     return virt_addr;
 }
@@ -242,7 +240,7 @@ stack_t * kstackalloc(vmm_root_t * root, uint64_t size) {
 
     uint64_t base_address = (uint64_t)virt_addr & ~0xFFF; //Align to page size
     memset((void *)virt_addr, 0, (size + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE * PMM_PAGE_SIZE);
-    add_allocation(root, phys_addr, NULL, 0x0, (void*)base_address, size, 0x3); //RW permisions
+    add_allocation(root, phys_addr, (void*)base_address, size, 0x3); //RW permisions
     stack_t *stk = kmalloc(sizeof(stack_t));
     stk->top = (void *)(top_address);
     stk->base = (void *)(base_address);
@@ -289,7 +287,7 @@ void kstackfree(stack_t * stk) {
     panic("kstackfree: Allocation not found for pointer %p\n", stk->base);
 }
 
-status_t malloc(vmm_root_t * root, uint64_t size, uint64_t vaddr, uint8_t flags, farlands_t * farlands) {
+void * malloc(vmm_root_t * root, uint64_t size, uint64_t vaddr, uint8_t flags) {
     void * phys_addr = pmm_alloc_pages((size + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE);
     if (phys_addr == NULL) {
         panic("kmalloc: Failed to allocate physical memory");
@@ -307,18 +305,17 @@ status_t malloc(vmm_root_t * root, uint64_t size, uint64_t vaddr, uint8_t flags,
     if (st != SUCCESS) {
         panic("kmalloc_user_at: Failed to map user pages");
     }
+    
+    void * identity = (void *)vmm_to_identity_map((uint64_t)phys_addr);
+    kprintf("malloc: vaddr: %llx paddr: %llx size: %llx\n", vaddr, (uint64_t)phys_addr, size);
 
-    farlands->address = (void *)(vaddr);
-    farlands->handle = (void *)(phys_addr + VMM_REGION_FARLANDS);
-    farlands->size = size;
-    farlands->flags = flags;
-    memset(farlands->handle, 0, (size + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE * PMM_PAGE_SIZE);
+    memset(identity, 0, (size + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE * PMM_PAGE_SIZE);
 
-    add_allocation(root, phys_addr, vmm_get_root(), farlands->handle, farlands->address, size, flags);
-    return SUCCESS;
+    add_allocation(root, phys_addr,(void*)vaddr, size, flags);
+    return (void*)vaddr;
 }
 
-status_t stackalloc(vmm_root_t * root, uint64_t size, uint64_t vaddr, uint8_t flags, farlands_stack_t * farstack) {
+stack_t * stackalloc(vmm_root_t * root, uint64_t size, uint64_t vaddr, uint8_t flags) {
     
     uint64_t pages = (size + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE;
     void * phys_addr = pmm_alloc_pages(pages);
@@ -335,43 +332,45 @@ status_t stackalloc(vmm_root_t * root, uint64_t size, uint64_t vaddr, uint8_t fl
         flags
     );
 
+    stack_t * stk = kmalloc(sizeof(stack_t));
+    if (!stk) {
+        panic("stackalloc: Failed to allocate stack structure");
+    }
+    stk->base = (void *)vaddr;
+    uint64_t top_address = vaddr + size;
+    if (top_address % 0x10) {
+        top_address -= top_address % 0x10;
+    }
+    top_address -= 0x8;
+
     if (st != SUCCESS) {
         panic("stackalloc: Failed to map user pages");
     }
 
-    farstack->base = (void *)(vaddr);
-    farstack->top = (void *)(vaddr + size);
-    farstack->handle_base = (void *)(phys_addr + VMM_REGION_FARLANDS);
-    farstack->handle_top = (void *)((uint64_t)farstack->handle_base + size);
-    farstack->flags = flags;
-    memset(farstack->handle_base, 0, pages * PMM_PAGE_SIZE);
-
-    //Make sure top and handle top are aligned to 16 bytes
-    uint64_t aligned_top = (uint64_t)farstack->top;
-    if (aligned_top % 0x10) {
-        aligned_top -= aligned_top % 0x10;
-    }
-    aligned_top -= 0x8;
-    farstack->top = (void *)aligned_top;
-
-    uint64_t aligned_handle_top = (uint64_t)farstack->handle_top;
-    if (aligned_handle_top % 0x10) {
-        aligned_handle_top -= aligned_handle_top % 0x10;
-    }
-    aligned_handle_top -= 0x8;
-    farstack->handle_top = (void *)aligned_handle_top;
-
-    add_allocation(root, phys_addr, vmm_get_root(), farstack->handle_base, farstack->base, size, flags);
-    return SUCCESS;
+    void * identity = (void *)vmm_to_identity_map((uint64_t)phys_addr);
+    memset(identity, 0, pages * PMM_PAGE_SIZE);
+    stk->top = (void *)top_address;
+    stk->flags = flags;
+    add_allocation(root, phys_addr, (void*)vaddr, size, flags);
+    return stk;
 }
 
 void free(vmm_root_t * cr3, void * virtual_address) {
+    kprintf("Called free on vaddr %p in root %p\n", virtual_address, cr3);
     //Find the allocation
     struct allocation * current = allocations_head;
     while (current != NULL) {
         if (current->virtual_address == virtual_address && current->root == cr3) {
+            //Unmap the pages from VMM
+            vmm_unmap_pages(
+                cr3,
+                (uint64_t)virtual_address,
+                (current->size + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE,
+                PMM_PAGE_SIZE
+            );
             //Free the physical pages
             if (should_deallocate_pmm(cr3, current->physical_address)) {
+                kprintf("Releasing physical pages at %p\n", current->physical_address);
                 pmm_free_pages(current->physical_address, (current->size + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE);
             }
 
@@ -384,22 +383,29 @@ void free(vmm_root_t * cr3, void * virtual_address) {
     panic("free: Allocation not found for pointer %p\n", virtual_address);
 }
 
-void stackfree(vmm_root_t * cr3, farlands_stack_t * farstack) {
+void stackfree(vmm_root_t * cr3, stack_t * stack) {
     //Find the allocation
     struct allocation * current = allocations_head;
     while (current != NULL) {
-        if (current->virtual_address == farstack->base && current->root == cr3) {
+        if (current->virtual_address == stack->base && current->root == cr3) {
+            //Unmap the stack pages from VMM
+            vmm_unmap_pages(
+                cr3,
+                (uint64_t)stack->base,
+                (current->size + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE,
+                PMM_PAGE_SIZE
+            );
             //Free the physical pages
             if (should_deallocate_pmm(cr3, current->physical_address)) {
                 pmm_free_pages(current->physical_address, (current->size + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE); 
             }
             //remove the allocation from the list
-            remove_allocation(cr3, farstack->base);
+            remove_allocation(cr3, stack->base);
             return;
         }
         current = current->next;
     }
-    panic("stackfree: Allocation not found for pointer %p\n", farstack->base);
+    panic("stackfree: Allocation not found for pointer %p\n", stack->base);
 }
 
 stack_t * copy_kstack(vmm_root_t * dest_root, stack_t * source) {
@@ -434,11 +440,11 @@ stack_t * copy_kstack(vmm_root_t * dest_root, stack_t * source) {
     }
 
     //add allocation
-    add_allocation(dest_root, phys_addr, NULL, 0x0, source->base, stack_size, source->flags);
+    add_allocation(dest_root, phys_addr, (void*)source->base, stack_size, source->flags);
     return source;
 }
 
-farlands_stack_t * copy_stack(vmm_root_t * dest_root, farlands_stack_t * source) {
+stack_t * copy_stack(vmm_root_t * dest_root, stack_t * source) {
     uint64_t stack_size = ((uint64_t)source->top - (uint64_t)source->base);
     uint64_t pages = (stack_size + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE;
     void * phys_addr = pmm_alloc_pages(pages);
@@ -470,6 +476,20 @@ farlands_stack_t * copy_stack(vmm_root_t * dest_root, farlands_stack_t * source)
     }
 
     //add allocation
-    add_allocation(dest_root, phys_addr, vmm_get_root(), source->handle_base, source->base, stack_size, source->flags);
+    add_allocation(dest_root, phys_addr, (void*)source->base, stack_size, source->flags);
     return source;
+}
+
+void * to_kident(vmm_root_t * cr3, void * vaddr) {
+    //Get physical address of vaddr in cr3
+    uint64_t physical;
+    status_t st = vmm_get_physical_address(
+        cr3,
+        (uint64_t)vaddr,
+        &physical
+    );
+    if (st != SUCCESS) {
+        panic("to_kident: Failed to get physical address");
+    }
+    return (void *)vmm_to_identity_map(physical);
 }

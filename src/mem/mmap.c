@@ -90,6 +90,23 @@ status_t vmarea_fork(process_t * destination, process_t * source) {
         } else {
            //Shared mapping, nothing special to do 
         }
+
+        //Add a new allocation for the destination process
+        uint64_t physical;
+        status_t st = vmm_get_physical_address((vmm_root_t *)source->vmm, (uint64_t)current->start, &physical);
+        if (st != SUCCESS) {
+            panic("vmarea_fork: Failed to get physical address for allocation");
+        }
+        uint8_t flags = VMM_USER_BIT;
+        if (current->prot & PROT_WRITE) flags |= VMM_WRITE_BIT;
+        if (!(current->prot & PROT_EXEC)) flags |= VMM_NX_BIT;
+        add_allocation(
+            (vmm_root_t *)destination->vmm,
+            (void *)physical,
+            current->start,
+            current->size,
+            flags
+        );
         current = current->next;
     }
 
@@ -121,23 +138,20 @@ status_t vmarea_try_cow(process_t * process, void * address) {
         panic("vmarea_try_cow: Failed to unmap original pages");
     }
 
-    farlands_t new_farlands;
-    st = malloc(
+    void * ptr = malloc(
         (vmm_root_t *)process->vmm,
         vma->size,
         (uint64_t)vma->start,
-        VMM_USER_BIT | ((vma->prot & PROT_WRITE) ? VMM_WRITE_BIT : 0) | ((!(vma->prot & PROT_EXEC)) ? VMM_NX_BIT : 0),
-        &new_farlands
+        VMM_USER_BIT | ((vma->prot & PROT_WRITE) ? VMM_WRITE_BIT : 0) | ((!(vma->prot & PROT_EXEC)) ? VMM_NX_BIT : 0)
     );
 
-    if (st != SUCCESS) {
+    if (ptr == NULL) {
         panic("vmarea_try_cow: Failed to allocate new page for copy-on-write");
     }
-
-    //Copy the data
-    memcpy((void*)vma->start ,(void*)vmm_to_identity_map(original_physical), vma->size);
-    vma->cow = 0;
-
+    
+    //Copy the data from the original physical page to the new page
+    memcpy(ptr, (void *)vmm_to_identity_map(original_physical), vma->size);
+    vma->cow = 0; //No longer copy-on-write
     return SUCCESS;
 }
 
@@ -236,6 +250,7 @@ void vmarea_remove_all(process_t * process) {
     vm_area_t * current = process->vm_areas;
     while (current) {
         vm_area_t * next = current->next;
+        kprintf("vmarea_remove_all: Removing VMA at %p of size %llu for process %d\n", current->start, current->size, process->pid);
         free(process->vmm, current->start); //Free the mapped memory
         kfree(current);
         current = next;
@@ -267,16 +282,19 @@ status_t vmarea_mprotect(process_t * process, void * address, uint64_t size, uin
     return FAILURE;
 }
 
-void * vmarea_mmap(process_t * process, void * addr, uint64_t length, uint8_t prot, uint8_t flags, int fd, uint64_t offset) {
+void * vmarea_mmap(process_t * process, void * addr, uint64_t length, uint8_t prot, uint8_t flags, int fd, uint64_t offset, uint8_t force) {
     if (process == NULL) {
         panic("vmarea_mmap: process is NULL");
     }
 
-
+    void* old_addr = addr;
     if (addr == 0) {
         addr = vmarea_find_space(process, addr, length, VMM_PAGE_SIZE_4KB);
         if (addr == MAP_FAILED) {
             return MAP_FAILED;
+        }
+        if (force && addr != old_addr) {
+            panic("vmarea_mmap: Could not find space at the forced address %p", old_addr);
         }
     } else {
         //Check for collisions
@@ -295,19 +313,22 @@ void * vmarea_mmap(process_t * process, void * addr, uint64_t length, uint8_t pr
         }
     }
 
-    farlands_t farlands;
-    status_t st = malloc(
+    void * ptr = malloc(
         (vmm_root_t *)process->vmm,
         length,
         (uint64_t)addr,
-        VMM_USER_BIT | ((prot & PROT_WRITE) ? VMM_WRITE_BIT : 0) | ((!(prot & PROT_EXEC)) ? VMM_NX_BIT : 0),
-        &farlands
+        VMM_USER_BIT | ((prot & PROT_WRITE) ? VMM_WRITE_BIT : 0) | ((!(prot & PROT_EXEC)) ? VMM_NX_BIT : 0)
     );
-    if (st != SUCCESS) {
-        panic("vmarea_mmap: Failed to allocate farlands memory");
+    if (ptr == NULL) {
+        panic("vmarea_mmap: Failed to allocate memory memory");
     }
 
-    vmarea_create(process, addr, length, VMM_PAGE_SIZE_4KB, flags, prot, fd, offset);
+    void * identity = to_kident((vmm_root_t *)process->vmm, ptr);
+    if (identity == NULL) {
+        panic("vmarea_mmap: Failed to get identity mapped address");
+    }
+
+    vmarea_create(process, ptr, length, VMM_PAGE_SIZE_4KB, flags, prot, fd, offset);
 
     //If mapping a file, read the file contents
     if (fd != -1 && !(flags & MAP_ANONYMOUS)) {
@@ -317,14 +338,14 @@ void * vmarea_mmap(process_t * process, void * addr, uint64_t length, uint8_t pr
         }
         size_t saved_position = file_desc->position;
         file_desc->position = offset;
-        ssize_t read_bytes = vfs_read(file_desc, (uint8_t *)farlands.handle, length);
+        ssize_t read_bytes = vfs_read(file_desc, (uint8_t *)identity, length);
         if (read_bytes < 0) {
             panic("vmarea_mmap: Failed to read file for mmap");
         }
         file_desc->position = saved_position;
     }
-
-    return addr;
+    kprintf("vmarea_mmap: Mapped %llu bytes at %p for process %d\n", length, ptr, process->pid);
+    return ptr;
 }
 
 status_t vmarea_munmap(process_t * process, void * address) {

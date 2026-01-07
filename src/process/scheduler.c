@@ -314,6 +314,21 @@ void match() {
     kprintf("Scheduler match function called\n");
 }
 
+void dump_scheduler_status() {
+    kprintf("Scheduler Queue Dump:\n");
+    scheduler_queue_t * current = sched_queue;
+    while (current != NULL) {
+        process_t * process = GET_PROC(current->thread);
+        kprintf("Thread TID: %d, Process PID: %d, State: %d, Prio: %d\n",
+            current->thread->tid,
+            process->pid,
+            current->thread->state,
+            current->thread->prio
+        );
+        current = current->next;
+    }
+}
+
 void scheduler_handler(cpu_context_t* ctx, uint8_t cpu_id, uint8_t is_kernel_ctx) {
     if (ctx == NULL) {
         panic("scheduler_handler: ctx is NULL");
@@ -344,7 +359,7 @@ void scheduler_handler(cpu_context_t* ctx, uint8_t cpu_id, uint8_t is_kernel_ctx
         panic("scheduler_handler: No next process found");
     }
 
-    if (next_process->pid == 101) match();
+    //if (next_process->pid == 101) match();
 
     if (next_thread->state != SCHEDULER_STATUS_RUNABLE) {
         panic("scheduler_handler: Next thread is not runable");

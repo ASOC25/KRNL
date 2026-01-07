@@ -30,7 +30,7 @@
 #define MAP_SYNC      0x80000
 #define MAP_FIXED_NOREPLACE 0x100000
 
-void * vmarea_mmap(process_t * process, void * addr, uint64_t length, uint8_t prot, uint8_t flags, int fd, uint64_t offset);
+void * vmarea_mmap(process_t * process, void * addr, uint64_t length, uint8_t prot, uint8_t flags, int fd, uint64_t offset, uint8_t force);
 status_t vmarea_mprotect(process_t * process, void * address, uint64_t size, uint8_t new_prot);
 status_t vmarea_munmap(process_t * process, void * address);
 status_t vmarea_fork(process_t * destination, process_t * source);

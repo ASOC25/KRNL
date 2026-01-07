@@ -109,3 +109,6 @@ int sys_nanosleep(struct timespec * duration, struct timespec * rem) {
 int sys_setgid(gid_t gid) {
     return (int)syscall(20, (uint64_t)gid, 0, 0, 0, 0, 0);
 }
+int sys_debug() {
+    return (int)syscall(47, 0, 0, 0, 0, 0, 0);
+}

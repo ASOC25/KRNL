@@ -34,11 +34,6 @@ void mem_init(void) {
         panic("init_vmm: Failed to map kernel stack memory");
     }
 
-    st = vmm_map_pages(new_root, VMM_REGION_FARLANDS, 0, physical_pages, VMM_PAGE_SIZE_1GB, VMM_WRITE_BIT);
-    if (st != SUCCESS) {
-        panic("init_vmm: Failed to map farlands memory");
-    }
-
     vmm_remap(VMM_REGION_K_IDENT);
     pmm_remap(VMM_REGION_K_IDENT); //Kind of ugly dependency to avoid vm knowing pmm
     vmm_set_root((vmm_root_t*)vmm_to_identity_map((uint64_t)new_root));

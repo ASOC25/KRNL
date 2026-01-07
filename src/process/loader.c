@@ -267,6 +267,7 @@ status_t parse_elf_file(uint8_t * buffer) {
 }
 
 status_t allocate_segment(process_t* process, uint8_t * elf_datab, Elf64_Phdr * program_header, void* base) {
+    kprintf("Starting ALLOCATE SEGMENT\n");
     if (program_header->p_type != PT_LOAD) panic("allocate_segment: Not a loadable segment");
 
     uint64_t vaddr_offset = program_header->p_vaddr & 0xfff;
@@ -278,35 +279,30 @@ status_t allocate_segment(process_t* process, uint8_t * elf_datab, Elf64_Phdr * 
     uint64_t total_size = vaddr_offset + program_header->p_memsz;
     uint64_t total_pages = (total_size + 0x1000 - 1) / 0x1000;
 
-    uint8_t perms = VMM_USER_BIT;
-    if (program_header->p_flags & PF_W) perms |= VMM_WRITE_BIT;
-    if (!(program_header->p_flags & PF_X)) perms |= VMM_NX_BIT;
+    uint8_t perms = PROT_READ;
+    if (program_header->p_flags & PF_W) perms |= PROT_WRITE;
+    if ((program_header->p_flags & PF_X)) perms |= PROT_EXEC;
 
-    farlands_t farlands;
-    status_t st = malloc(
-        process->vmm,
-        total_pages * 0x1000,
-        vaddr,
-        perms,
-        &farlands
-    );
-    
-    if (st != SUCCESS) {
+    void * ptr = vmarea_mmap(process, (void*)vaddr, total_pages * 0x1000, perms, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0, 1);   
+    if (ptr == NULL || ptr != (void *)vaddr) {
         panic("allocate_segment: Failed to allocate memory for segment");
         return FAILURE;
     }
 
-    vmarea_addforeign(process, (void *)vaddr, total_pages * 0x1000, 
-        ((program_header->p_flags & PF_R) ? PROT_READ : 0) |
-        ((program_header->p_flags & PF_W) ? PROT_WRITE : 0) |
-        ((program_header->p_flags & PF_X) ? PROT_EXEC : 0),
-        MAP_PRIVATE | MAP_ANONYMOUS
-    );
+    kprintf("allocate_segment: Mapped segment at vaddr: %p, size: %llu bytes (%llu pages), perms: 0x%x\n", (void *)vaddr, total_pages * 0x1000, total_pages, perms);
 
+    void * identity = to_kident((vmm_root_t *)process->vmm, ptr);
+    if (identity == NULL) {
+        panic("allocate_segment: Failed to get identity mapped address");
+        return FAILURE;
+    }
+    kprintf("Identity mapped address: %p\n", identity);
     //Zero the buffer
-    memset((uint8_t *)farlands.handle, 0, total_pages * 0x1000);
+    memset((uint8_t *)identity, 0, total_pages * 0x1000);
     //Copy file data
-    memcpy((uint8_t *)farlands.handle + vaddr_offset, elf_datab + program_header->p_offset, program_header->p_filesz);
+    memcpy((uint8_t *)identity + vaddr_offset, elf_datab + program_header->p_offset, program_header->p_filesz);
+    kprintf("Copied %llu bytes to segment at offset %llu\n", program_header->p_filesz, vaddr_offset);
+    kprintf("Finished ALLOCATE SEGMENT\n");
     return SUCCESS;
 }
 

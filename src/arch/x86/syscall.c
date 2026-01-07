@@ -214,7 +214,8 @@ int64_t syscall_mmap(thread_t * thread, cpu_context_t * context) {
         prot,
         flags,
         fd,
-        offset
+        offset,
+        0
     );
     if (mapped_addr == MAP_FAILED) {
         return -EIO;
@@ -647,6 +648,13 @@ int64_t syscall_statx(thread_t * thread, cpu_context_t * context) {
     return -ENOSYS;
 }
 
+int64_t syscall_debug(thread_t * thread, cpu_context_t * context) {
+    kprintf("syscall_debug invoked by thread %lu\n", thread->tid);
+    (void)context;
+    dump_scheduler_status();
+    return 0;
+}
+
 static syscall_handler_t handlers[SYS_COUNT] = { 
     syscall_read, //0
     syscall_write,
@@ -694,7 +702,8 @@ static syscall_handler_t handlers[SYS_COUNT] = {
     syscall_unlinkat,
     syscall_renameat,
     syscall_pselect, //45
-    syscall_statx, 
+    syscall_statx,
+    syscall_debug //47
 };
 
 void syscall_handler(cpu_context_t * context) {

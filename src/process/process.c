@@ -491,6 +491,7 @@ process_t * process_fork(process_t * parent, thread_t * forking_thread) {
 
             return NULL;
         }
+        kprintf("process_fork: Duplicated VMM for child process at %p (parent was: %p | pid: %d\n", child->vmm, parent->vmm, parent->pid);
     }
 
     status_t st = vmarea_fork(child, parent);
@@ -712,27 +713,30 @@ thread_t * process_create_thread(process_t * process, void * entry_point) {
         return NULL;
     }
 
-    new_thread->ustack = kmalloc(sizeof(farlands_stack_t));
+    new_thread->ustack = kmalloc(sizeof(stack_t));
     if (!new_thread->ustack) {
         panic("process_create_thread: Failed to allocate user stack structure");
         return NULL;
     }
-    memset(new_thread->ustack, 0, sizeof(farlands_stack_t));
-    status_t st = stackalloc(process->vmm, new_thread->stack_size, VMM_REGION_U_STACK - new_thread->stack_size, VMM_WRITE_BIT | VMM_USER_BIT, new_thread->ustack);
-    if (st != SUCCESS) {
+    memset(new_thread->ustack, 0, sizeof(stack_t));
+    new_thread->ustack = stackalloc(process->vmm, new_thread->stack_size, VMM_REGION_U_STACK - new_thread->stack_size, VMM_WRITE_BIT | VMM_USER_BIT);
+    if (new_thread->ustack == NULL) {
         panic("process_create_thread: Failed to allocate user stack");
         return NULL;
     }
 
-    uint64_t old_top = (uint64_t)new_thread->ustack->handle_top;
-    new_thread->ustack->handle_top = loader_create_args(new_thread->ustack->handle_top, new_thread->stack_size, process->argv, process->envp, process->auxv);
-    new_thread->ustack->top -= (old_top - (uint64_t)new_thread->ustack->handle_top);
+    void * identity_base = to_kident(process->vmm, (void*)new_thread->ustack->base);
+    void * identity_top = identity_base + new_thread->stack_size;
+    void * altered_identity_top = loader_create_args(identity_top, new_thread->stack_size, process->argv, process->envp, process->auxv);
+    uint64_t stack_offset = (uint64_t)identity_top - (uint64_t)altered_identity_top;
+
+    new_thread->ustack->top -= stack_offset;
 
     if (process->thread_count == 0) {
         process->main_thread = new_thread;
     }
 
-    parse_stack(new_thread->ustack->handle_top);
+    parse_stack(altered_identity_top);
     process->thread_count++;
     process->threads[new_thread_slot] = new_thread;
 

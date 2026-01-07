@@ -84,3 +84,4 @@ int sys_waitpid(int pid, int * status, int options);
 int sys_getpid();
 int sys_nanosleep(struct timespec * duration, struct timespec * rem);
 int sys_setgid(gid_t gid);
+int sys_debug();
