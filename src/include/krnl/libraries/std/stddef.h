@@ -31,6 +31,13 @@ typedef signed long long status_t;
 #define OUT_OF_MEMORY -5
 #define NOT_IMPLEMENTED -6
 
+#define ARCH_SET_GS 0x1001
+#define ARCH_SET_FS 0x1002
+#define ARCH_GET_FS 0x1003
+#define ARCH_GET_GS 0x1004
+#define ARCH_SET_CPUID 0x1005
+#define ARCH_GET_CPUID 0x1006
+
 /*
  * ISO C Standard:  7.17  Common definitions  <stddef.h>
  */

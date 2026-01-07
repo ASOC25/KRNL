@@ -8,6 +8,8 @@
 #include <krnl/mem/allocator.h>
 #include <krnl/libraries/assert/assert.h>
 #include <krnl/process/signals.h>
+#include <krnl/libraries/std/time.h>
+#include <krnl/libraries/std/string.h>
 
 #define SYSCALL_NUMBER(context) ((context)->rax)
 #define SYSCALL_ARG0(context)   ((context)->rdi)
@@ -302,17 +304,54 @@ int64_t syscall_fork(thread_t * thread, cpu_context_t * context) {
     return (int64_t)child_proc->pid;
 }
 
+char ** duplicate_argv(char ** argv) {
+    if (!argv) return NULL;
+    size_t count = 0;
+    while (argv[count]) count++;
+    char ** new_argv = kmalloc((count + 1) * sizeof(char *));
+    for (size_t i = 0; i < count; i++) {
+        size_t len = strlen(argv[i]);
+        new_argv[i] = kmalloc(len + 1);
+        strncpy(new_argv[i], argv[i], len + 1);
+    }
+    new_argv[count] = NULL;
+    return new_argv;
+}
+
+char ** duplicate_envp(char ** envp) {
+    if (!envp) return NULL;
+    size_t count = 0;
+    while (envp[count]) count++;
+    char ** new_envp = kmalloc((count + 1) * sizeof(char *));
+    for (size_t i = 0; i < count; i++) {
+        size_t len = strlen(envp[i]);
+        new_envp[i] = kmalloc(len + 1);
+        strncpy(new_envp[i], envp[i], len + 1);
+    }
+    new_envp[count] = NULL;
+    return new_envp;
+}
+
 int64_t syscall_execve(thread_t * thread, cpu_context_t * context) {
     const char *filename = (const char *)SYSCALL_ARG0(context);
     const char ** argv = (const char **)SYSCALL_ARG1(context);
     const char ** envp = (const char **)SYSCALL_ARG2(context);
-    process_t * proc = (process_t *)thread->process;
-    status_t st = process_execve(proc, filename, argv, envp);
+
+    //Copy filename to kernel space
+    size_t fname_len = strlen(filename);
+    char * kfilename = kmalloc(fname_len + 1);
+    strncpy(kfilename, filename, fname_len + 1);
+
+    //Copy argv to kernel space
+    char ** kargv = duplicate_argv((char **)argv);
+    //Copy envp to kernel space
+    char ** kenvp = duplicate_envp((char **)envp);
+
+    status_t st = process_execve(thread, context, kfilename, kargv, kenvp);
     if (st != SUCCESS) {
         return -EIO;
     }
-    panic("syscall_execve: Returned from process_execve");
-    return 0; // Should not reach here on success
+    return 0; //Return from this should go to new program
 }
 
 int64_t syscall_waitpid(thread_t * thread, cpu_context_t * context) {
@@ -345,6 +384,269 @@ int64_t syscall_getpid(thread_t * thread, cpu_context_t * context) {
     return (int64_t)proc->pid;
 }
 
+int64_t syscall_setgid(thread_t * thread, cpu_context_t * context) {
+    gid_t gid = (gid_t)SYSCALL_ARG0(context);
+    process_t * proc = (process_t *)thread->process;
+    proc->gid = gid;
+    return 0;
+}
+
+int64_t syscall_dup(thread_t * thread, cpu_context_t * context) {
+    //use vfs_file_descriptor_t * process_dup(process_t * process, int old_fd, int new_fd);
+    int old_fd = (int)SYSCALL_ARG0(context);
+    process_t * proc = (process_t *)thread->process;
+    int new_desc = process_dup(proc, old_fd, -1);
+    if (new_desc < 0) {
+        return -EBADF;
+    }
+    return (int64_t)new_desc;
+}
+
+int64_t syscall_dup2(thread_t * thread, cpu_context_t * context) {
+    int old_fd = (int)SYSCALL_ARG0(context);
+    int new_fd = (int)SYSCALL_ARG1(context);
+    process_t * proc = (process_t *)thread->process;
+    int new_desc = process_dup(proc, old_fd, new_fd);
+    if (new_desc < 0) {
+        return -EBADF;
+    }
+    return (int64_t)new_desc;
+}
+
+int64_t syscall_chdir(thread_t * thread, cpu_context_t * context) {
+    const char * path = (const char *)SYSCALL_ARG0(context);
+    process_t * proc = (process_t *)thread->process;
+    memset(proc->cwd.internal_path, 0, VFS_PATH_MAX);
+    int len = strlen(path);
+    if (len >= VFS_PATH_MAX) {
+        return -ENAMETOOLONG;
+    }
+    strncpy(proc->cwd.internal_path, path, len);
+    return 0;
+}
+
+int64_t syscall_getcwd(thread_t * thread, cpu_context_t * context) {
+    char * buf = (char *)SYSCALL_ARG0(context);
+    size_t size = (size_t)SYSCALL_ARG1(context);
+    process_t * proc = (process_t *)thread->process;
+    size_t cwd_len = strlen(proc->cwd.internal_path);
+    if (size == 0 || cwd_len + 1 > size) {
+        return -ERANGE;
+    }
+    strncpy(buf, proc->cwd.internal_path, size);
+    return (int64_t)buf;
+}
+
+int64_t syscall_getppid(thread_t * thread, cpu_context_t * context) {
+    (void)context; // Unused
+    process_t * proc = (process_t *)thread->process;
+    if (proc->parent) {
+        return (int64_t)proc->parent->pid;
+    } else {
+        return -1;
+    }
+}
+
+int64_t syscall_get_tid(thread_t * thread, cpu_context_t * context) {
+    (void)context; // Unused
+    return (int64_t)thread->tid;
+}
+
+int64_t syscall_thread_exit(thread_t * thread, cpu_context_t * context) {
+    (void)context; // Unused
+    process_thread_exit(thread);
+    __asm__ volatile("int $0x40"); // Trigger scheduler to switch process
+    panic("syscall_thread_exit: Returned from process_thread_exit");
+    return 0;
+}
+
+int64_t syscall_futex_wait(thread_t * thread, cpu_context_t * context) {
+    (void)thread;
+    (void)context;
+    kprintf("UNIMPLEMENTED: syscall_futex_wait\n");
+    return -ENOSYS;
+}
+
+int64_t syscall_futex_wake(thread_t * thread, cpu_context_t * context) {
+    (void)thread;
+    (void)context;
+    kprintf("UNIMPLEMENTED: syscall_futex_wake\n");
+    return -ENOSYS;
+}
+
+int64_t syscall_clock_gettime(thread_t * thread, cpu_context_t * context) {
+    (void)thread;
+    uint64_t clk_id = (uint64_t)SYSCALL_ARG0(context);
+    struct timespec *tp = (struct timespec *)SYSCALL_ARG1(context);
+
+    if (clk_id != CLOCK_MONOTONIC) {
+        return -EINVAL;
+    }
+    if (!tp) {
+        return -EFAULT;
+    }
+
+    return (int64_t)timespec_now(tp);
+}
+
+int64_t syscall_clock_getres(thread_t * thread, cpu_context_t * context) {
+    (void)thread;
+    uint64_t clk_id = (uint64_t)SYSCALL_ARG0(context);
+    struct timespec *res = (struct timespec *)SYSCALL_ARG1(context);
+
+    if (clk_id != CLOCK_MONOTONIC) {
+        return -EINVAL;
+    }
+    if (!res) {
+        return -EFAULT;
+    }
+
+    return (int64_t)clock_res(res);
+}
+
+int64_t syscall_clock_settime(thread_t * thread, cpu_context_t * context) {
+    (void)thread;
+    (void)context;
+    kprintf("UNIMPLEMENTED: syscall_clock_settime\n");
+    return -ENOSYS;
+}
+
+int64_t syscall_dir_open(thread_t * thread, cpu_context_t * context) {
+    (void)thread;
+    (void)context;
+    kprintf("UNIMPLEMENTED: syscall_dir_open\n");
+    return -ENOSYS;
+}
+
+int64_t syscall_readdir(thread_t * thread, cpu_context_t * context) {
+    (void)thread;
+    (void)context;
+    kprintf("UNIMPLEMENTED: syscall_readdir\n");
+    return -ENOSYS;
+}
+
+int64_t syscall_gettimeofday(thread_t * thread, cpu_context_t * context) {
+    (void)thread;
+    struct timeval *tv = (struct timeval *)SYSCALL_ARG0(context);
+    struct timezone *tz = (struct timezone *)SYSCALL_ARG1(context);
+
+    if (tz != NULL) {
+        return -EINVAL;
+    }
+    if (!tv) {
+        return -EFAULT;
+    }
+
+    return (int64_t)timeval_now(tv);
+}
+
+int64_t syscall_kill(thread_t * thread, cpu_context_t * context) {
+    (void)thread;
+    (void)context;
+    kprintf("UNIMPLEMENTED: syscall_kill\n");
+    return -ENOSYS;
+}
+
+int64_t syscall_fcntl(thread_t * thread, cpu_context_t * context) {
+    (void)thread;
+    (void)context;
+    kprintf("UNIMPLEMENTED: syscall_fcntl\n");
+    return -ENOSYS;
+}
+
+int64_t syscall_rename(thread_t * thread, cpu_context_t * context) {
+    (void)thread;
+    (void)context;
+    kprintf("UNIMPLEMENTED: syscall_rename\n");
+    return -ENOSYS;
+}
+
+int64_t syscall_mkdir(thread_t * thread, cpu_context_t * context) {
+    (void)thread;
+    (void)context;
+    kprintf("UNIMPLEMENTED: syscall_mkdir\n");
+    return -ENOSYS;
+}
+
+int64_t syscall_creat(thread_t * thread, cpu_context_t * context) {
+    (void)thread;
+    (void)context;
+    kprintf("UNIMPLEMENTED: syscall_creat\n");
+    return -ENOSYS;
+}
+
+extern void set_cpu_fs_base(uint64_t base);
+extern void set_cpu_gs_base(uint64_t base);
+extern void set_cpu_gs_base(uint64_t addr);
+extern uint64_t get_cpu_gs_base(void);
+int64_t syscall_arch_prctl(thread_t * thread, cpu_context_t * context) {
+    (void)thread;
+    uint64_t option = SYSCALL_ARG0(context);
+    
+
+    switch(option) {
+        case ARCH_SET_CPUID:
+            return -ENODEV;
+        case ARCH_GET_CPUID:
+            return -ENODEV;
+        case ARCH_SET_FS:
+            uint64_t new_fs = SYSCALL_ARG1(context);
+            thread->context->fs_base = new_fs;
+            set_cpu_fs_base(new_fs);
+            return 0;
+        case ARCH_GET_FS:
+            int64_t* addr = (int64_t*)SYSCALL_ARG1(context);
+            *addr = thread->context->fs_base;
+            return 0;
+        case ARCH_SET_GS:
+            uint64_t new_gs = SYSCALL_ARG1(context);
+            set_cpu_gs_base(new_gs); //I can't see where this could go wrong...
+            return 0;
+        case ARCH_GET_GS:
+            int64_t* gaddr = (int64_t*)SYSCALL_ARG1(context);
+            uint64_t gs_base = get_cpu_gs_base();
+            *gaddr = gs_base;
+            return 0;
+        default:
+            return -EINVAL;
+    }
+}
+
+int64_t syscall_fchownat(thread_t * thread, cpu_context_t * context) {
+    (void)thread;
+    (void)context;
+    kprintf("UNIMPLEMENTED: syscall_fchownat\n");
+    return -ENOSYS;
+}
+
+int64_t syscall_unlinkat(thread_t * thread, cpu_context_t * context) {
+    (void)thread;
+    (void)context;
+    kprintf("UNIMPLEMENTED: syscall_unlinkat\n");
+    return -ENOSYS;
+}
+
+int64_t syscall_renameat(thread_t * thread, cpu_context_t * context) {
+    (void)thread;
+    (void)context;
+    kprintf("UNIMPLEMENTED: syscall_renameat\n");
+    return -ENOSYS;
+}
+
+int64_t syscall_pselect(thread_t * thread, cpu_context_t * context) {
+    (void)thread;
+    (void)context;
+    kprintf("UNIMPLEMENTED: syscall_pselect\n");
+    return -ENOSYS;
+}
+
+int64_t syscall_statx(thread_t * thread, cpu_context_t * context) {
+    (void)thread;
+    (void)context;
+    kprintf("UNIMPLEMENTED: syscall_statx\n");
+    return -ENOSYS;
+}
+
 static syscall_handler_t handlers[SYS_COUNT] = { 
     syscall_read, //0
     syscall_write,
@@ -365,37 +667,34 @@ static syscall_handler_t handlers[SYS_COUNT] = {
     syscall_execve,
     syscall_waitpid,
     syscall_getpid,
-    syscall_nanosleep
-
-/*
+    syscall_nanosleep,
+    syscall_setgid, //20
     syscall_dup,
     syscall_dup2,
-    syscall_nanosleep,
-    syscall_getpid,
-    syscall_kill,
-    syscall_fcntl,
     syscall_chdir,
-    syscall_rename,
-    syscall_mkdir,
-    syscall_creat,
-    syscall_gettimeofday,
-    syscall_getppid,
-    syscall_arch_prctl,
+    syscall_getcwd,
+    syscall_getppid, //25
     syscall_get_tid,
-    syscall_clock_settime,
-    syscall_clock_gettime,
-    syscall_clock_getres,
-    syscall_fchownat,
-    syscall_unlinkat,
-    syscall_renameat,
-    syscall_pselect,
-    syscall_statx,
     syscall_thread_exit,
     syscall_futex_wait,
     syscall_futex_wake,
-    syscall_dir_open,
-    syscall_readdir
-*/
+    syscall_dir_open, //30
+    syscall_readdir,
+    syscall_clock_settime,
+    syscall_clock_gettime,
+    syscall_clock_getres,
+    syscall_gettimeofday, //35
+    syscall_kill,
+    syscall_fcntl,
+    syscall_rename,
+    syscall_mkdir,
+    syscall_creat, //40
+    syscall_arch_prctl,
+    syscall_fchownat,
+    syscall_unlinkat,
+    syscall_renameat,
+    syscall_pselect, //45
+    syscall_statx, 
 };
 
 void syscall_handler(cpu_context_t * context) {

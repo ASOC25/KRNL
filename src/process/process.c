@@ -52,7 +52,7 @@ int process_allocate_fd_slot(process_t *proc) {
     return slot;
 }
 
-void create_args(process_t * process, const char ** argv, const char ** envp, struct auxv ** out_auxv, uint64_t * out_auxv_size) {
+void create_args(process_t * process, char ** argv, char ** envp, struct auxv ** out_auxv, uint64_t * out_auxv_size) {
     //Allocate and build in new buffers
 
     //Copy argv
@@ -112,7 +112,7 @@ void process_open_stdfiles(process_t * process, const char * tty) {
     }
 }
 
-process_t * process_create(process_t * parent, const char * filename, const char * tty, const char ** argv, const char ** envp) {
+process_t * process_create(process_t * parent, const char * filename, const char * tty, vfs_path_t root, vfs_path_t cwd, const char ** argv, const char ** envp) {
     if (!parent) {
         return NULL;
     }
@@ -141,17 +141,19 @@ process_t * process_create(process_t * parent, const char * filename, const char
         panic("process_init: Failed to load /init.elf");
     }
 
-    create_args(new_process, argv, envp, &elf->auxv, &elf->auxv_size);
-
+    create_args(new_process, (char**)argv, (char**)envp, &elf->auxv, &elf->auxv_size);
+    memset(new_process->threads, 0, MAX_THREADS_PER_PROCESS * sizeof(thread_t *));
     new_process->binary_entry = (void *)elf->ehdr->e_entry;
     new_process->thread_count = 0;
     new_process->current_thread = NULL;
     new_process->nice = 0xA;
     new_process->state = SCHEDULER_STATUS_RUNABLE;
-    new_process->event_queue = NULL;
     new_process->main_thread = NULL;
     new_process->pid = -1; // Will be set by scheduler
-
+    new_process->rootdir.mount = root.mount;
+    memcpy(new_process->rootdir.internal_path, root.internal_path, VFS_PATH_MAX);
+    new_process->cwd.mount = cwd.mount;
+    memcpy(new_process->cwd.internal_path, cwd.internal_path, VFS_PATH_MAX);
 
     if (parent == INIT_PROCESS_PARENT_CODE) {
         new_process->ppid = -1;
@@ -265,10 +267,9 @@ thread_t * duplicate_thread(process_t * parent, thread_t * og) {
         return NULL;
     }
     memset(new_thread, 0, sizeof(thread_t));
-    new_thread->event_queue = NULL;
     new_thread->stack_size = og->stack_size;
     new_thread->kstack = kstackalloc(parent->vmm, KERNEL_STACK_SIZE);
-
+    new_thread->tid = -1; // Will be set by scheduler
     if (!new_thread->kstack) {
         panic("duplicate_thread: Failed to allocate memory for new kstack");
     }
@@ -404,6 +405,62 @@ thread_t * duplicate_thread(process_t * parent, thread_t * og) {
     return new_thread;
 }
 
+status_t process_thread_exit(thread_t * thread) {
+    if (!thread) {
+        return FAILURE;
+    }
+
+    if (!thread->process) {
+        panic("process_thread_exit: thread has no associated process");
+        return FAILURE;
+    }
+
+    process_t * process = (process_t *)thread->process;
+    vmm_root_t * vmm = process->vmm;
+
+    //Free thread resources
+    if (thread->kstack) {
+        kstackfree(thread->kstack);
+    }
+    if (thread->ustack) {
+        stackfree(vmm, thread->ustack);
+    }
+    if (thread->context) {
+        if (thread->context->cpu_ctx.ctx_info) {
+            kfree(thread->context->cpu_ctx.ctx_info);
+        }
+        if (thread->context->simd_ctx) {
+            simd_free_context(thread->context->simd_ctx);
+        }
+        kfree(thread->context);
+    }
+    if (thread->kcontext) {
+        if (thread->kcontext->cpu_ctx.ctx_info) {
+            kfree(thread->kcontext->cpu_ctx.ctx_info);
+        }
+        if (thread->kcontext->simd_ctx) {
+            simd_free_context(thread->kcontext->simd_ctx);
+        }
+        kfree(thread->kcontext);
+    }
+
+    //Remove from scheduler queues and from process
+    status_t st = scheduler_remove(thread);
+    if (st != SUCCESS) {
+        panic("process_thread_exit: Failed to remove thread from scheduler");
+    }
+    for (int i = 0; i < MAX_THREADS_PER_PROCESS; i++) {
+        process_t * process = (process_t *)thread->process;
+        if (process->threads[i] == thread) {
+            process->threads[i] = NULL;
+            process->thread_count--;
+            break;
+        }
+    }
+    kfree(thread);
+    return SUCCESS;
+}
+
 process_t * process_fork(process_t * parent, thread_t * forking_thread) {
     if (!parent || !forking_thread) {
         return NULL;
@@ -446,8 +503,9 @@ process_t * process_fork(process_t * parent, thread_t * forking_thread) {
     }
 
     //duplicate only forking_thread
-    thread_t * child_thread = duplicate_thread(child, forking_thread);
-    if (!child_thread) {
+    memset(child->threads, 0, MAX_THREADS_PER_PROCESS * sizeof(thread_t *));
+    child->threads[0] = duplicate_thread(child, forking_thread);
+    if (!child->threads[0]) {
         panic("process_fork: Failed to duplicate thread for child process");
         vmarea_remove_all(child);
         vmm_free_root(child->vmm);
@@ -456,17 +514,19 @@ process_t * process_fork(process_t * parent, thread_t * forking_thread) {
         return NULL;
     }
 
-    child->threads[0] = *child_thread;
-    child->threads[0].context->cpu_ctx.ctx_info->thread = &child->threads[0]; //UTTERLY STUPID
+    child->threads[0]->context->cpu_ctx.ctx_info->thread = child->threads[0]; //UTTERLY STUPID
     child->thread_count = 1;
-    child->main_thread = &child->threads[0];
-    child->current_thread = &child->threads[0];
+    child->main_thread = child->threads[0];
+    child->current_thread = child->threads[0];
     child->pid = -1; // Will be set by scheduler
     child->ppid = parent->pid;
     child->uid = parent->uid;
     child->gid = parent->gid;
     child->nice = parent->nice;
-    child->event_queue = NULL;
+    child->cwd.mount = parent->cwd.mount;
+    memcpy(child->cwd.internal_path, parent->cwd.internal_path, VFS_PATH_MAX);
+    child->rootdir.mount = parent->rootdir.mount;
+    memcpy(child->rootdir.internal_path, parent->rootdir.internal_path, VFS_PATH_MAX);
     child->binary_entry = parent->binary_entry;
     child->exit_code = 0;
     child->state = SCHEDULER_STATUS_RUNABLE;
@@ -475,8 +535,8 @@ process_t * process_fork(process_t * parent, thread_t * forking_thread) {
     }
     child->open_file_count = parent->open_file_count;
 
-    create_args(child, (const char **)parent->argv, (const char **)parent->envp, &parent->auxv, &parent->auxv_size);
-    child_thread->context->cpu_ctx.rax = 0; // Child process gets 0 return value from fork
+    create_args(child, (char **)parent->argv, (char **)parent->envp, &parent->auxv, &parent->auxv_size);
+    child->threads[0]->context->cpu_ctx.rax = 0; // Child process gets 0 return value from fork
 
     return child;
 }
@@ -512,14 +572,93 @@ void parse_stack(void * stack) {
     kprintf("End of stack parsing\n");
 }
 
+int process_find_thread_slot(process_t* process) {
+    if (!process) {
+        panic("process_find_thread_slot: process is NULL");
+        return -1;
+    }
+
+    for (int i = 0; i < MAX_THREADS_PER_PROCESS; i++) {
+        if (process->threads[i] == NULL) {
+             return i;
+        }
+    }
+
+    panic("process_find_thread_slot: No available thread slots");
+    return -1;
+}
+
+status_t process_destroy_thread(process_t * process, thread_t * thread) {
+    if (!thread) {
+        panic("process_destroy_thread: thread is NULL");
+        return FAILURE;
+    }
+
+    if (thread->context && thread->kcontext) {
+        if (thread->context->simd_ctx == thread->kcontext->simd_ctx) {
+            panic("process_destroy_thread: thread context and kcontext SIMD contexts are the same");
+        }
+    }
+    
+    if (thread->context) {
+
+        if (thread->context->simd_ctx) {
+            kprintf("process_destroy_thread: Freeing SIMD context %p from thread %p\n", thread->context->simd_ctx, thread);
+            simd_free_context(thread->context->simd_ctx);
+        }
+        if (thread->context->cpu_ctx.ctx_info) {
+            kprintf("process_destroy_thread: Freeing context_info_t %p from thread %p\n", thread->context->cpu_ctx.ctx_info, thread);
+            kfree(thread->context->cpu_ctx.ctx_info);
+        }
+
+        kprintf("process_destroy_thread: Freeing context %p from thread %p\n", thread->context, thread);
+        kfree(thread->context);
+    }
+
+    if (thread->kcontext) {
+        if (thread->kcontext->simd_ctx) {
+            kprintf("process_destroy_thread: Freeing KERNEL SIMD context %p from thread %p\n", thread->kcontext->simd_ctx, thread);
+            simd_free_context(thread->kcontext->simd_ctx);
+        }
+        if (thread->kcontext->cpu_ctx.ctx_info) {
+            kprintf("process_destroy_thread: Freeing KERNEL context_info_t %p from thread %p\n", thread->kcontext->cpu_ctx.ctx_info, thread);
+            kfree(thread->kcontext->cpu_ctx.ctx_info);
+        }
+
+        kprintf("process_destroy_thread: Freeing KERNEL context %p from thread %p\n", thread->kcontext, thread);
+        kfree(thread->kcontext);
+    }
+
+    if (thread->ustack) {
+        kprintf("process_destroy_thread: Freeing user stack %p from thread %p\n", thread->ustack, thread);
+        stackfree(process->vmm, thread->ustack);
+    }
+    if (thread->kstack) {
+        kprintf("process_destroy_thread: Freeing kernel stack %p from thread %p\n", thread->kstack, thread);
+        kstackfree(thread->kstack);
+    }
+
+    scheduler_remove(thread);
+    kfree(thread);
+    return SUCCESS;
+}
+
 thread_t * process_create_thread(process_t * process, void * entry_point) {
     if (!process) panic("process_create_thread: process is NULL");
-
-    thread_t * new_thread = &process->threads[process->thread_count];
     if (process->thread_count >= MAX_THREADS_PER_PROCESS) {
         panic("process_create_thread: Maximum thread count reached");
         return NULL;
     }
+
+    int new_thread_slot = process_find_thread_slot(process);
+    if (new_thread_slot < 0) {
+        panic("process_create_thread: No available thread slots");
+        return NULL;
+    }
+
+    thread_t * new_thread = kmalloc(sizeof(thread_t));
+
+    kprintf("process_create_thread: Creating thread for process %d at slot %d\n", process->pid, process->thread_count);
     memset(new_thread, 0, sizeof(thread_t));
 
     new_thread->context = kmalloc(sizeof(context_t));
@@ -566,7 +705,7 @@ thread_t * process_create_thread(process_t * process, void * entry_point) {
     new_thread->state = SCHEDULER_STATUS_RUNABLE;
     new_thread->prio = process->nice;
     new_thread->stack_size = NEW_PROCESS_STACK_SIZE; // 16 KB stack
-    new_thread->event_queue = NULL;
+    new_thread->tid = -1; // Will be set by scheduler
     new_thread->kstack = kstackalloc(process->vmm, KERNEL_STACK_SIZE);
     if (!new_thread->kstack) {
         panic("context_init: Failed to allocate kernel stack for process");
@@ -595,23 +734,32 @@ thread_t * process_create_thread(process_t * process, void * entry_point) {
 
     parse_stack(new_thread->ustack->handle_top);
     process->thread_count++;
+    process->threads[new_thread_slot] = new_thread;
 
     return new_thread;
 }
 
-status_t process_execve(process_t * process, const char * filename, const char ** argv, const char ** envp) {
+status_t process_execve(thread_t * thread, cpu_context_t * ctx, char * filename, char ** argv, char ** envp) {
+    if (!thread) {
+        panic("process_execve: thread is NULL");
+        return FAILURE;
+    }
+    process_t * process = (process_t *)thread->process;
     if (!process) {
-        panic("process_execve: process is NULL");
+        panic("process_execve: thread has no associated process");
         return FAILURE;
     }
 
-    process->vmm = vmm_duplicate_kspace();
-    if (!process->vmm) {
-        panic("process_execve: Failed to duplicate kernel space VMM");
-
-        return FAILURE;
-    }
     vmarea_remove_all(process);
+    
+    //Iterate all threads and remove them
+    for (int i = 0; i < MAX_THREADS_PER_PROCESS; i++) {
+        thread_t * t = process->threads[i];
+        if (t && t != thread) {
+            process_destroy_thread(process, t);
+            process->threads[i] = NULL;
+        }
+    }
 
     loaded_elf_t * elf = elf_load_elf(process, filename);
     if (!elf) {
@@ -620,94 +768,54 @@ status_t process_execve(process_t * process, const char * filename, const char *
         return FAILURE;
     }
 
+    //Empty signal queue
+    for (int i = 0; i < NSIG; i++) {
+        signal_t * sig = process->signal_queue[i];;
+        while (sig) {
+            signal_t * next = sig->next;
+            kfree(sig);
+            sig = next;
+        }
+    }
+
+    sigaction_t empty_sigaction = {0};
+    //Empty signal handlers
+    for (int i = 0; i < NSIG; i++) {
+        process->signal_actions[i] = empty_sigaction;
+    }
+
+    kfree(process->argv);
+    kfree(process->envp);
+    kfree(process->auxv);
     create_args(process, argv, envp, &elf->auxv, &elf->auxv_size);
 
     process->binary_entry = (void *)elf->ehdr->e_entry;
-
-    thread_t * new_thread = process_create_thread(process, process->binary_entry);
-    if (!new_thread) {
-        panic("process_execve: Failed to create main thread");
-
-        return FAILURE;
+    process->main_thread = thread;
+    process->current_thread = thread;
+    process->threads[0] = thread;
+    for (int i = 1; i < MAX_THREADS_PER_PROCESS; i++) {
+        process->threads[i] = NULL;
     }
-
-    process->main_thread = new_thread;
-    process->current_thread = new_thread;
-    process->threads[0] = *new_thread;
     process->thread_count = 1;
 
     status_t st = process_init_thread_context(
-        new_thread->context,
+        thread->context,
         process->vmm,
         process->binary_entry,
-        (void *)new_thread->ustack->top,
+        (void *)thread->ustack->top,
         process->argv,
-        new_thread
+        thread
     );
 
+    kprintf("process_execve: Initialized main thread context at %p\n", thread->context);
     if (st != SUCCESS) {
         panic("process_execve: Failed to initialize main thread context");
 
     }
 
-    return SUCCESS;
-}
-
-status_t process_enqueue_event(thread_t * thread, int event) {
-    //Make sure thread is valid and the event is not already in the queue (no duplicates)
-    if (!thread) {
-        panic("process_enqueue_event: thread is NULL");
-        return FAILURE;
-    }
-
-    event_queue_t * current = thread->event_queue;
-    while (current != NULL) {
-        if (current->event == event) {
-            //Event already in queue
-
-            return SUCCESS;
-        }
-        current = current->next;
-    }
-    event_queue_t * new_event = kmalloc(sizeof(event_queue_t));
-    if (!new_event) {
-        panic("process_enqueue_event: Failed to allocate memory for new event");
-
-        return FAILURE;
-    }
-    new_event->event = event;
-    new_event->next = NULL;
-
-    if (!thread->event_queue) {
-        thread->event_queue = new_event;
-    } else {
-        event_queue_t * current = thread->event_queue;
-        while (current->next != NULL) {
-            current = current->next;
-        }
-        current->next = new_event;
-    }
-
-    return SUCCESS;
-}
-
-status_t process_dequeue_event(thread_t * thread, int * out_event) {
-    //Pop the first event from the thread's event queue
-    if (!thread || !out_event) {
-        panic("process_dequeue_event: thread or out_event is NULL");
-        return FAILURE;
-    }
-
-
-    if (!thread->event_queue) {
-
-        return FAILURE; // No events
-    }
-    event_queue_t * event_node = thread->event_queue;
-    *out_event = event_node->event;
-    thread->event_queue = event_node->next;
-    kfree(event_node);
-
+    context_restore(thread->context, ctx);
+    cpu_set_context_info(thread->context->cpu_ctx.ctx_info);
+    kprintf("process_execve: Restored context for main thread %p\n", thread);
     return SUCCESS;
 }
 
@@ -719,69 +827,6 @@ void process_set_exit_code(process_t * process, int code) {
     process->exit_code = code;
 }
 
-status_t process_destroy_thread(process_t * process, thread_t * thread) {
-    if (!thread) {
-        panic("process_destroy_thread: thread is NULL");
-        return FAILURE;
-    }
-
-    if (thread->context && thread->kcontext) {
-        if (thread->context->simd_ctx == thread->kcontext->simd_ctx) {
-            panic("process_destroy_thread: thread context and kcontext SIMD contexts are the same");
-        }
-    }
-    
-    if (thread->context) {
-        if (thread->event_queue) {
-            event_queue_t * current = thread->event_queue;
-            while (current != NULL) {
-                event_queue_t * next = current->next;
-                kprintf("process_destroy_thread: Freeing event %d from thread %p\n", current->event, thread);
-                kfree(current);
-                current = next;
-            }
-            thread->event_queue = NULL;
-        }
-
-        if (thread->context->simd_ctx) {
-            kprintf("process_destroy_thread: Freeing SIMD context %p from thread %p\n", thread->context->simd_ctx, thread);
-            simd_free_context(thread->context->simd_ctx);
-        }
-        if (thread->context->cpu_ctx.ctx_info) {
-            kprintf("process_destroy_thread: Freeing context_info_t %p from thread %p\n", thread->context->cpu_ctx.ctx_info, thread);
-            kfree(thread->context->cpu_ctx.ctx_info);
-        }
-
-        kprintf("process_destroy_thread: Freeing context %p from thread %p\n", thread->context, thread);
-        kfree(thread->context);
-    }
-
-    if (thread->kcontext) {
-        if (thread->kcontext->simd_ctx) {
-            kprintf("process_destroy_thread: Freeing KERNEL SIMD context %p from thread %p\n", thread->kcontext->simd_ctx, thread);
-            simd_free_context(thread->kcontext->simd_ctx);
-        }
-        if (thread->kcontext->cpu_ctx.ctx_info) {
-            kprintf("process_destroy_thread: Freeing KERNEL context_info_t %p from thread %p\n", thread->kcontext->cpu_ctx.ctx_info, thread);
-            kfree(thread->kcontext->cpu_ctx.ctx_info);
-        }
-
-        kprintf("process_destroy_thread: Freeing KERNEL context %p from thread %p\n", thread->kcontext, thread);
-        kfree(thread->kcontext);
-    }
-
-    if (thread->ustack) {
-        kprintf("process_destroy_thread: Freeing user stack %p from thread %p\n", thread->ustack, thread);
-        stackfree(process->vmm, thread->ustack);
-    }
-    if (thread->kstack) {
-        kprintf("process_destroy_thread: Freeing kernel stack %p from thread %p\n", thread->kstack, thread);
-        kstackfree(thread->kstack);
-    }
-
-    return SUCCESS;
-}
-
 status_t process_destroy(process_t * process) {
     if (!process) {
         panic("process_destroy: process is NULL");
@@ -790,7 +835,8 @@ status_t process_destroy(process_t * process) {
 
     for (int i = 0; i < process->thread_count; i++) {
         kprintf("process_destroy: Destroying thread %d of process %d\n", i, process->pid);
-        process_destroy_thread(process, &process->threads[i]);
+        process_destroy_thread(process, process->threads[i]);
+        process->threads[i] = NULL;
     }
 
     kprintf("process_destroy: Removing all VM areas for process %d\n", process->pid);
@@ -810,16 +856,16 @@ status_t process_exit(process_t * process, int code) {
     process_set_exit_code(process, code);
     //Change all threads to ZOMBIE
     for (int i = 0; i < process->thread_count; i++) {
-        process->threads[i].state = SCHEDULER_STATUS_ZOMBIE;
+        process->threads[i]->state = SCHEDULER_STATUS_ZOMBIE;
     }
     process->state = SCHEDULER_STATUS_ZOMBIE;
     wakeup(SIGNAL_WAITPID);
     return SUCCESS;
 }
 
-void process_init(const char * INIT_PROCESS, const char * INIT_TTY) {
+void process_init(const char * INIT_PROCESS, const char * INIT_TTY, vfs_path_t INIT_CWD, vfs_path_t INIT_ROOT) {
     assert(INIT_PROCESS != NULL);
-    process_t * init_process = process_create(INIT_PROCESS_PARENT_CODE, INIT_PROCESS, INIT_TTY, NULL, NULL);
+    process_t * init_process = process_create(INIT_PROCESS_PARENT_CODE, INIT_PROCESS, INIT_TTY, INIT_CWD, INIT_ROOT, NULL, NULL);
     if (!init_process) {
         panic("process_init: Failed to create init process");
     }
@@ -838,4 +884,40 @@ void process_init(const char * INIT_PROCESS, const char * INIT_TTY) {
         panic("process_init: Failed to add init process to scheduler");
     }
 
+}
+
+int process_dup(process_t * process, int old_fd, int new_fd) {
+    //If new_fd is -1, find the first available slot (like dup)
+    //If new_fd is >= 0, try to use that slot (like dup2)
+    if (!process) {
+        panic("process_dup: process is NULL");
+        return -1;
+    }
+
+    if (old_fd < 0 || old_fd >= MAX_OPEN_FILES) {
+        panic("process_dup: old_fd is out of bounds");
+        return -1;
+    }
+
+    if (new_fd == -1) {
+        //Find first available slot
+        for (int i = 0; i < MAX_OPEN_FILES; i++) {
+            if (!process->open_files[i].valid) {
+                new_fd = i;
+                break;
+            }
+        }
+        if (new_fd == -1) {
+            panic("process_dup: No available file descriptor slots");
+            return -1;
+        }
+    } else {
+        if (new_fd < 0 || new_fd >= MAX_OPEN_FILES) {
+            panic("process_dup: new_fd is out of bounds");
+            return -1;
+        }
+    }
+
+    process->open_files[new_fd] = process->open_files[old_fd];
+    return new_fd;
 }

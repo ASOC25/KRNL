@@ -54,14 +54,19 @@ void boot_startup() {
 
     x1fs_init();
     tty_init();
-    vfs_new_mount(4, 0, "/");
+    vfs_mount_t * root_mount = vfs_new_mount(4, 0, "/");
     vfs_new_mount(3, 0, "/dev/tty0"); //Placeholders!!!!
-
+    vfs_path_t root_path;
+    root_path.mount = root_mount;
+    strcpy(root_path.internal_path, "/");
+    vfs_path_t cwd_path;
+    cwd_path.mount = root_mount;
+    strcpy(cwd_path.internal_path, "/");
     kprintf("ASOC KERNEL BOOTED SUCCESSFULLY!\n");
     kprintf("Using bootloader: %s version: %s\n", get_bootloader_name(), get_bootloader_version());
     //run_all_tests();
 
-    process_init("/init.elf", "/dev/tty0");
+    process_init("/init.elf", "/dev/tty0", cwd_path, root_path);
     __asm__("sti");
     while (1);
 }

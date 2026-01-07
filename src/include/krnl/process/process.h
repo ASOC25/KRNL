@@ -9,6 +9,7 @@
 #include <krnl/libraries/std/elf.h>
 #include <krnl/mem/vmarea.h>
 #include <krnl/mem/allocator.h>
+#include <krnl/process/sigstructs.h>
 
 #define NEW_PROCESS_STACK_SIZE 0x4000 //16KB
 #define MAX_THREADS_PER_PROCESS 16
@@ -22,16 +23,14 @@
 //Type for pid
 typedef int16_t pid_t;
 
+//Type for gid
+typedef int16_t gid_t;
+
 typedef struct {
     cpu_context_t cpu_ctx;
     void * simd_ctx;
     uint64_t fs_base;
 } context_t;
-
-typedef struct event_queue {
-    int event;
-    struct event_queue * next;
-} event_queue_t;
 
 typedef struct thread_t {
     context_t* context;
@@ -41,26 +40,28 @@ typedef struct thread_t {
     void * process;
     stack_t * kstack;
     farlands_stack_t * ustack;
-    event_queue_t * event_queue;
     uint64_t stack_size;
     uint8_t state;
     long prio;
+    pid_t tid;
 } thread_t;
 
 typedef struct process_t {
     vmm_root_t * vmm;
     vm_area_t *vm_areas;
 
-    thread_t threads[MAX_THREADS_PER_PROCESS];
+    thread_t * threads[MAX_THREADS_PER_PROCESS];
+    signal_t * signal_queue[NSIG];
+    sigaction_t signal_actions[NSIG];
     int thread_count;
     thread_t * current_thread;
     thread_t * main_thread;
-    event_queue_t * event_queue;
-
+    vfs_path_t cwd;
+    vfs_path_t rootdir;
     pid_t pid;
     pid_t ppid;
-    int16_t uid;
-    int16_t gid;
+    gid_t uid;
+    gid_t gid;
     int exit_code;
     int state;
     long nice;
@@ -83,12 +84,12 @@ int process_allocate_fd_slot(process_t *proc);
 void context_save(context_t* ctx, cpu_context_t* cpu_ctx);
 void context_restore(context_t* ctx, cpu_context_t* cpu_ctx);
 
-status_t process_execve(process_t * process, const char * filename, const char ** argv, const char ** envp);
+status_t process_execve(thread_t * thread, cpu_context_t * ctx, char * filename, char ** argv, char ** envp);
 process_t * process_fork(process_t * parent, thread_t * forking_thread);
-status_t process_enqueue_event(thread_t * thread, int event);
-status_t process_dequeue_event(thread_t * thread, int * out_event);
 status_t process_exit(process_t * process, int code);
 status_t process_destroy(process_t * process);
+status_t process_thread_exit(thread_t * thread);
+int process_dup(process_t * process, int old_fd, int new_fd);
 
-void process_init();
+void process_init(const char * INIT_PROCESS, const char * INIT_TTY, vfs_path_t INIT_CWD, vfs_path_t INIT_ROOT);
 #endif

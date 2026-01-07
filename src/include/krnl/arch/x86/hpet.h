@@ -12,6 +12,8 @@ void hpet_init();
 
 uint64_t hpet_get_current_time(void);
 
+uint64_t hpet_get_resolution(void);
+
 void hpet_sleep(uint64_t us);
 
 void arm_hpet_interrupt_timer(uint64_t us);

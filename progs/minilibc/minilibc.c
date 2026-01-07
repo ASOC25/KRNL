@@ -105,3 +105,7 @@ int sys_getpid() {
 int sys_nanosleep(struct timespec * duration, struct timespec * rem) {
     return (int)syscall(19, (uint64_t)duration, (uint64_t)rem, 0, 0, 0, 0);
 }
+
+int sys_setgid(gid_t gid) {
+    return (int)syscall(20, (uint64_t)gid, 0, 0, 0, 0, 0);
+}

@@ -60,6 +60,8 @@ typedef struct stack {
 } stack_t;
 
 typedef struct stat stat_t;
+typedef int16_t pid_t;
+typedef int16_t gid_t;
 
 void minilibc_init();
 void sys_read(int fd, char * buffer, int size);
@@ -81,3 +83,4 @@ int sys_execve(const char * filename, char ** argv, char ** envp);
 int sys_waitpid(int pid, int * status, int options);
 int sys_getpid();
 int sys_nanosleep(struct timespec * duration, struct timespec * rem);
+int sys_setgid(gid_t gid);

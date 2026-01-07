@@ -69,6 +69,12 @@ uint64_t micro_to_femo(uint64_t micro){
     return micro * 1000000000;
 }
 
+uint64_t hpet_get_resolution(void){
+    assert(hpet_is_initialized);
+    uint64_t counter_clk_perioid = hpet_read_register(HPET_TIMER_OFFSET_GENERAL_CAPABILITIES_ID) >> HPET_GENERAL_CAPABILITIES_ID_COUNTER_PERIOD;
+    return femo_to_micro(counter_clk_perioid);
+}
+
 uint64_t hpet_get_current_time(void){
     assert(hpet_is_initialized);
     uint64_t current_time = femo_to_micro(hpet_read_register(HPET_TIMER_OFFSET_MAIN_COUNTER_VALUES) * hpet_frequency);

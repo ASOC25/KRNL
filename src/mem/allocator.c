@@ -6,7 +6,7 @@
 #include <krnl/libraries/std/string.h>
 #include <krnl/libraries/assert/assert.h>
 
-#define STACKTRACE_SIZE 6
+#define STACKTRACE_SIZE 3
 #define DEALLOCATION_BUFFER_SIZE 0x1000
 
 struct deallocation {
@@ -43,16 +43,8 @@ struct alloc_buffer current_alloc_buffer = {0};
 
 void fill_stacktrace(void ** st) {
     st[0] = __builtin_return_address(0);
-    if (st[0] == _start) return;
     st[1] = __builtin_return_address(1);
-    if (st[1] == _start) return;
     st[2] = __builtin_return_address(2);
-    if (st[2] == _start) return;
-    st[3] = __builtin_return_address(3);
-    if (st[3] == _start) return;
-    st[4] = __builtin_return_address(4);
-    if (st[4] == _start) return;
-    st[5] = __builtin_return_address(5);
 }
 
 //A reallocation may have been performed, if the deallocation exists for the given pointer, remove it from the deallocation list
@@ -114,9 +106,6 @@ void add_deallocation(void * address, void ** out_stacktrace) {
     dealloc->allocation_stacktrace[0] = out_stacktrace[0];
     dealloc->allocation_stacktrace[1] = out_stacktrace[1];
     dealloc->allocation_stacktrace[2] = out_stacktrace[2];
-    dealloc->allocation_stacktrace[3] = out_stacktrace[3];
-    dealloc->allocation_stacktrace[4] = out_stacktrace[4];
-    dealloc->allocation_stacktrace[5] = out_stacktrace[5];
 }
 
 void dump_deallocations() {
@@ -232,7 +221,7 @@ void * kmalloc(uint64_t size) {
     void * virt_addr = (void*)((uint64_t)VMM_REGION_K_IDENT + (uint64_t)phys_addr); //Map to identity region
     memset(virt_addr, 0, (size + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE * PMM_PAGE_SIZE);
     add_allocation(vmm_get_root(), phys_addr, NULL, 0x0, virt_addr, size, 0x3); //RW permisions
-    kprintf("kmalloc: Allocated %d bytes at virtual address %p (physical %p)\n", size, virt_addr, phys_addr);
+    //kprintf("kmalloc: Allocated %d bytes at virtual address %p (physical %p)\n", size, virt_addr, phys_addr);
     return virt_addr;
 }
 
@@ -262,7 +251,7 @@ stack_t * kstackalloc(vmm_root_t * root, uint64_t size) {
 }
 
 void kfree(void * virtual_address) {
-    kprintf("kfree: Freeing pointer %p\n", virtual_address);
+    //kprintf("kfree: Freeing pointer %p\n", virtual_address);
     //Find the allocation
     struct allocation * current = allocations_head;
 

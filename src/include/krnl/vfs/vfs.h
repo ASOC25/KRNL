@@ -69,6 +69,11 @@ typedef struct vfs_mount {
     struct vfs_mount *next;
 } vfs_mount_t;
 
+typedef struct vfs_path {
+    vfs_mount_t * mount;
+    char internal_path[VFS_PATH_MAX];
+} vfs_path_t;
+
 typedef struct vfs_file_descriptor {
     uint8_t valid;
     vfs_mount_t *mount;
@@ -89,4 +94,5 @@ ssize_t vfs_read(vfs_file_descriptor_t *fd, void *buf, size_t count);
 ssize_t vfs_write(vfs_file_descriptor_t *fd, const void *buf, size_t count);
 status_t vfs_fstat(vfs_file_descriptor_t *fd, vfs_stat_t *buf);
 status_t vfs_ioctl(vfs_file_descriptor_t *fd, uint64_t request, void * arg);
+
 #endif

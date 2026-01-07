@@ -9,6 +9,7 @@
 #include <krnl/process/signals.h>
 #include <krnl/libraries/assert/assert.h>
 #include <krnl/libraries/std/errno.h>
+#include <krnl/libraries/std/wait.h>
 
 typedef struct scheduler_queue {
     thread_t * thread;
@@ -42,6 +43,30 @@ static pid_t scheduler_get_free_pid_locked(void) {
     return candidate_pid;
 }
 
+static pid_t scheduler_get_free_tid_locked(void) {
+    static pid_t last_tid = 0; // Start from 0
+    scheduler_queue_t * current = sched_queue;
+    pid_t candidate_tid = last_tid;
+    int found;
+    do {
+        found = 0;
+        candidate_tid++;
+        if (candidate_tid < 0) {
+            candidate_tid = 0; // Wrap around
+        }
+        current = sched_queue;
+        while (current != NULL) {
+            if (current->thread->tid == candidate_tid) {
+                found = 1;
+                break;
+            }
+            current = current->next;
+        }
+    } while (found);
+    last_tid = candidate_tid;
+    return candidate_tid;
+}
+
 pid_t scheduler_get_free_pid() {
     pid_t pid;
 
@@ -68,8 +93,21 @@ uint8_t comparator_delta(process_t * caller, process_t * iterated, int pid) {
     //return if specific pid has exited
     return (iterated->ppid == caller->pid && iterated->pid == (pid_t)(pid));
 }
-int generate_status(int exit_code, int signal) {
-    return (exit_code & 0xFF) | ((signal & 0x7F) << 8);
+
+static int generate_status(int reason, int value) {
+    if (reason & WREASON_CONT) {
+        return _WCONTINUED;
+    }
+    if (reason & WREASON_STOP) {
+        return W_STOPCODE(value & 0xff);
+    }
+    if (reason & WREASON_SIGNAL) {
+        return W_EXITCODE(0, value & 0x7f);
+    }
+    if (reason & WREASON_EXIT) {
+        return W_EXITCODE(value & 0xff, 0);
+    }
+    return 0;
 }
 
 //Used for waitpid
@@ -104,33 +142,47 @@ int scheduler_waitpid(thread_t * caller, int pid, int * status, int options) {
         while (current != NULL) {
             process_t * iterated_process = GET_PROC(current->thread);
             process_t * caller_process = GET_PROC(caller);
+            
+            //Make sure we don't check the caller process itself
+            if (iterated_process == caller_process) {
+                current = current->next;
+                continue;
+            }
+
             if (comparator(caller_process, iterated_process, pid)) {
                 found_one = 1;
-
+                kprintf("scheduler_waitpid: Found matching process %d for caller %d\n", iterated_process->pid, caller_process->pid);
+                //Check if the process has exited
                 if (options & WNOHANG) {
+                    kprintf("WNOHANG option set\n");
                     if (iterated_process->state == SCHEDULER_STATUS_ZOMBIE) {
+                        kprintf("scheduler_waitpid WNOHANG: Reaping process %d for caller %d\n", iterated_process->pid, caller_process->pid);
                         //Reap process
                         if (status) {
-                            *status = generate_status(iterated_process->exit_code, 0);
+                            *status = generate_status(WREASON_EXIT, iterated_process->exit_code);
                         }
                         process_destroy(iterated_process);
                     }
                     changed_pid = iterated_process->pid;
                 } else if ((options & WUNTRACED) && iterated_process->state == SCHEDULER_STATUS_STOPPED) {
+                    kprintf("scheduler_waitpid: Process %d is stopped for caller %d\n", iterated_process->pid, caller_process->pid);
                     if (status) {
-                        *status = generate_status(0, SIGSTOP);
+                        *status = generate_status(WREASON_STOP, iterated_process->exit_code);
                     }
                     changed_pid = iterated_process->pid;
                 } else if ((options & WCONTINUED) && iterated_process->state == SCHEDULER_STATUS_CONTINUED) {
+                    kprintf("scheduler_waitpid: Process %d is continued for caller %d\n", iterated_process->pid, caller_process->pid);
                     if (status) {
-                        *status = generate_status(0, SIGCONT);
+                        *status = generate_status(WREASON_CONT, 0);
                     }
                     changed_pid = iterated_process->pid;
                 } else {
+                    kprintf("ELSE BRANCH\n");
                     if (iterated_process->state == SCHEDULER_STATUS_ZOMBIE) {
+                        kprintf("scheduler_waitpid: Reaping process %d for caller %d\n", iterated_process->pid, caller_process->pid);
                         //Reap process
                         if (status) {
-                            *status = generate_status(iterated_process->exit_code, 0);
+                            *status = generate_status(WREASON_EXIT, iterated_process->exit_code);
                         }
                         process_destroy(iterated_process);
                         changed_pid = iterated_process->pid;
@@ -138,12 +190,14 @@ int scheduler_waitpid(thread_t * caller, int pid, int * status, int options) {
                 }
             }
             current = current->next;
+            kprintf("scheduler_waitpid: Moving to next process in scheduler queue\n");
         }
         if (!found_one) return -ECHILD;
         //No matching exited process found, sleep the caller thread
         if (!changed_pid) sleep(caller, SIGNAL_WAITPID);
+        kprintf("Moving on to next iteration of waitpid loop\n");
     }
-
+    kprintf("scheduler_waitpid: Returning changed_pid %d\n", changed_pid);
     return changed_pid;
 }
 
@@ -200,6 +254,11 @@ status_t scheduler_add(thread_t * thread) {
         process->pid = scheduler_get_free_pid_locked();
     }
 
+    //Assign a new tid to the thread
+    if (thread->tid == -1) {
+        thread->tid = scheduler_get_free_tid_locked();
+    }
+
     scheduler_queue_t * new_node = kmalloc(sizeof(scheduler_queue_t));
     if (!new_node) {    
         panic("scheduler_add: Failed to allocate memory for scheduler queue node");
@@ -248,102 +307,6 @@ status_t scheduler_remove(thread_t * thread) {
     panic("scheduler_remove: Thread not found in scheduler queue");
     
 
-    return FAILURE;
-}
-
-status_t thread_send_event(thread_t * thread, int event) {
-    if (!thread) {
-        panic("thread_send_event: thread is NULL");
-        return FAILURE;
-    }
-    //Add the event to the thread's event queue
-    //For simplicity, we just set a flag here
-    process_enqueue_event(thread, event);
-    return SUCCESS;
-}
-
-status_t scheduler_send_event(int event, int who) {
-    if (who <= 0) {
-        // 0 and negative numbers: Send to all threads with the state equal to the absolute value of who
-
-        scheduler_queue_t * current = sched_queue;
-        while (current != NULL) {
-            thread_t * thread = current->thread;
-            if (thread->state == -who) {
-                thread_send_event(thread, event);
-                
-            }
-            current = current->next;
-        }
-
-        return SUCCESS;
-    }
-    if (who == 1) {
-
-        // 1: Send to the current thread
-        thread_t * current_thread = scheduler_get_current_thread();
-        if (current_thread) {
-            status_t res = thread_send_event(current_thread, event);
-
-            return res;
-        } else {
-            panic("scheduler_send_event: No current thread");
-
-            return FAILURE;
-        }
-    }
-    if (who == 2) {
-
-        //Send to all threads in the current process
-        thread_t * current_thread = scheduler_get_current_thread();
-        if (current_thread) {
-            process_t * current_process = (process_t*)current_thread->process;
-            if (current_process) {
-                scheduler_queue_t * current = sched_queue;
-                while (current != NULL) {
-                    thread_t * thread = current->thread;
-                    if (thread->process == current_process) {
-                        thread_send_event(thread, event);
-                    }
-                    current = current->next;
-                }
-
-                return SUCCESS;
-            }
-        }
-        panic("scheduler_send_event: No current thread or process");
-
-        return FAILURE;
-    }
-    if (who == 3) {
-        //Send to all threads
-
-        scheduler_queue_t * current = sched_queue;
-        while (current != NULL) {
-            thread_t * thread = current->thread;
-            thread_send_event(thread, event);
-            current = current->next;
-        }
-
-        return SUCCESS;
-    }
-    if (who > 100) {
-        // >100: Send to all threads in the process with the given PID
-        pid_t target_pid = (pid_t)who;
-
-        scheduler_queue_t * current = sched_queue;
-        while (current != NULL) {
-            thread_t * thread = current->thread;
-            process_t * process = (process_t*)thread->process;
-            if (process && process->pid == target_pid) {
-                thread_send_event(thread, event);
-            }
-            current = current->next;
-        }
-
-        return SUCCESS;
-    }
-    panic("scheduler_send_event: Invalid 'who' parameter");
     return FAILURE;
 }
 

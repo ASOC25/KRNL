@@ -325,6 +325,7 @@ void vm_flush_tlb_entry(uint64_t address)
 }
 
 
+//This fun
 uint8_t vm_check_and_clean_dirty(vm_dir * root, uint64_t virtual_address) {
     struct page_map_index indices;
     address_to_map((uint64_t)virtual_address, &indices);

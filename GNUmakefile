@@ -112,7 +112,7 @@ progs:
 
 clean:
 	@sudo $(ABSDIR)/scripts/clean-artifacts.sh --mode normal
-	$(foreach prog,$(PROGS),$(MAKE) -C $(prog) clean)
+	$(foreach prog,$(PROGS),$(MAKE) -C $(prog) clean;)
 
 distclean:
 	@sudo $(ABSDIR)/scripts/clean-artifacts.sh --mode dist

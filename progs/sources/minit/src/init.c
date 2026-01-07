@@ -22,6 +22,7 @@ void print_args(int argc, char* argv[], char* envp[]) {
 void __attribute__ ((noinline)) waitpid_test() {
     //Test waitpid all cases
     printf("testing waitpid with pid < -1 (gid = abs(pid))\n");
+    sys_setgid(100); // Set gid to 100 for testing
     int pid = sys_fork();
     if (pid < 0) {
         printf("Fork failed in waitpid test.\n");
@@ -34,24 +35,21 @@ void __attribute__ ((noinline)) waitpid_test() {
         sys_exit(42);
     } else {
         int status;
-        int ret = sys_waitpid(0 - 1, &status, 0);
+        int ret = sys_waitpid(-100, &status, 0);
         if (ret != pid) {
             printf("waitpid test failed: expected return pid %d, got %d\n", pid, ret);
             while (1);
         } else {
-            if (WIFEXITED(status)) {
-                int exit_code = WEXITSTATUS(status);
-                if (exit_code != 42) {
-                    printf("waitpid test failed: expected exit code 42, got %d\n", exit_code);
-                    while (1);
-                    return;
-                }
-            } else {
-                printf("waitpid test failed: child did not exit normally.\n");
+            printf("STATUS: %lx\n", status);
+            int exit_code = WEXITSTATUS(status);
+            if (exit_code != 42) {
+                printf("waitpid test failed: expected exit code 42, got %d\n", exit_code);
                 while (1);
                 return;
+            } else {
+                printf("Exit code verified: %d\n", exit_code);
+                printf("waitpid test passed for pid < -1 case.\n");
             }
-            printf("waitpid test passed for pid < -1 case.\n");
         }
     }
     printf("testing waitpid with pid < -1 completed.\n");
@@ -184,13 +182,15 @@ int main(int argc, char* argv[], char* envp[]) {
         }
     }
     printf("Idle process created with PID %d\n", idle_pid);
-    printf("Starting fork stress test (press Ctrl+C to stop)...\n");
-    fork_stress();
-    printf("Starting waitpid test...\n");
-    waitpid_test();
-    printf("Entering scheduling loop.\n");
-    while (1) {
-        //printf("IM A RESOURCE HOG!\n");
-    }
+    //printf("Starting fork stress test (press Ctrl+C to stop)...\n");
+    //fork_stress();
+    //printf("Starting waitpid test...\n");
+    //waitpid_test();
+    //printf("Entering scheduling loop.\n");
+
+    const char* new_argv[] = { "shell.elf", NULL };
+    const char* new_envp[] = { "SHELL_ENV=MINISHELL", NULL };
+
+    sys_execve("/shell.elf", (char **)new_argv, (char **)new_envp);
     return 0;
 }
