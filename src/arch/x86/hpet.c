@@ -101,7 +101,6 @@ void arm_hpet_interrupt_timer(uint64_t us) {
     hpet_write_register(HPET_TIMER_OFFSET_GENERAL_CONFIGURATION, 0);
     uint64_t counter_clk_perioid = hpet_read_register(HPET_TIMER_OFFSET_GENERAL_CAPABILITIES_ID) >> HPET_GENERAL_CAPABILITIES_ID_COUNTER_PERIOD;
     uint64_t ticks_per_ms = (micro_to_femo(us) / counter_clk_perioid);
-    kprintf("HPET: Setting timer to interrupt every %llu microseconds (%llu ticks)\n", us, ticks_per_ms);
     hpet_write_register(HPET_TIMER_OFFSET_MAIN_COUNTER_VALUES, 0);
     uint64_t timer0_config = (1 << 15) | (1 << 9) | (1 << 6) | (1 << 3) | (1 << 2); //Set periodic mode, enable interrupts, set interrupt type to level triggered, set to use main counter, enable timer
     hpet_write_register(COMPARATOR_0_REGS + HPET_TIMER_OFFSET_TIMER_CONFIG_CAPABILITY_REGISTER, timer0_config);

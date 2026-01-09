@@ -32,9 +32,18 @@ typedef struct {
     uint64_t fs_base;
 } context_t;
 
+typedef struct sigctx {
+    signal_t * signal;
+    uint8_t in_progress;
+    context_t* context;
+    stack_t* stack;
+    struct sigctx * next;
+} sigctx_t;
+
 typedef struct thread_t {
     context_t* context;
     context_t* kcontext;
+    sigctx_t* scontext;
     uint8_t kcontext_pending;
     void * entry;
     void * process;
@@ -53,6 +62,7 @@ typedef struct process_t {
     thread_t * threads[MAX_THREADS_PER_PROCESS];
     signal_t * signal_queue[NSIG];
     sigaction_t signal_actions[NSIG];
+    void * stramp_address;
     int thread_count;
     thread_t * current_thread;
     thread_t * main_thread;
@@ -88,8 +98,12 @@ status_t process_execve(thread_t * thread, cpu_context_t * ctx, char * filename,
 process_t * process_fork(process_t * parent, thread_t * forking_thread);
 status_t process_exit(process_t * process, int code);
 status_t process_destroy(process_t * process);
+sigctx_t * process_get_scontext(thread_t * thread);
 status_t process_thread_exit(thread_t * thread);
+signal_t * process_get_signal(process_t * process);
+status_t process_create_scontext(thread_t * thread, signal_t * signal);
 int process_dup(process_t * process, int old_fd, int new_fd);
-
+thread_t * process_get_current_thread(void);
 void process_init(const char * INIT_PROCESS, const char * INIT_TTY, vfs_path_t INIT_CWD, vfs_path_t INIT_ROOT);
+status_t process_kill(process_t * process, int code);
 #endif

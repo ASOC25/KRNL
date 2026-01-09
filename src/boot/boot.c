@@ -20,6 +20,7 @@
 #include <krnl/arch/x86/apic.h>
 #include <krnl/process/scheduler.h>
 #include <krnl/arch/x86/hpet.h>
+#include <krnl/arch/x86/apic.h>
 
 extern uint8_t getApicId(void);
 
@@ -31,17 +32,17 @@ void boot_startup() {
     //Init device subsystem
     devices_init();
     //Init the early debugger over dcon or serial
-    serial_init_pnp();
-    ramdisk_init_pnp();
-    framebuffer_init_pnp();
-    //Init memory management subsystem
-    ktrace("This is a fucking test...\n");
     mem_init();
     //Init the CPU subsystem
     cpu_init();
     //Initialize the disk drivers
+    serial_init_pnp();
+    ramdisk_init_pnp();
+    framebuffer_init_pnp();
     ps2_init_pnp();
+    ktrace("This is a fucking test...\n");
 
+    //Enable serial interrupts
     //Register other devices (fifo, serial, tty, ps2, pci)
 
     //Spawn a tty over your preferred device (usually serial for debugging)

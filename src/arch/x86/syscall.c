@@ -285,7 +285,7 @@ int64_t syscall_tell(thread_t * thread, cpu_context_t * context) {
 int64_t syscall_schedule_yield(thread_t * thread, cpu_context_t * context) {
     (void)thread;
     uint8_t cpu_id = getApicId();
-    scheduler_handler(context, cpu_id, CONTEXT_SAVE_USPACE);
+    scheduler_handler(context, cpu_id, SCHEDULER_USER_CONTEXT);
     return context->rax;
 }
 
@@ -375,6 +375,24 @@ int64_t syscall_nanosleep(thread_t * thread, cpu_context_t * context) {
     status_t st = nanosleep(thread, (struct timespec *)duration, rem);
     if (st != SUCCESS) {
         return -EINTR;
+    }
+    return 0;
+}
+
+int64_t syscall_kill(thread_t * thread, cpu_context_t * context) {
+    int pid = (int)SYSCALL_ARG0(context);
+    int sig = (int)SYSCALL_ARG1(context);
+    process_t * proc = (process_t *)thread->process;
+    if (pid == 0) {
+        pid = proc->pid;
+    }
+    process_t * target_proc = scheduler_get_process_by_pid(pid);
+    if (!target_proc) {
+        return -ESRCH;
+    }
+    status_t st = process_kill(target_proc, sig);
+    if (st != SUCCESS) {
+        return -ESRCH;
     }
     return 0;
 }
@@ -541,13 +559,6 @@ int64_t syscall_gettimeofday(thread_t * thread, cpu_context_t * context) {
     return (int64_t)timeval_now(tv);
 }
 
-int64_t syscall_kill(thread_t * thread, cpu_context_t * context) {
-    (void)thread;
-    (void)context;
-    kprintf("UNIMPLEMENTED: syscall_kill\n");
-    return -ENOSYS;
-}
-
 int64_t syscall_fcntl(thread_t * thread, cpu_context_t * context) {
     (void)thread;
     (void)context;
@@ -703,7 +714,8 @@ static syscall_handler_t handlers[SYS_COUNT] = {
     syscall_renameat,
     syscall_pselect, //45
     syscall_statx,
-    syscall_debug //47
+    syscall_debug,
+    syscall_kill
 };
 
 void syscall_handler(cpu_context_t * context) {

@@ -93,6 +93,14 @@ void cpu_init_id(uint64_t cpu_id, uint64_t lapic_id) {
     apic_ioapic_mask(HPET_TIMER_IRQ, 1); //Unmask HPET IRQ
 }
 
+void * cpu_get_current_thread(void) {
+    core_context_t * ctx = (core_context_t *)get_cpu_gs_base();
+    if (ctx && ctx->cinfo) {
+        return ctx->cinfo->thread;
+    }
+    return NULL;
+}
+
 void cpu_init() {
     //Iterate cpus other than the bsp
     uint32_t bsp_lapic_id = get_smp_bsp_lapic_id();

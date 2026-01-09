@@ -266,6 +266,27 @@ status_t parse_elf_file(uint8_t * buffer) {
     return SUCCESS;
 }
 
+status_t allocate_signal_trampoline(process_t* process) {
+    void * addr = vmarea_mmap(process, SIGNAL_TRAMPOLINE_ADDRESS, 0x1000, PROT_READ | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0, 1);
+    if (addr == NULL || addr != SIGNAL_TRAMPOLINE_ADDRESS) {
+        panic("allocate_signal_trampoline: Failed to allocate signal trampoline");
+        return FAILURE;
+    }
+
+    //Copy the signal trampoline code
+    extern uint8_t signal_trampoline_start[];
+    extern uint8_t signal_trampoline_end[];
+    size_t code_size = (size_t)(signal_trampoline_end - signal_trampoline_start);
+    void * identity = to_kident((vmm_root_t *)process->vmm, addr);
+    if (identity == NULL) {
+        panic("allocate_signal_trampoline: Failed to get identity mapped address for signal trampoline");
+        return FAILURE;
+    }
+    memcpy(identity, signal_trampoline_start, code_size);
+    process->stramp_address = (void *)SIGNAL_TRAMPOLINE_ADDRESS;
+    return SUCCESS;
+}
+
 status_t allocate_segment(process_t* process, uint8_t * elf_datab, Elf64_Phdr * program_header, void* base) {
     kprintf("Starting ALLOCATE SEGMENT\n");
     if (program_header->p_type != PT_LOAD) panic("allocate_segment: Not a loadable segment");

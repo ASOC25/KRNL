@@ -21,7 +21,6 @@ typedef struct snode {
 sleeping_thread_t * sleeping_threads_head = NULL; //Sleeping for time
 sleeping_thread_t * waiting_threads_head = NULL; //Sleeping indefinitely
 
-
 void new(int id, thread_t * thread, struct timespec *duration, struct timespec *rem) {
     sleeping_thread_t * new_node = kmalloc(sizeof(sleeping_thread_t));
     if (!new_node) {
@@ -124,11 +123,11 @@ void sleep(thread_t * thread, int condition) {
     new(condition, thread, NULL, NULL);
     thread->state = SCHEDULER_STATUS_INTERRUPTIBLE_SLEEP;
     while (thread->state == SCHEDULER_STATUS_INTERRUPTIBLE_SLEEP) {
-        kprintf("Sleeping thread %d on condition %d\n", GET_PROC(thread)->pid, condition);
+        //kprintf("Sleeping thread %d on condition %d\n", GET_PROC(thread)->pid, condition);
         __asm__ volatile("int $0x81");
-        kprintf("Woke up thread %d from condition %d\n", GET_PROC(thread)->pid, condition);
+        //kprintf("Woke up thread %d from condition %d\n", GET_PROC(thread)->pid, condition);
     }
-    kprintf("Sleep finished for thread %d on condition %d\n", GET_PROC(thread)->pid, condition);
+    //kprintf("Sleep finished for thread %d on condition %d\n", GET_PROC(thread)->pid, condition);
 }
 
 int generate_id(thread_t* thread) {
@@ -155,6 +154,18 @@ status_t nanosleep(thread_t * thread, struct timespec *duration, struct timespec
     }
     kprintf("Nanosleep finished for thread %d\n", GET_PROC(thread)->pid);
     return SUCCESS;
+}
+
+int check_sleep_condition(int condition) {
+    //Check if there is any thread sleeping on the given condition
+    sleeping_thread_t * current = waiting_threads_head;
+    while (current) {
+        if (current->id == condition) {
+            return 1;
+        }
+        current = current->next;
+    }
+    return 0;
 }
 
 void wakeup(int condition) {

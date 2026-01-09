@@ -69,4 +69,5 @@ typedef struct{
 }__attribute__((packed)) cpu_context_t; 
 void cpu_init(void);
 void cpu_set_context_info(context_info_t* info);
+void * cpu_get_current_thread(void);
 #endif

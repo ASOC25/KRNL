@@ -31,5 +31,6 @@ typedef struct {
 
 void idt_init(void);
 void idt_update(idtr_t* idtr);
-
+void register_dynamic_interrupt(uint8_t vector, void* handler);
+void unregister_dynamic_interrupt(uint8_t vector);
 #endif

@@ -7,6 +7,7 @@
 #include <krnl/process/process.h>
 #include <krnl/debug/debug.h>
 
+#define SIGNAL_TRAMPOLINE_ADDRESS ((void*)0x80000000)
 #define DYNAMIC_LINKER_BASE_ADDRESS ((void*)0x40000000)
 
 #define AT_NULL   0	/* end of vector */

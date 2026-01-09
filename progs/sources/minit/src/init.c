@@ -167,6 +167,39 @@ void __attribute__ ((noinline)) fork_execve_exit_test() {
     printf("Fork execve exit test: child process %d created.\n", pid);
 }
 
+void __attribute__ ((noinline)) kill_test() {
+    //Create a new process that sleeps indefinitely
+    //Then send it a SIGKILL and verify it exits
+    int pid = sys_fork();
+    if (pid < 0) {
+        printf("Fork failed in kill_test.\n");
+        return;
+    } else if (pid == 0) {
+        // Child process
+        while (1) {
+            struct timespec duration = { .tv_sec = 1, .tv_nsec = 0 };
+            sys_nanosleep(&duration, NULL); // Sleep for 1 second
+        }
+    } else {
+        // Parent process
+        struct timespec duration = { .tv_sec = 2, .tv_nsec = 0 };
+        sys_nanosleep(&duration, NULL); // Sleep for 2 seconds to ensure child is sleeping
+        printf("Sending SIGKILL to process %d\n", pid);
+        sys_kill(pid, 9); // Send SIGKILL
+        int status;
+        int ret = sys_waitpid(pid, &status, 0);
+        if (ret != pid) {
+            printf("Kill test failed: expected return pid %d, got %d\n", pid, ret);
+        } else {
+            if (WIFSIGNALED(status) && WTERMSIG(status) == 9) {
+                printf("Kill test passed: process %d terminated by SIGKILL.\n", pid);
+            } else {
+                printf("Kill test failed: process %d did not terminate by SIGKILL.\n", pid);
+            }
+        }
+    }
+}
+
 void init() {
     const char* new_argv[] = { "shell.elf", NULL };
     const char* new_envp[] = { "SHELL_ENV=MINISHELL", NULL };
@@ -230,6 +263,8 @@ int main(int argc, char* argv[], char* envp[]) {
         printf("Failed to create idle process. Exiting.\n");
         sys_exit(1);
     } else if (idle_pid == 0) {
+        kill_test();
+        while (1);
         init();
         printf("Main process exiting.\n");
         sys_exit(0);

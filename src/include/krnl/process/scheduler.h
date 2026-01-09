@@ -7,9 +7,6 @@
 
 #define SCHEDULER_TIMESLICE_MS 100
 
-#define CONTEXT_SAVE_USPACE 0
-#define CONTEXT_SAVE_KSPACE 1
-
 #define SCHEDULER_SOURCE_TIMER_INTERRUPT 0
 #define SCHEDULER_SOURCE_YIELD_SYSCALL 1
 #define SCHEDULER_SOURCE_OTHER 2
@@ -20,6 +17,9 @@
 #define SCHEDULER_STATUS_STOPPED 3
 #define SCHEDULER_STATUS_CONTINUED 4
 #define SCHEDULER_STATUS_ZOMBIE 5
+
+#define SCHEDULER_USER_CONTEXT 0
+#define SCHEDULER_KERNEL_CONTEXT 2
 
 #define _WSTATUS(x)                         ((x) & 0177)
 #define _WSTOPPED                           0177
@@ -52,9 +52,10 @@
 #define WAIT_ANY                            (-1)
 #define WAIT_MYGRP                          0
 
-void scheduler_handler(cpu_context_t* ctx, uint8_t cpu_id, uint8_t is_kernel_ctx);
+void scheduler_handler(cpu_context_t* ctx, uint8_t cpu_id, uint8_t source);
 status_t scheduler_add(thread_t * thread);
 status_t scheduler_remove(thread_t * thread);
 int scheduler_waitpid(thread_t * caller, int pid, int * status, int options);
 void dump_scheduler_status();
+process_t * scheduler_get_process_by_pid(pid_t pid);
 #endif

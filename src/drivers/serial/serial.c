@@ -4,7 +4,11 @@
 #include <krnl/libraries/std/stddef.h>
 #include <krnl/debug/debug.h>
 #include <krnl/arch/x86/io.h>
-
+#include <krnl/process/process.h>
+#include <krnl/process/signals.h>
+#include <krnl/arch/x86/apic.h>
+#include <krnl/arch/x86/idt.h>
+#include <krnl/arch/x86/cpu.h>
 struct serial_device {
     device_addr_t port_base;
     //Configuration parameters below:
@@ -36,22 +40,28 @@ status_t test_serial_port(int port) {
 }
 
 int serial_received(int port) {
-   return inb(port + 5) & 1;
+    return inb(port + 5) & 1;
 }
  
 char read_serial(int port) {
-   while (serial_received(port) == 0);
+    thread_t * current_thread = process_get_current_thread();
+    if (!current_thread) {
+        panic("read_serial called without a current thread");
+    }
+    while (serial_received(port) == 0) {
+        sleep(current_thread, SERIAL_WAIT_LINE);
+    }
  
-   return inb(port);
+    return inb(port);
 }
 
 int is_transmit_empty(int port) {
-   return inb(port + 5) & 0x20;
+    return inb(port + 5) & 0x20;
 }
  
 void write_serial(int port, char a) {
-   while (is_transmit_empty(port) == 0);
-   outb(port,a);
+    while (is_transmit_empty(port) == 0);
+    outb(port,a);
 }
 
 
@@ -185,6 +195,12 @@ status_t serial_init(void) {
     return devices_new_driver(SERIAL_DRIVER_MAJOR, serial_driver);
 }
 
+void serial_int_callback(cpu_context_t* ctx, uint8_t cpu_id) {
+    (void)ctx;
+    (void)cpu_id;
+    wakeup(SERIAL_WAIT_LINE);
+}
+
 status_t serial_init_pnp(void) {
 
     status_t res = serial_init();
@@ -203,7 +219,7 @@ status_t serial_init_pnp(void) {
             dev->data_bits = 8;
             dev->stop_bits = 1;
             dev->parity = 'N';
-            dev->interrupt_enable = 0x00; //Disable interrupts by default
+            dev->interrupt_enable = 0x01; //Enable interrupts by default
 
             if (devices_new_device(SERIAL_DRIVER_MAJOR, i) != SUCCESS) {
                 dev->port_base = 0; //Mark as unused
@@ -212,6 +228,9 @@ status_t serial_init_pnp(void) {
             }
         }
     }
-
+    apic_ioapic_mask(0x23, 1); //Enable COM2 IRQ line
+    apic_ioapic_mask(0x24, 1); //Enable COM1 IRQ line
+    register_dynamic_interrupt(0x24, serial_int_callback); //Register COM1 interrupt handler
+    register_dynamic_interrupt(0x23, serial_int_callback); //Register COM2 interrupt handler
     return (valid_ports > 0) ? SUCCESS : NOT_FOUND;
 }

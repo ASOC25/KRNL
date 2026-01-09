@@ -112,3 +112,6 @@ int sys_setgid(gid_t gid) {
 int sys_debug() {
     return (int)syscall(47, 0, 0, 0, 0, 0, 0);
 }
+int sys_kill(int pid, int sig) {
+    return (int)syscall(48, (uint64_t)pid, (uint64_t)sig, 0, 0, 0, 0);
+}

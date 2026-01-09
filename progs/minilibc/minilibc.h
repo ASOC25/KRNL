@@ -85,3 +85,4 @@ int sys_getpid();
 int sys_nanosleep(struct timespec * duration, struct timespec * rem);
 int sys_setgid(gid_t gid);
 int sys_debug();
+int sys_kill(int pid, int sig);

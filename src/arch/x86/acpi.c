@@ -186,11 +186,6 @@ acpi_mcfg_header_t * acpi_get_mcfg() {
     strncpy(oemtableid, mcfg_header->header.oem_table_id, 8);
     strncpy(oemid, mcfg_header->header.oem_id, 6);
 
-    kprintf("MCFG at: 0x%llx Sig: %.4s Len: 0x%llx Rev: %d Check: %d OEM: %s OTI: %s OR: %d CID: %d CREV: %d\n",
-        mcfg_header, signature, mcfg_header->header.length, mcfg_header->header.revision, mcfg_header->header.checksum, oemid, oemtableid,
-        mcfg_header->header.oem_revision, mcfg_header->header.creator_id, mcfg_header->header.creator_revision
-    );
-
     return mcfg_header;
 }
 
@@ -221,11 +216,6 @@ acpi_madt_header_t * acpi_get_madt() {
     strncpy(signature, madt_header->header.signature, 4);
     strncpy(oemtableid, madt_header->header.oem_table_id, 8);
     strncpy(oemid, madt_header->header.oem_id, 6);
-
-    kprintf("MADT at: 0x%llx Sig: %.4s Len: 0x%llx Rev: %d Check: %d OEM: %s OTI: %s OR: %d CID: %d CREV: %d\n",
-        madt_header, signature, madt_header->header.length, madt_header->header.revision, madt_header->header.checksum, oemid, oemtableid,
-        madt_header->header.oem_revision, madt_header->header.creator_id, madt_header->header.creator_revision
-    );
 
     return madt_header;
 }
@@ -289,21 +279,14 @@ acpi_hpet_header_t * acpi_get_hpet() {
     strncpy(oemtableid, hpet_header->header.oem_table_id, 8);
     strncpy(oemid, hpet_header->header.oem_id, 6);
 
-    kprintf("HPET at: 0x%llx Sig: %.4s Len: 0x%llx Rev: %d Check: %d OEM: %s OTI: %s OR: %d CID: %d CREV: %d\n",
-        hpet_header, signature, hpet_header->header.length, hpet_header->header.revision, hpet_header->header.checksum, oemid, oemtableid,
-        hpet_header->header.oem_revision, hpet_header->header.creator_id, hpet_header->header.creator_revision
-    );
-
     return hpet_header;
 }
 
 void acpi_init() {
     acpi_fadt_header_t* fadt_header = acpi_get_fadt();
-    if (is_enabled(fadt_header)) {kprintf("ACPI is enabled\n"); return;}
-    kprintf("ACPI is not enabled, trying to enable...\n");
-    if (inw(fadt_header->pm1a_control_block) & 1) {kprintf("ACPI is enabled\n"); return;}
+    if (is_enabled(fadt_header)) {return;}
+    if (inw(fadt_header->pm1a_control_block) & 1) {return;}
     outb(fadt_header->smi_command_port, fadt_header->acpi_enable);
-    kprintf("Waiting 3 seconds for ACPI to enable...\n");
     while (((inw(fadt_header->pm1a_control_block) & 1) == 0));
 }
 

@@ -112,6 +112,20 @@ void process_open_stdfiles(process_t * process, const char * tty) {
     }
 }
 
+uint8_t process_pending_signal(process_t * process) {
+    if (!process) {
+        return 0;
+    }
+
+    for (int sig = 1; sig < NSIG; sig++) {
+        if (process->signal_queue[sig] != NULL) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
 process_t * process_create(process_t * parent, const char * filename, const char * tty, vfs_path_t root, vfs_path_t cwd, const char ** argv, const char ** envp) {
     if (!parent) {
         return NULL;
@@ -148,6 +162,7 @@ process_t * process_create(process_t * parent, const char * filename, const char
     new_process->current_thread = NULL;
     new_process->nice = 0xA;
     new_process->state = SCHEDULER_STATUS_RUNABLE;
+    new_process->stramp_address = 0x0;
     new_process->main_thread = NULL;
     new_process->pid = -1; // Will be set by scheduler
     new_process->rootdir.mount = root.mount;
@@ -255,6 +270,151 @@ void context_restore(context_t* ctx, cpu_context_t* cpu_ctx){
     cpu_ctx->ctx_info = old_info;
 }
 
+status_t process_create_scontext(thread_t * thread, signal_t * signal) {
+    if (!thread) {
+        panic("process_create_scontext: thread is NULL");
+        return FAILURE;
+    }
+
+    process_t * process = (process_t *)thread->process;
+    if (!process) {
+        panic("process_create_scontext: thread's process is NULL");
+        return FAILURE;
+    }
+    context_t * sig_ctx = kmalloc(sizeof(context_t));
+    kprintf("process_create_scontext: Created SIGNAL context_t for process %d thread %p at %p\n", ((process_t *)thread->process)->pid, thread, sig_ctx);
+    if (!sig_ctx) {
+        panic("process_create_scontext: Failed to allocate memory for signal context");
+        return FAILURE;
+    }
+    memset(sig_ctx, 0, sizeof(context_t));
+    sig_ctx->simd_ctx = simd_create_context();
+    if (!sig_ctx->simd_ctx) {
+        panic("process_create_scontext: Failed to allocate memory for signal SIMD context");
+        kfree(sig_ctx);
+        return FAILURE;
+    }
+
+    sig_ctx->cpu_ctx.ctx_info = (context_info_t *)kmalloc(sizeof(context_info_t));
+    if (!sig_ctx->cpu_ctx.ctx_info) {
+        panic("process_create_scontext: Failed to allocate memory for signal context_info_t");
+        simd_free_context(sig_ctx->simd_ctx);
+        kfree(sig_ctx);
+        return FAILURE;
+    }
+    memset(sig_ctx->cpu_ctx.ctx_info, 0, sizeof(context_info_t));
+    stack_t * sig_stack = stackalloc(process->vmm, thread->stack_size, VMM_REGION_S_STACK - thread->stack_size, VMM_WRITE_BIT | VMM_USER_BIT);
+    if (!sig_stack) {
+        panic("process_create_scontext: Failed to allocate memory for signal stack");
+        kfree(sig_ctx->cpu_ctx.ctx_info);
+        simd_free_context(sig_ctx->simd_ctx);
+        kfree(sig_ctx);
+        return FAILURE;
+    }
+    sigctx_t * new_scontext = kmalloc(sizeof(sigctx_t));
+        if (!new_scontext) {
+        panic("process_create_scontext: Failed to allocate memory for thread's sigctx_t");
+        stackfree(process->vmm, sig_stack);
+        kfree(sig_ctx->cpu_ctx.ctx_info);
+        simd_free_context(sig_ctx->simd_ctx);
+        kfree(sig_ctx);
+        return FAILURE;
+    }
+
+    new_scontext->signal = signal;
+    new_scontext->context = sig_ctx;
+    new_scontext->stack = sig_stack;
+    new_scontext->in_progress = 0;
+    new_scontext->next = NULL;
+
+    status_t st = process_init_thread_context(
+        new_scontext->context,
+        process->vmm,
+        process->stramp_address,
+        new_scontext->stack->top,
+        0,
+        thread
+    );
+    if (st != SUCCESS) {
+        panic("process_create_scontext: Failed to initialize signal thread context");
+        kfree(new_scontext);
+        stackfree(process->vmm, sig_stack);
+        kfree(sig_ctx->cpu_ctx.ctx_info);
+        simd_free_context(sig_ctx->simd_ctx);
+        kfree(sig_ctx);
+        return FAILURE;
+    }
+    
+    //Iterate the thread's scontext list and add it in the correct place
+    //Remember that lower signal number have priority
+    sigctx_t * current = thread->scontext;
+    sigctx_t * prev = NULL;
+    while (current != NULL && current->signal->signo < signal->signo) {
+        prev = current;
+        current = current->next;;
+    }
+    if (prev == NULL) {
+        //Insert at head
+        new_scontext->next = thread->scontext;
+        thread->scontext = new_scontext;
+    } else {
+        //Insert in middle or end
+        new_scontext->next = prev->next;
+        prev->next = new_scontext;
+    }
+
+    return SUCCESS;
+}
+
+sigctx_t * process_get_scontext(thread_t * thread) {
+    return thread->scontext;
+}
+
+status_t process_kill(process_t * process, int code) {
+    if (!process) {
+        return FAILURE;
+    }
+    //Kill doesn't kill the process, it sends a signal to it
+    signal_t * sig = kmalloc(sizeof(signal_t));
+    if (!sig) {
+        panic("process_kill: Failed to allocate memory for signal");
+        return FAILURE;
+    }
+
+    sig->signo = code;
+    sig->next = NULL;
+
+    //Place it at the end of the signal queue
+    if (process->signal_queue[code] == NULL) {
+        process->signal_queue[code] = sig;
+    } else {
+        signal_t * current = process->signal_queue[code];
+        while (current->next != NULL) {
+            current = current->next;
+        }
+        current->next = sig;
+    }
+
+    return SUCCESS;
+}
+
+signal_t * process_get_signal(process_t * process) {
+    if (!process) {
+        return NULL;
+    }
+
+    for (int sig = 1; sig < NSIG; sig++) {
+        if (process->signal_queue[sig] != NULL) {
+            signal_t * ret = process->signal_queue[sig];
+            process->signal_queue[sig] = ret->next;
+            ret->next = NULL;
+            return ret;
+        }
+    }
+
+    return NULL;
+}
+
 thread_t * duplicate_thread(process_t * parent, thread_t * og) {
     if (!parent || !og) {
         panic("duplicate_thread: parent or og thread is NULL");
@@ -355,7 +515,6 @@ thread_t * duplicate_thread(process_t * parent, thread_t * og) {
         return NULL;
     }
     memcpy(new_ctx->simd_ctx, og->context->simd_ctx, 512);
-
     new_thread->kcontext = kmalloc(sizeof(context_t));
     kprintf("duplicate_thread: Created new KERNEL context_t for process %d thread %p at %p\n", parent->pid, og, new_thread->kcontext);
     if (!new_thread->kcontext) {
@@ -425,6 +584,7 @@ status_t process_thread_exit(thread_t * thread) {
     if (thread->ustack) {
         stackfree(vmm, thread->ustack);
     }
+
     if (thread->context) {
         if (thread->context->cpu_ctx.ctx_info) {
             kfree(thread->context->cpu_ctx.ctx_info);
@@ -459,6 +619,10 @@ status_t process_thread_exit(thread_t * thread) {
     }
     kfree(thread);
     return SUCCESS;
+}
+
+thread_t * process_get_current_thread(void) {
+    return (thread_t *)cpu_get_current_thread();
 }
 
 process_t * process_fork(process_t * parent, thread_t * forking_thread) {
@@ -523,6 +687,7 @@ process_t * process_fork(process_t * parent, thread_t * forking_thread) {
     child->ppid = parent->pid;
     child->uid = parent->uid;
     child->gid = parent->gid;
+    child->stramp_address = parent->stramp_address;
     child->nice = parent->nice;
     child->cwd.mount = parent->cwd.mount;
     memcpy(child->cwd.internal_path, parent->cwd.internal_path, VFS_PATH_MAX);

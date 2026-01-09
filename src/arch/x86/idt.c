@@ -13,6 +13,10 @@ static __attribute__((aligned(IDT_PAGE_SIZE))) idt_t global_idt = {};
 extern void _load_idt(idtr_t* idtr);
 uint8_t idt_initialized = 0;
 
+#define DYNAMIC_INTERRUPT_HANDLERS_NO 256
+//Array of function pointers for interrupt handlers
+void (*dynamic_interrupt_handlers[DYNAMIC_INTERRUPT_HANDLERS_NO])(cpu_context_t* ctx, uint8_t cpu_id) = {0};
+
 static idtr_t _idtr = {
     .limit = sizeof(idt_t) - 1,
     .base = (uint64_t) &global_idt,
@@ -30,6 +34,18 @@ idt_entry_t idt_entry(void* handler, uint8_t ist, uint8_t idt_flags) {
     };
 }
 
+void undefined_exception(cpu_context_t * ctx, uint8_t cpu_id) {
+    panic("Undefined CPU EXCEPTION: %d on CPU %d", ctx->interrupt_number, cpu_id);
+}
+
+void register_dynamic_interrupt(uint8_t vector, void* handler) {
+    dynamic_interrupt_handlers[vector] = handler;
+}
+
+void unregister_dynamic_interrupt(uint8_t vector) {
+    dynamic_interrupt_handlers[vector] = undefined_exception;
+}
+
 void idt_init(void) {
     if (idt_initialized) {
         _load_idt(&_idtr);
@@ -40,6 +56,10 @@ void idt_init(void) {
         global_idt.entries[i] = idt_entry(__interrupt_vector[i], 0, 0x8e);
     }
     _load_idt(&_idtr);
+
+    for (uint16_t i = 0; i < DYNAMIC_INTERRUPT_HANDLERS_NO; i++) {
+        dynamic_interrupt_handlers[i] = undefined_exception;
+    }
     idt_initialized = 1;
 }
 
@@ -68,7 +88,6 @@ void exception(cpu_context_t * ctx) {
     __asm__ volatile("mov %%cr2, %0" : "=r"(cr2));
     panic("CPU EXCEPTION: %d | Stacktrace (CR2: 0x%llx):", ctx->interrupt_number, cr2);
 }
-
 
 //uint64_t last_us = 0;
 void interrupt_handler(cpu_context_t* ctx, uint8_t cpu_id) {
@@ -101,14 +120,20 @@ void interrupt_handler(cpu_context_t* ctx, uint8_t cpu_id) {
         //last_us = current_us;
         update_counters();
     } else if (ctx->interrupt_number == INT_SCHEDULE_APIC_TIMER) {
-        scheduler_handler(ctx, cpu_id, CONTEXT_SAVE_USPACE);
+        scheduler_handler(ctx, cpu_id, SCHEDULER_USER_CONTEXT);
     } else if (ctx->interrupt_number == SIGNAL_SLEEP_INTERRUPT) {
         //kprintf("Sleep signal on CPU %d\n", cpu_id);
-        scheduler_handler(ctx, cpu_id, CONTEXT_SAVE_KSPACE);
+        scheduler_handler(ctx, cpu_id, SCHEDULER_KERNEL_CONTEXT);
     } else if (ctx->interrupt_number < 32) {
         exception(ctx);
     } else {
-        panic("Unknown Interrupt: %d", ctx->interrupt_number);
+        //Dynamic interrupt
+        void (*handler)(cpu_context_t* ctx, uint8_t cpu_id) = dynamic_interrupt_handlers[ctx->interrupt_number];
+        if (handler) {
+            handler(ctx, cpu_id);
+        } else {
+            panic("No handler for interrupt %d on CPU %d", ctx->interrupt_number, cpu_id);
+        }
     }
     apic_local_eoi(cpu_id);
     return;

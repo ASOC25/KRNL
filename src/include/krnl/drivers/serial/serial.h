@@ -6,9 +6,10 @@
 #define SERIAL_DRIVER_MAJOR 3
 #define MAX_SERIAL_DEVICES 32
 
-
 #define SERIAL_IOCTL_SET_CONFIG 0x01
 #define SERIAL_IOCTL_GET_CONFIG 0x02
+
+#define SERIAL_WAIT_LINE 0x537141
 
 struct serial_config {
     device_addr_t port_base;

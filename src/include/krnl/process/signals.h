@@ -9,6 +9,7 @@
 
 void sleep(thread_t * process, int condition);
 void wakeup(int condition);
+int check_sleep_condition(int condition);
 status_t nanosleep(thread_t * thread, struct timespec *duration, struct timespec *rem);
 
 void update_counters();

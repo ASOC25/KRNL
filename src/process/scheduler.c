@@ -211,9 +211,22 @@ thread_t * scheduler_get_next_thread() {
     scheduler_queue_t * current = sched_queue;
     thread_t * chosen_thread = NULL;
     while (current != NULL) {
-        if (current->thread->prio < highest_priority && current->thread->state == SCHEDULER_STATUS_RUNABLE) {
-            highest_priority = current->thread->prio;
-            chosen_thread = current->thread;
+        if (current->thread->prio < highest_priority) {
+            signal_t * sig = process_get_signal(current->thread->process);
+            if (sig) {
+                if (current->thread->state == SCHEDULER_STATUS_INTERRUPTIBLE_SLEEP)
+                    current->thread->state = SCHEDULER_STATUS_RUNABLE;
+
+                status_t st = process_create_scontext(current->thread, sig);
+                if (st != SUCCESS || current->thread->scontext == NULL) {
+                    panic("scheduler_handler: Failed to create signal context");
+                }
+            }
+
+            if (current->thread->state == SCHEDULER_STATUS_RUNABLE) {
+                highest_priority = current->thread->prio;
+                chosen_thread = current->thread;
+            }
         }
         current = current->next;
     }
@@ -345,7 +358,12 @@ void scheduler_handler(cpu_context_t* ctx, uint8_t cpu_id, uint8_t is_kernel_ctx
             context_save(ending_thread->kcontext, ctx);
             ending_thread->kcontext_pending = 1;
         } else {
-            context_save(ending_thread->context, ctx);
+            if (ending_thread->scontext && ending_thread->scontext->in_progress) {
+                //Save signal context instead
+                context_save(ending_thread->scontext->context, ctx);
+            } else {
+                context_save(ending_thread->context, ctx);
+            }
         }
         //ending_process = (process_t*)ending_thread->process;
     }
@@ -359,20 +377,21 @@ void scheduler_handler(cpu_context_t* ctx, uint8_t cpu_id, uint8_t is_kernel_ctx
         panic("scheduler_handler: No next process found");
     }
 
-    //if (next_process->pid == 101) match();
-
+    //if (next_process->pid == 101) match();    
     if (next_thread->state != SCHEDULER_STATUS_RUNABLE) {
         panic("scheduler_handler: Next thread is not runable");
-    }
-    if (next_process->state != SCHEDULER_STATUS_RUNABLE) {
-        panic("scheduler_handler: Next process is not runable");
     }
     
     if (next_thread->kcontext_pending) {
         next_thread->kcontext_pending = 0;
         context_restore(next_thread->kcontext, ctx);
     } else {
-        context_restore(next_thread->context, ctx);
+        if (next_thread->scontext) {
+            next_thread->scontext->in_progress = 1;
+            context_restore(next_thread->scontext->context, ctx);
+        } else {
+            context_restore(next_thread->context, ctx);
+        }
     }
     cpu_set_context_info(ctx->ctx_info);
 
@@ -389,4 +408,16 @@ void scheduler_handler(cpu_context_t* ctx, uint8_t cpu_id, uint8_t is_kernel_ctx
     
     apic_arm_lapic_timer(cpu_id, SCHEDULER_TIMESLICE_MS);
 
+}
+
+process_t * scheduler_get_process_by_pid(pid_t pid) {
+    scheduler_queue_t * current = sched_queue;
+    while (current != NULL) {
+        process_t * iterated_process = GET_PROC(current->thread);
+        if (iterated_process->pid == pid) {
+            return iterated_process;
+        }
+        current = current->next;
+    }
+    return NULL;
 }

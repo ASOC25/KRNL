@@ -320,9 +320,6 @@ status_t init_ps2_dd() {
         silent_panic();
     }
 
-    //uint8_t apic_ioapic_mask(uint8_t irq, uint8_t enable) {
-    apic_ioapic_mask(12, 0); //Enable Mouse IRQ line
-    apic_ioapic_mask(1, 0);  //Enable Keyboard IRQ line
 
     return SUCCESS;
 }
@@ -342,6 +339,9 @@ status_t ps2_init_pnp(void) {
             silent_panic();
         }
     }
-
+    apic_ioapic_mask(0x21, 1); //Enable PS2 keyboard
+    apic_ioapic_mask(0x2c, 1); //Enable PS2 mouse
+    register_dynamic_interrupt(0x21, KeyboardInt_Handler); //Register keyboard interrupt handler
+    register_dynamic_interrupt(0x2c, MouseInt_Handler); //Register mouse interrupt handler
     return SUCCESS;
 }
