@@ -283,7 +283,6 @@ status_t allocate_signal_trampoline(process_t* process) {
         return FAILURE;
     }
     memcpy(identity, signal_trampoline_start, code_size);
-    process->stramp_address = (void *)SIGNAL_TRAMPOLINE_ADDRESS;
     return SUCCESS;
 }
 
@@ -428,6 +427,13 @@ loaded_elf_t* elf_load_elf(process_t * process, const char * filename) {
             pld.ld_path = kmalloc(program_header[i].p_filesz);
             memcpy(pld.ld_path, elf_datab + program_header[i].p_offset, program_header[i].p_filesz);
         }
+    }
+
+    //Load signal trampoline
+    if (allocate_signal_trampoline(process) != SUCCESS) {
+        panic("elf_load_elf: Failed to allocate signal trampoline\n");
+        kfree(elf_datab);
+        return NULL;
     }
 
     struct auxv * vectors = kmalloc(sizeof(struct auxv) * 7);

@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <wait.h>
+#include <signal.h>
 
 void print_args(int argc, char* argv[], char* envp[]) {
     printf("Argc: %d", argc);
@@ -167,9 +168,26 @@ void __attribute__ ((noinline)) fork_execve_exit_test() {
     printf("Fork execve exit test: child process %d created.\n", pid);
 }
 
+void kill_signal_handler(int signum) {
+    // Simply exit the process with code 128 + signum
+    int pid = sys_getpid();
+    printf("Process %d received signal %d, exiting.\n", pid, signum);
+    sys_exit(128 + signum);
+    return 0; // Never reached
+}
+
 void __attribute__ ((noinline)) kill_test() {
     //Create a new process that sleeps indefinitely
     //Then send it a SIGKILL and verify it exits
+    struct sigaction sa = {0};
+    sa.sa_handler = kill_signal_handler;
+    sa.sa_flags = 0;
+    memset(&sa.sa_mask, 0, sizeof(sa.sa_mask));
+    if (sys_sigaction(9, &sa, NULL) != 0) {
+        printf("Failed to set signal handler for SIGKILL in kill_test.\n");
+        return;
+    }
+
     int pid = sys_fork();
     if (pid < 0) {
         printf("Fork failed in kill_test.\n");

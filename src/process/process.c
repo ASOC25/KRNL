@@ -162,7 +162,7 @@ process_t * process_create(process_t * parent, const char * filename, const char
     new_process->current_thread = NULL;
     new_process->nice = 0xA;
     new_process->state = SCHEDULER_STATUS_RUNABLE;
-    new_process->stramp_address = 0x0;
+    new_process->stramp_address = (void *)SIGNAL_TRAMPOLINE_ADDRESS;
     new_process->main_thread = NULL;
     new_process->pid = -1; // Will be set by scheduler
     new_process->rootdir.mount = root.mount;
@@ -270,6 +270,27 @@ void context_restore(context_t* ctx, cpu_context_t* cpu_ctx){
     cpu_ctx->ctx_info = old_info;
 }
 
+status_t process_handle_default_signal(thread_t * thread, signal_t * signal) {
+    if (!thread || !signal) {
+        panic("process_handle_default_signal: thread or signal is NULL");
+        return FAILURE;
+    }
+
+    kprintf("process_handle_default_signal: Handling default signal %d for process %d\n", signal->signo, ((process_t *)thread->process)->pid);
+
+    switch (signal->signo) {
+        case SIGKILL:
+        case SIGTERM:
+            //Terminate the process
+            kprintf("process_handle_default_signal: Terminating process %d due to signal %d\n", ((process_t *)thread->process)->pid, signal->signo);
+            process_exit((process_t *)thread->process, 128 + signal->signo);
+            return SUCCESS;
+        default:
+            kprintf("process_handle_default_signal: Unhandled default signal %d for process %d\n", signal->signo, ((process_t *)thread->process)->pid);
+            return FAILURE;
+    }
+}
+
 status_t process_create_scontext(thread_t * thread, signal_t * signal) {
     if (!thread) {
         panic("process_create_scontext: thread is NULL");
@@ -281,6 +302,12 @@ status_t process_create_scontext(thread_t * thread, signal_t * signal) {
         panic("process_create_scontext: thread's process is NULL");
         return FAILURE;
     }
+
+    //If the process does not have a signal handler for this signal, call the default handler right away
+    sigaction_t * action = process->signal_actions[signal->signo];
+    if (action == NULL)
+        return process_handle_default_signal(thread, signal);
+
     context_t * sig_ctx = kmalloc(sizeof(context_t));
     kprintf("process_create_scontext: Created SIGNAL context_t for process %d thread %p at %p\n", ((process_t *)thread->process)->pid, thread, sig_ctx);
     if (!sig_ctx) {
@@ -303,18 +330,9 @@ status_t process_create_scontext(thread_t * thread, signal_t * signal) {
         return FAILURE;
     }
     memset(sig_ctx->cpu_ctx.ctx_info, 0, sizeof(context_info_t));
-    stack_t * sig_stack = stackalloc(process->vmm, thread->stack_size, VMM_REGION_S_STACK - thread->stack_size, VMM_WRITE_BIT | VMM_USER_BIT);
-    if (!sig_stack) {
-        panic("process_create_scontext: Failed to allocate memory for signal stack");
-        kfree(sig_ctx->cpu_ctx.ctx_info);
-        simd_free_context(sig_ctx->simd_ctx);
-        kfree(sig_ctx);
-        return FAILURE;
-    }
     sigctx_t * new_scontext = kmalloc(sizeof(sigctx_t));
         if (!new_scontext) {
         panic("process_create_scontext: Failed to allocate memory for thread's sigctx_t");
-        stackfree(process->vmm, sig_stack);
         kfree(sig_ctx->cpu_ctx.ctx_info);
         simd_free_context(sig_ctx->simd_ctx);
         kfree(sig_ctx);
@@ -323,7 +341,7 @@ status_t process_create_scontext(thread_t * thread, signal_t * signal) {
 
     new_scontext->signal = signal;
     new_scontext->context = sig_ctx;
-    new_scontext->stack = sig_stack;
+    new_scontext->stack = thread->ustack;
     new_scontext->in_progress = 0;
     new_scontext->next = NULL;
 
@@ -338,12 +356,21 @@ status_t process_create_scontext(thread_t * thread, signal_t * signal) {
     if (st != SUCCESS) {
         panic("process_create_scontext: Failed to initialize signal thread context");
         kfree(new_scontext);
-        stackfree(process->vmm, sig_stack);
         kfree(sig_ctx->cpu_ctx.ctx_info);
         simd_free_context(sig_ctx->simd_ctx);
         kfree(sig_ctx);
         return FAILURE;
     }
+
+    //Hardcode the parameters for the signal trampoline
+    new_scontext->context->cpu_ctx.rdi = signal->signo; // signo
+    new_scontext->context->cpu_ctx.rsi = (uint64_t)action; // sigaction_t *sigact
+    new_scontext->context->cpu_ctx.rdx = (uint64_t)&new_scontext->context->cpu_ctx; // cpu_context_t *ctx
+    new_scontext->context->cpu_ctx.rcx = (uint64_t)new_scontext->stack->top; // stack pointer (hidden arg)
+
+    //Set the stack pointer to include the handler address
+    new_scontext->context->cpu_ctx.rsp -= sizeof(uint64_t);
+    *(uint64_t *)new_scontext->context->cpu_ctx.rsp = (uint64_t)action->sa_handler;
     
     //Iterate the thread's scontext list and add it in the correct place
     //Remember that lower signal number have priority
@@ -368,6 +395,41 @@ status_t process_create_scontext(thread_t * thread, signal_t * signal) {
 
 sigctx_t * process_get_scontext(thread_t * thread) {
     return thread->scontext;
+}
+
+status_t process_sigaction(process_t * process, int signum, const struct sigaction * act, struct sigaction * oldact) {
+    if (!process) {
+        return -EINVAL;
+    }
+    if (signum < 1 || signum >= NSIG) {
+        return -EINVAL;
+    }
+
+    if (oldact) {
+        sigaction_t * existing = process->signal_actions[signum];
+        if (existing) {
+            memcpy(oldact, existing, sizeof(sigaction_t));
+        } else {
+            memset(oldact, 0, sizeof(sigaction_t));
+        }
+    }
+
+    if (act) {
+        sigaction_t * new_action = kmalloc(sizeof(sigaction_t));
+        if (!new_action) {
+            return -ENOMEM;
+        }
+        memcpy(new_action, act, sizeof(sigaction_t));
+        process->signal_actions[signum] = new_action;
+    } else {
+        //Remove existing action
+        sigaction_t * existing = process->signal_actions[signum];
+        if (existing) {
+            kfree(existing);
+            process->signal_actions[signum] = NULL;
+        }
+    }
+    return SUCCESS;
 }
 
 status_t process_kill(process_t * process, int code) {
@@ -700,6 +762,23 @@ process_t * process_fork(process_t * parent, thread_t * forking_thread) {
         child->open_files[i] = parent->open_files[i];
     }
     child->open_file_count = parent->open_file_count;
+    //Duplicate signal actions
+    for (int i = 0; i < NSIG; i++) {
+        if (parent->signal_actions[i]) {
+            sigaction_t * new_action = kmalloc(sizeof(sigaction_t));
+            if (!new_action) {
+                panic("process_fork: Failed to allocate memory for signal action");
+            }
+            memcpy(new_action, parent->signal_actions[i], sizeof(sigaction_t));
+            child->signal_actions[i] = new_action;
+        } else {
+            child->signal_actions[i] = NULL;
+        }
+    }
+    //Initialize signal queue to NULL
+    for (int i = 0; i < NSIG; i++) {
+        child->signal_queue[i] = NULL;
+    }
 
     create_args(child, (char **)parent->argv, (char **)parent->envp, &parent->auxv, &parent->auxv_size);
     child->threads[0]->context->cpu_ctx.rax = 0; // Child process gets 0 return value from fork
@@ -947,10 +1026,9 @@ status_t process_execve(thread_t * thread, cpu_context_t * ctx, char * filename,
         }
     }
 
-    sigaction_t empty_sigaction = {0};
     //Empty signal handlers
     for (int i = 0; i < NSIG; i++) {
-        process->signal_actions[i] = empty_sigaction;
+        process->signal_actions[i] = 0x0;
     }
 
     kfree(process->argv);

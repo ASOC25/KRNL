@@ -62,5 +62,5 @@ typedef struct loaded_elf {
 
 loaded_elf_t* elf_load_elf(process_t * process, const char * filename);
 void * loader_create_args(void * stack, uint64_t max_size, char ** argv, char ** envp, struct auxv* auxv);
-
+status_t allocate_signal_trampoline(process_t* process);
 #endif

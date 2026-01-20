@@ -666,6 +666,22 @@ int64_t syscall_debug(thread_t * thread, cpu_context_t * context) {
     return 0;
 }
 
+int64_t syscall_sysret(thread_t * thread, cpu_context_t * context) {
+    (void)thread;
+    (void)context;
+    kprintf("UNIMPLEMENTED: syscall_sysret\n");
+    return -ENOSYS;
+}
+
+int64_t syscall_sigaction(thread_t * thread, cpu_context_t * context) {
+    int signum = (int)SYSCALL_ARG0(context);
+    const struct sigaction * act = (const struct sigaction *)SYSCALL_ARG1(context);
+    struct sigaction * oldact = (struct sigaction *)SYSCALL_ARG2(context);
+    process_t * proc = (process_t *)thread->process;
+    
+    return (process_sigaction(proc, signum, act, oldact) == SUCCESS) ? 0 : -EINVAL;
+}
+
 static syscall_handler_t handlers[SYS_COUNT] = { 
     syscall_read, //0
     syscall_write,
@@ -715,7 +731,9 @@ static syscall_handler_t handlers[SYS_COUNT] = {
     syscall_pselect, //45
     syscall_statx,
     syscall_debug,
-    syscall_kill
+    syscall_kill,
+    syscall_sysret, //49
+    syscall_sigaction //50
 };
 
 void syscall_handler(cpu_context_t * context) {

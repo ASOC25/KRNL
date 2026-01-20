@@ -331,6 +331,9 @@ stack_t * stackalloc(vmm_root_t * root, uint64_t size, uint64_t vaddr, uint8_t f
         PMM_PAGE_SIZE,
         flags
     );
+    if (st != SUCCESS) {
+        panic("stackalloc: Failed to map user pages");
+    }
 
     stack_t * stk = kmalloc(sizeof(stack_t));
     if (!stk) {

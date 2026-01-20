@@ -4,6 +4,8 @@
 #include <auxv.h>
 #include <stdio.h>
 #include <time.h>
+#include <string.h>
+#include <signal.h>
 
 struct minilibc_data {
     uint8_t loaded;
@@ -114,4 +116,7 @@ int sys_debug() {
 }
 int sys_kill(int pid, int sig) {
     return (int)syscall(48, (uint64_t)pid, (uint64_t)sig, 0, 0, 0, 0);
+}
+int sys_sigaction(int signum, const struct sigaction * act, struct sigaction * oldact) {
+    return (int)syscall(50, (uint64_t)signum, (uint64_t)act, (uint64_t)oldact, 0, 0, 0);
 }

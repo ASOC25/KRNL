@@ -61,7 +61,7 @@ typedef struct process_t {
 
     thread_t * threads[MAX_THREADS_PER_PROCESS];
     signal_t * signal_queue[NSIG];
-    sigaction_t signal_actions[NSIG];
+    sigaction_t *signal_actions[NSIG];
     void * stramp_address;
     int thread_count;
     thread_t * current_thread;
@@ -106,4 +106,5 @@ int process_dup(process_t * process, int old_fd, int new_fd);
 thread_t * process_get_current_thread(void);
 void process_init(const char * INIT_PROCESS, const char * INIT_TTY, vfs_path_t INIT_CWD, vfs_path_t INIT_ROOT);
 status_t process_kill(process_t * process, int code);
+status_t process_sigaction(process_t * process, int signum, const struct sigaction * act, struct sigaction * oldact);
 #endif

@@ -1,6 +1,8 @@
-
+#ifndef _MINILIBC_H
+#define _MINILIBC_H
 #include <stdint.h>
 #include <time.h>
+#include <signal.h>
 
 #define MAP_FAILED ((void *)-1)
 
@@ -86,3 +88,6 @@ int sys_nanosleep(struct timespec * duration, struct timespec * rem);
 int sys_setgid(gid_t gid);
 int sys_debug();
 int sys_kill(int pid, int sig);
+int sys_sigaction(int signum, const struct sigaction * act, struct sigaction * oldact);
+
+#endif

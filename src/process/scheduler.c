@@ -214,13 +214,14 @@ thread_t * scheduler_get_next_thread() {
         if (current->thread->prio < highest_priority) {
             signal_t * sig = process_get_signal(current->thread->process);
             if (sig) {
-                if (current->thread->state == SCHEDULER_STATUS_INTERRUPTIBLE_SLEEP)
-                    current->thread->state = SCHEDULER_STATUS_RUNABLE;
-
                 status_t st = process_create_scontext(current->thread, sig);
-                if (st != SUCCESS || current->thread->scontext == NULL) {
+                if (st != SUCCESS) {
                     panic("scheduler_handler: Failed to create signal context");
                 }
+
+                if (current->thread->state == SCHEDULER_STATUS_INTERRUPTIBLE_SLEEP && current->thread->scontext)
+                    current->thread->state = SCHEDULER_STATUS_RUNABLE;
+                //else: maybe we have processed the default signal handler instead of creating a signal context...
             }
 
             if (current->thread->state == SCHEDULER_STATUS_RUNABLE) {
@@ -354,18 +355,17 @@ void scheduler_handler(cpu_context_t* ctx, uint8_t cpu_id, uint8_t is_kernel_ctx
     thread_t * ending_thread = ctx->ctx_info->thread;
     //process_t * ending_process = NULL;
     if (ending_thread) {
-        if (is_kernel_ctx) {
-            context_save(ending_thread->kcontext, ctx);
-            ending_thread->kcontext_pending = 1;
+        if (ending_thread->scontext && ending_thread->scontext->in_progress) {
+            context_save(ending_thread->scontext->context, ctx);
         } else {
-            if (ending_thread->scontext && ending_thread->scontext->in_progress) {
-                //Save signal context instead
-                context_save(ending_thread->scontext->context, ctx);
+            if (is_kernel_ctx) {
+                context_save(ending_thread->kcontext, ctx);
+                ending_thread->kcontext_pending = 1;
             } else {
                 context_save(ending_thread->context, ctx);
             }
         }
-        //ending_process = (process_t*)ending_thread->process;
+       //ending_process = (process_t*)ending_thread->process;
     }
 
     thread_t * next_thread = scheduler_get_next_thread();
@@ -381,14 +381,14 @@ void scheduler_handler(cpu_context_t* ctx, uint8_t cpu_id, uint8_t is_kernel_ctx
     if (next_thread->state != SCHEDULER_STATUS_RUNABLE) {
         panic("scheduler_handler: Next thread is not runable");
     }
-    
-    if (next_thread->kcontext_pending) {
-        next_thread->kcontext_pending = 0;
-        context_restore(next_thread->kcontext, ctx);
+
+    if (next_thread->scontext) {
+        next_thread->scontext->in_progress = 1;
+        context_restore(next_thread->scontext->context, ctx);
     } else {
-        if (next_thread->scontext) {
-            next_thread->scontext->in_progress = 1;
-            context_restore(next_thread->scontext->context, ctx);
+        if (next_thread->kcontext_pending) {
+            next_thread->kcontext_pending = 0;
+            context_restore(next_thread->kcontext, ctx);
         } else {
             context_restore(next_thread->context, ctx);
         }
