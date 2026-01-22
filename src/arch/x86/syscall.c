@@ -666,11 +666,12 @@ int64_t syscall_debug(thread_t * thread, cpu_context_t * context) {
     return 0;
 }
 
-int64_t syscall_sysret(thread_t * thread, cpu_context_t * context) {
-    (void)thread;
+int64_t syscall_sigret(thread_t * thread, cpu_context_t * context) {
     (void)context;
-    kprintf("UNIMPLEMENTED: syscall_sysret\n");
-    return -ENOSYS;
+    kprintf("syscall_sigret invoked by thread %lu\n", thread->tid);
+    process_sigret(thread);
+    __asm__ volatile("int $0x82");
+    return 0;
 }
 
 int64_t syscall_sigaction(thread_t * thread, cpu_context_t * context) {
@@ -732,7 +733,7 @@ static syscall_handler_t handlers[SYS_COUNT] = {
     syscall_statx,
     syscall_debug,
     syscall_kill,
-    syscall_sysret, //49
+    syscall_sigret, //49
     syscall_sigaction //50
 };
 

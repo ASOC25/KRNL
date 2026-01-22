@@ -124,6 +124,8 @@ void interrupt_handler(cpu_context_t* ctx, uint8_t cpu_id) {
     } else if (ctx->interrupt_number == SIGNAL_SLEEP_INTERRUPT) {
         //kprintf("Sleep signal on CPU %d\n", cpu_id);
         scheduler_handler(ctx, cpu_id, SCHEDULER_KERNEL_CONTEXT);
+    } else if (ctx->interrupt_number == SIGNAL_SIGRETURN_INTERRUPT) {
+        scheduler_sigreturn(ctx, (thread_t *)ctx->ctx_info->thread);
     } else if (ctx->interrupt_number < 32) {
         exception(ctx);
     } else {

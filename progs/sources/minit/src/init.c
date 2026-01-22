@@ -171,9 +171,7 @@ void __attribute__ ((noinline)) fork_execve_exit_test() {
 void kill_signal_handler(int signum) {
     // Simply exit the process with code 128 + signum
     int pid = sys_getpid();
-    printf("Process %d received signal %d, exiting.\n", pid, signum);
-    sys_exit(128 + signum);
-    return 0; // Never reached
+    printf("Process %d received signal %d. Ignoring!\n", pid, signum);
 }
 
 void __attribute__ ((noinline)) kill_test() {
@@ -213,6 +211,7 @@ void __attribute__ ((noinline)) kill_test() {
                 printf("Kill test passed: process %d terminated by SIGKILL.\n", pid);
             } else {
                 printf("Kill test failed: process %d did not terminate by SIGKILL.\n", pid);
+                printf("It ended by signal number %d\n", WTERMSIG(status));
             }
         }
     }

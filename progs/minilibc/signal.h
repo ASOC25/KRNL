@@ -58,6 +58,7 @@
 #define SIG_HOLD    3
 
 #define SIGNAL_SLEEP_INTERRUPT 0x81
+#define SIGNAL_SIGRETURN_INTERRUPT 0x82
 #define SIGNAL_WAITPID 0x1000
 
 typedef unsigned long sigset_t;

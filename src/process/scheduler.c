@@ -213,7 +213,7 @@ thread_t * scheduler_get_next_thread() {
     while (current != NULL) {
         if (current->thread->prio < highest_priority) {
             signal_t * sig = process_get_signal(current->thread->process);
-            if (sig) {
+            if (sig && current->thread->scontext == NULL) { //Do not create multiple signal contexts
                 status_t st = process_create_scontext(current->thread, sig);
                 if (st != SUCCESS) {
                     panic("scheduler_handler: Failed to create signal context");
@@ -341,6 +341,20 @@ void dump_scheduler_status() {
         );
         current = current->next;
     }
+}
+
+void scheduler_sigreturn(cpu_context_t* ctx, thread_t * thread) {
+    if (thread->scontext) panic("scheduler_sigreturn: thread still has a signal context");
+    if (thread->kcontext_pending) {
+        kprintf("scheduler_sigreturn: Restoring KERNEL context for thread %p\n", thread);
+        context_restore(thread->kcontext, ctx);
+        thread->kcontext_pending = 0;
+    } else {
+        kprintf("scheduler_sigreturn: Restoring USER context for thread %p\n", thread);
+        context_restore(thread->context, ctx);
+    }
+
+    cpu_set_context_info(ctx->ctx_info);
 }
 
 void scheduler_handler(cpu_context_t* ctx, uint8_t cpu_id, uint8_t is_kernel_ctx) {

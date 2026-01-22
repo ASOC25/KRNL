@@ -106,5 +106,6 @@ int process_dup(process_t * process, int old_fd, int new_fd);
 thread_t * process_get_current_thread(void);
 void process_init(const char * INIT_PROCESS, const char * INIT_TTY, vfs_path_t INIT_CWD, vfs_path_t INIT_ROOT);
 status_t process_kill(process_t * process, int code);
+void process_sigret(thread_t * thread);
 status_t process_sigaction(process_t * process, int signum, const struct sigaction * act, struct sigaction * oldact);
 #endif

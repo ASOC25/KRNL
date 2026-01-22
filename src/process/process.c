@@ -367,11 +367,8 @@ status_t process_create_scontext(thread_t * thread, signal_t * signal) {
     new_scontext->context->cpu_ctx.rsi = (uint64_t)action; // sigaction_t *sigact
     new_scontext->context->cpu_ctx.rdx = (uint64_t)&new_scontext->context->cpu_ctx; // cpu_context_t *ctx
     new_scontext->context->cpu_ctx.rcx = (uint64_t)new_scontext->stack->top; // stack pointer (hidden arg)
-
-    //Set the stack pointer to include the handler address
-    new_scontext->context->cpu_ctx.rsp -= sizeof(uint64_t);
-    *(uint64_t *)new_scontext->context->cpu_ctx.rsp = (uint64_t)action->sa_handler;
-    
+    new_scontext->context->cpu_ctx.r8 = (uint64_t)action->sa_handler; // handler address (hidden arg)
+   
     //Iterate the thread's scontext list and add it in the correct place
     //Remember that lower signal number have priority
     sigctx_t * current = thread->scontext;
@@ -391,6 +388,29 @@ status_t process_create_scontext(thread_t * thread, signal_t * signal) {
     }
 
     return SUCCESS;
+}
+
+void process_sigret(thread_t * thread) {
+    if (!thread) {
+        panic("process_sigret: thread is NULL");
+        return;
+    }
+
+    //Remove the currently running signal context if any, remember to handle the linked list
+    if (thread->scontext && thread->scontext->in_progress) {
+        sigctx_t * finished_ctx = thread->scontext;
+        thread->scontext = finished_ctx->next;
+        kprintf("process_sigret: Finished signal %d for process %d, freeing sigctx at %p and context at %p\n",
+            finished_ctx->signal->signo,
+            ((process_t *)thread->process)->pid,
+            finished_ctx,
+            finished_ctx->context
+        );
+        simd_free_context(finished_ctx->context->simd_ctx);
+        kfree(finished_ctx->context->cpu_ctx.ctx_info);
+        kfree(finished_ctx->context);
+        kfree(finished_ctx);
+    }
 }
 
 sigctx_t * process_get_scontext(thread_t * thread) {
