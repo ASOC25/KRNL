@@ -120,12 +120,10 @@ void interrupt_handler(cpu_context_t* ctx, uint8_t cpu_id) {
         //last_us = current_us;
         update_counters();
     } else if (ctx->interrupt_number == INT_SCHEDULE_APIC_TIMER) {
-        scheduler_handler(ctx, cpu_id, SCHEDULER_USER_CONTEXT);
+        scheduler_handler(ctx, cpu_id, SCHEDULER_USER_CONTEXT, 1);
     } else if (ctx->interrupt_number == SIGNAL_SLEEP_INTERRUPT) {
         //kprintf("Sleep signal on CPU %d\n", cpu_id);
-        scheduler_handler(ctx, cpu_id, SCHEDULER_KERNEL_CONTEXT);
-    } else if (ctx->interrupt_number == SIGNAL_SIGRETURN_INTERRUPT) {
-        scheduler_sigreturn(ctx, (thread_t *)ctx->ctx_info->thread);
+        scheduler_handler(ctx, cpu_id, SCHEDULER_KERNEL_CONTEXT, 1);
     } else if (ctx->interrupt_number < 32) {
         exception(ctx);
     } else {

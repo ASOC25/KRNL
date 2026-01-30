@@ -285,7 +285,7 @@ int64_t syscall_tell(thread_t * thread, cpu_context_t * context) {
 int64_t syscall_schedule_yield(thread_t * thread, cpu_context_t * context) {
     (void)thread;
     uint8_t cpu_id = getApicId();
-    scheduler_handler(context, cpu_id, SCHEDULER_USER_CONTEXT);
+    scheduler_handler(context, cpu_id, SCHEDULER_USER_CONTEXT, 1);
     return context->rax;
 }
 
@@ -670,7 +670,7 @@ int64_t syscall_sigret(thread_t * thread, cpu_context_t * context) {
     (void)context;
     kprintf("syscall_sigret invoked by thread %lu\n", thread->tid);
     process_sigret(thread);
-    __asm__ volatile("int $0x82");
+    scheduler_handler(context, getApicId(), SCHEDULER_USER_CONTEXT, 0);
     return 0;
 }
 

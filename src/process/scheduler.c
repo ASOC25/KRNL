@@ -357,7 +357,8 @@ void scheduler_sigreturn(cpu_context_t* ctx, thread_t * thread) {
     cpu_set_context_info(ctx->ctx_info);
 }
 
-void scheduler_handler(cpu_context_t* ctx, uint8_t cpu_id, uint8_t is_kernel_ctx) {
+void scheduler_handler(cpu_context_t* ctx, uint8_t cpu_id, uint8_t is_kernel_ctx, uint8_t save_current) {
+    kprintf("scheduler_handler invoked on CPU %d | is_kernel_ctx: %d | save_current: %d\n", cpu_id, is_kernel_ctx, save_current);
     if (ctx == NULL) {
         panic("scheduler_handler: ctx is NULL");
     }
@@ -367,19 +368,34 @@ void scheduler_handler(cpu_context_t* ctx, uint8_t cpu_id, uint8_t is_kernel_ctx
     }
 
     thread_t * ending_thread = ctx->ctx_info->thread;
-    //process_t * ending_process = NULL;
+    process_t * ending_process = NULL;
     if (ending_thread) {
         if (ending_thread->scontext && ending_thread->scontext->in_progress) {
-            context_save(ending_thread->scontext->context, ctx);
+            if (save_current) {
+                kprintf("scheduler_handler: Saving SIGNAL context for thread %p\n", ending_thread);
+                context_save(ending_thread->scontext->context, ctx);
+            } else {
+                kprintf("scheduler_handler: Not saving SIGNAL context for thread %p\n", ending_thread);
+            }
         } else {
             if (is_kernel_ctx) {
-                context_save(ending_thread->kcontext, ctx);
+                if (save_current) {
+                    kprintf("scheduler_handler: Saving KERNEL context for thread %p\n", ending_thread);
+                    context_save(ending_thread->kcontext, ctx);
+                } else {
+                    kprintf("scheduler_handler: Not saving KERNEL context for thread %p\n", ending_thread);
+                }
                 ending_thread->kcontext_pending = 1;
             } else {
-                context_save(ending_thread->context, ctx);
+                if (save_current) {
+                    kprintf("scheduler_handler: Saving USER context for thread %p\n", ending_thread);
+                    context_save(ending_thread->context, ctx);
+                } else {
+                    kprintf("scheduler_handler: Not saving USER context for thread %p\n", ending_thread);
+                }
             }
         }
-       //ending_process = (process_t*)ending_thread->process;
+       ending_process = (process_t*)ending_thread->process;
     }
 
     thread_t * next_thread = scheduler_get_next_thread();
@@ -391,37 +407,37 @@ void scheduler_handler(cpu_context_t* ctx, uint8_t cpu_id, uint8_t is_kernel_ctx
         panic("scheduler_handler: No next process found");
     }
 
-    //if (next_process->pid == 101) match();    
+    if (next_process->pid == 103) match();    
     if (next_thread->state != SCHEDULER_STATUS_RUNABLE) {
         panic("scheduler_handler: Next thread is not runable");
     }
 
     if (next_thread->scontext) {
+        kprintf("scheduler_handler: Restoring SIGNAL context for thread %p\n", next_thread);
         next_thread->scontext->in_progress = 1;
         context_restore(next_thread->scontext->context, ctx);
     } else {
         if (next_thread->kcontext_pending) {
+            kprintf("scheduler_handler: Restoring KERNEL context for thread %p\n", next_thread);
             next_thread->kcontext_pending = 0;
             context_restore(next_thread->kcontext, ctx);
         } else {
+            kprintf("scheduler_handler: Restoring USER context for thread %p\n", next_thread);
             context_restore(next_thread->context, ctx);
         }
     }
     cpu_set_context_info(ctx->ctx_info);
 
-    //if (ending_process) {
-    //    kprintf("ROBERT, ITS PISSING ME OFF from %d to %d\n", ending_process->pid, next_process->pid);
-    //    kprintf("Setting cpu kstack to 0x%llx\n", (uint64_t)next_thread->kstack->top);
-    //} else {
-    //    kprintf("ROBERT, ITS PISSING ME OFF from NULL to %d\n", next_process->pid);
-    //    kprintf("Setting cpu kstack to 0x%llx\n", (uint64_t)next_thread->kstack->top);
-    //}
-    //void cpu_context_update_stacks(uint64_t kernel_syscall_stack, uint64_t kernel_interrupt_stack, uint64_t user_interrupt_stack);
-    //cpu_context_update_stacks((uint64_t)next_thread->kstack->top);
-
+    if (ending_process) {
+        kprintf("ROBERT, ITS PISSING ME OFF from %d to %d\n", ending_process->pid, next_process->pid);
+        kprintf("Setting cpu kstack to 0x%llx\n", (uint64_t)next_thread->kstack->top);
+    } else {
+        kprintf("ROBERT, ITS PISSING ME OFF from NULL to %d\n", next_process->pid);
+        kprintf("Setting cpu kstack to 0x%llx\n", (uint64_t)next_thread->kstack->top);
+    }
     
     apic_arm_lapic_timer(cpu_id, SCHEDULER_TIMESLICE_MS);
-
+    kprintf("scheduler_handler exiting\n");
 }
 
 process_t * scheduler_get_process_by_pid(pid_t pid) {

@@ -52,7 +52,7 @@
 #define WAIT_ANY                            (-1)
 #define WAIT_MYGRP                          0
 
-void scheduler_handler(cpu_context_t* ctx, uint8_t cpu_id, uint8_t source);
+void scheduler_handler(cpu_context_t* ctx, uint8_t cpu_id, uint8_t source, uint8_t save_current);
 status_t scheduler_add(thread_t * thread);
 status_t scheduler_remove(thread_t * thread);
 int scheduler_waitpid(thread_t * caller, int pid, int * status, int options);

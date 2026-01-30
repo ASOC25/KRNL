@@ -280,6 +280,7 @@ int main(int argc, char* argv[], char* envp[]) {
         printf("Failed to create idle process. Exiting.\n");
         sys_exit(1);
     } else if (idle_pid == 0) {
+        //waitpid_test();
         kill_test();
         while (1);
         init();
