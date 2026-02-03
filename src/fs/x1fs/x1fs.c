@@ -226,7 +226,7 @@ status_t x1fs_fstat(device_major_t major, device_minor_t minor, const char * pat
         }
     }
     if (!entry) {
-        kprintf("x1fs_fstat: File '%s' not found on device %d:%d\n", path, major, minor);
+        //kprintf("x1fs_fstat: File '%s' not found on device %d:%d\n", path, major, minor);
         return FAILURE; // File not found
     }
 

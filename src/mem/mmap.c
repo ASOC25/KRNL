@@ -41,7 +41,7 @@ vm_area_t * vmarea_create(process_t * process, void * start, uint64_t size, uint
     new_area->offset = offset;
     new_area->next = process->vm_areas;
     process->vm_areas = new_area;
-    kprintf("vmarea_create: Created VMA at %p of size %llu for process %d\n", start, size, process->pid);
+    //kprintf("vmarea_create: Created VMA at %p of size %llu for process %d\n", start, size, process->pid);
     return new_area;
 }
 
@@ -250,7 +250,7 @@ void vmarea_remove_all(process_t * process) {
     vm_area_t * current = process->vm_areas;
     while (current) {
         vm_area_t * next = current->next;
-        kprintf("vmarea_remove_all: Removing VMA at %p of size %llu for process %d\n", current->start, current->size, process->pid);
+        //kprintf("vmarea_remove_all: Removing VMA at %p of size %llu for process %d\n", current->start, current->size, process->pid);
         free(process->vmm, current->start); //Free the mapped memory
         kfree(current);
         current = next;
@@ -344,7 +344,7 @@ void * vmarea_mmap(process_t * process, void * addr, uint64_t length, uint8_t pr
         }
         file_desc->position = saved_position;
     }
-    kprintf("vmarea_mmap: Mapped %llu bytes at %p for process %d\n", length, ptr, process->pid);
+    //kprintf("vmarea_mmap: Mapped %llu bytes at %p for process %d\n", length, ptr, process->pid);
     return ptr;
 }
 

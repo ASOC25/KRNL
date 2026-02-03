@@ -60,7 +60,7 @@ typedef struct loaded_elf {
     uint64_t ld_size;
 } loaded_elf_t;
 
-loaded_elf_t* elf_load_elf(process_t * process, const char * filename);
+loaded_elf_t* elf_load_elf(process_t * process, const char * filename, thread_t* thread);
 void * loader_create_args(void * stack, uint64_t max_size, char ** argv, char ** envp, struct auxv* auxv);
 status_t allocate_signal_trampoline(process_t* process);
 #endif

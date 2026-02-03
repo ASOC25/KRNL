@@ -37,6 +37,7 @@ typedef struct sigctx {
     uint8_t in_progress;
     context_t* context;
     stack_t* stack;
+    stack_t* kstack;
     struct sigctx * next;
 } sigctx_t;
 
@@ -108,4 +109,5 @@ void process_init(const char * INIT_PROCESS, const char * INIT_TTY, vfs_path_t I
 status_t process_kill(process_t * process, int code);
 void process_sigret(thread_t * thread);
 status_t process_sigaction(process_t * process, int signum, const struct sigaction * act, struct sigaction * oldact);
+status_t process_destroy_thread(process_t * process, thread_t * thread);
 #endif

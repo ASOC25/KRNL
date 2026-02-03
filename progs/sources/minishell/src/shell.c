@@ -48,6 +48,37 @@ struct command commands[] = {
     { NULL, NULL }
 };
 
+// Try executing a program by name
+int process_execution(const char* filename, const char *const argv[]) {
+    printf("Attempting to execute program: %s\n", filename);
+    printf("Arguments:\n");
+    for (int i = 0; argv[i] != NULL; i++) {
+        printf(" Argv[%d]: %s\n", i, argv[i]);
+    }
+    //Fork, execve, waitpid
+    int pid = sys_fork();
+    if (pid == 0) {
+        //Child process
+        char* const envp[] = { NULL };
+        int result = sys_execve(filename, (char **)argv, (char **)envp);
+        if (result < 0) {
+            sys_exit(1);
+        }
+        //If execve returns, there was an error
+        printf("Failed to execute program: %s\n", filename);
+        sys_exit(1);
+    } else if (pid > 0) {
+        //Parent process
+        int status;
+        sys_waitpid(pid, &status, 0);
+        printf("Program %s exited with status %d\n", filename, status);
+    } else {
+        //Fork failed
+        printf("Failed to fork process for executing: %s\n", filename);
+        return -1;
+    }
+    return 0;
+}
 
 int process_command(const char* command) {
     // For now, just print the command
@@ -65,7 +96,7 @@ int process_command(const char* command) {
     }
     argv[argc] = NULL;
     if (argc == 0) {
-        return;
+        return -1; // No command entered
     }
     //Find and execute the command
     for (int i = 0; commands[i].name != NULL; i++) {
@@ -73,6 +104,9 @@ int process_command(const char* command) {
             return commands[i].handler(argc, argv);
         }
     }
+    
+    //If command not found, try executing it as a program
+    return process_execution(argv[0], (const char *const *)argv);
 }
 
 void loop() {

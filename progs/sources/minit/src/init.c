@@ -281,8 +281,7 @@ int main(int argc, char* argv[], char* envp[]) {
         sys_exit(1);
     } else if (idle_pid == 0) {
         //waitpid_test();
-        kill_test();
-        while (1);
+        //kill_test();
         init();
         printf("Main process exiting.\n");
         sys_exit(0);

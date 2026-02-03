@@ -307,7 +307,7 @@ void * malloc(vmm_root_t * root, uint64_t size, uint64_t vaddr, uint8_t flags) {
     }
     
     void * identity = (void *)vmm_to_identity_map((uint64_t)phys_addr);
-    kprintf("malloc: vaddr: %llx paddr: %llx size: %llx\n", vaddr, (uint64_t)phys_addr, size);
+    //kprintf("malloc: vaddr: %llx paddr: %llx size: %llx\n", vaddr, (uint64_t)phys_addr, size);
 
     memset(identity, 0, (size + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE * PMM_PAGE_SIZE);
 
@@ -359,7 +359,7 @@ stack_t * stackalloc(vmm_root_t * root, uint64_t size, uint64_t vaddr, uint8_t f
 }
 
 void free(vmm_root_t * cr3, void * virtual_address) {
-    kprintf("Called free on vaddr %p in root %p\n", virtual_address, cr3);
+    //kprintf("Called free on vaddr %p in root %p\n", virtual_address, cr3);
     //Find the allocation
     struct allocation * current = allocations_head;
     while (current != NULL) {
@@ -373,7 +373,7 @@ void free(vmm_root_t * cr3, void * virtual_address) {
             );
             //Free the physical pages
             if (should_deallocate_pmm(cr3, current->physical_address)) {
-                kprintf("Releasing physical pages at %p\n", current->physical_address);
+                //kprintf("Releasing physical pages at %p\n", current->physical_address);
                 pmm_free_pages(current->physical_address, (current->size + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE);
             }
 

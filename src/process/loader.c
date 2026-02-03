@@ -6,6 +6,7 @@
 #include <krnl/libraries/std/elf.h>
 #include <krnl/mem/mmap.h>
 #include <krnl/vfs/vfs.h>
+#include <krnl/process/process.h>
 
 const char * elf_class[] = {
     "Invalid class",
@@ -287,7 +288,7 @@ status_t allocate_signal_trampoline(process_t* process) {
 }
 
 status_t allocate_segment(process_t* process, uint8_t * elf_datab, Elf64_Phdr * program_header, void* base) {
-    kprintf("Starting ALLOCATE SEGMENT\n");
+    //kprintf("Starting ALLOCATE SEGMENT\n");
     if (program_header->p_type != PT_LOAD) panic("allocate_segment: Not a loadable segment");
 
     uint64_t vaddr_offset = program_header->p_vaddr & 0xfff;
@@ -309,34 +310,33 @@ status_t allocate_segment(process_t* process, uint8_t * elf_datab, Elf64_Phdr * 
         return FAILURE;
     }
 
-    kprintf("allocate_segment: Mapped segment at vaddr: %p, size: %llu bytes (%llu pages), perms: 0x%x\n", (void *)vaddr, total_pages * 0x1000, total_pages, perms);
+    //kprintf("allocate_segment: Mapped segment at vaddr: %p, size: %llu bytes (%llu pages), perms: 0x%x\n", (void *)vaddr, total_pages * 0x1000, total_pages, perms);
 
     void * identity = to_kident((vmm_root_t *)process->vmm, ptr);
     if (identity == NULL) {
         panic("allocate_segment: Failed to get identity mapped address");
         return FAILURE;
     }
-    kprintf("Identity mapped address: %p\n", identity);
+    //kprintf("Identity mapped address: %p\n", identity);
     //Zero the buffer
     memset((uint8_t *)identity, 0, total_pages * 0x1000);
     //Copy file data
     memcpy((uint8_t *)identity + vaddr_offset, elf_datab + program_header->p_offset, program_header->p_filesz);
-    kprintf("Copied %llu bytes to segment at offset %llu\n", program_header->p_filesz, vaddr_offset);
-    kprintf("Finished ALLOCATE SEGMENT\n");
+    //kprintf("Copied %llu bytes to segment at offset %llu\n", program_header->p_filesz, vaddr_offset);
+    //kprintf("Finished ALLOCATE SEGMENT\n");
     return SUCCESS;
 }
 
-loaded_elf_t* elf_load_elf(process_t * process, const char * filename) {
+loaded_elf_t* elf_load_elf(process_t * process, const char * filename, thread_t* thread) {
     vfs_file_descriptor_t fd;
     status_t st = vfs_open(filename, 0, &fd);
     if(st != SUCCESS || !fd.valid) {
-        panic("elf_load_elf: Failed to open ELF file %s\n", filename);
         return NULL;
     }
 
     vfs_stat_t stat_buf;
     if (vfs_fstat(&fd, &stat_buf) != SUCCESS) {
-        panic("elf_load_elf: Failed to stat ELF file %s\n", filename);
+        //panic("elf_load_elf: Failed to stat ELF file %s\n", filename);
         vfs_close(&fd);
         return NULL;
     }
@@ -351,7 +351,7 @@ loaded_elf_t* elf_load_elf(process_t * process, const char * filename) {
 
     ssize_t bytes_read = vfs_read(&fd, elf_datab, file_size);
     if ((size_t)bytes_read != file_size) {
-        panic("elf_load_elf: Failed to read complete ELF file %s\n", filename);
+        //panic("elf_load_elf: Failed to read complete ELF file %s\n", filename);
         kfree(elf_datab);
         vfs_close(&fd);
         return NULL;
@@ -365,40 +365,53 @@ loaded_elf_t* elf_load_elf(process_t * process, const char * filename) {
 
     Elf64_Ehdr * elf_header = (Elf64_Ehdr *)elf_datab;
     if (elf_header->e_ident[EI_CLASS] != ELFCLASS64) {
-        panic("elf_load_elf: Only ELF64 files are supported\n");
+        //panic("elf_load_elf: Only ELF64 files are supported\n");
         kfree(elf_datab);
         return NULL;
     }
 
-    kprintf("ELF Header:\n");
-    kprintf("  Magic: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n", elf_header->e_ident[0], elf_header->e_ident[1], elf_header->e_ident[2], elf_header->e_ident[3], elf_header->e_ident[4], elf_header->e_ident[5], elf_header->e_ident[6], elf_header->e_ident[7], elf_header->e_ident[8], elf_header->e_ident[9], elf_header->e_ident[10], elf_header->e_ident[11], elf_header->e_ident[12], elf_header->e_ident[13], elf_header->e_ident[14], elf_header->e_ident[15]);
-    kprintf("  Class: %s\n", elf_class[elf_header->e_ident[EI_CLASS]]);
-    kprintf("  Data: %s\n", elf_data[elf_header->e_ident[EI_DATA]]);
-    kprintf("  Version: %s\n", elf_version[elf_header->e_ident[EI_VERSION]]);
-    kprintf("  OS/ABI: %s\n", elf_osabi[elf_header->e_ident[EI_OSABI]]);
-    kprintf("  ABI Version: %d\n", elf_header->e_ident[EI_ABIVERSION]);
-    kprintf("  Type: %s\n", elf_type[elf_header->e_type]);
-    kprintf("  Machine: %s\n", elf_machine[elf_header->e_machine]);
-    kprintf("  Version: 0x%x\n", elf_header->e_version);
-    kprintf("  Entry point address: 0x%x\n", elf_header->e_entry);
-    kprintf("  Start of program headers: %d (bytes into file)\n", elf_header->e_phoff);
-    kprintf("  Start of section headers: %d (bytes into file)\n", elf_header->e_shoff);
-    kprintf("  Flags: 0x%x\n", elf_header->e_flags);
-    kprintf("  Size of this header: %d (bytes)\n", elf_header->e_ehsize);
-    kprintf("  Size of program headers: %d (bytes)\n", elf_header->e_phentsize);
-    kprintf("  Number of program headers: %d\n", elf_header->e_phnum);
-    kprintf("  Size of section headers: %d (bytes)\n", elf_header->e_shentsize);
-    kprintf("  Number of section headers: %d\n", elf_header->e_shnum);
-    kprintf("  Section header string table index: %d\n", elf_header->e_shstrndx);
+    //kprintf("ELF Header:\n");
+    //kprintf("  Magic: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n", elf_header->e_ident[0], elf_header->e_ident[1], elf_header->e_ident[2], elf_header->e_ident[3], elf_header->e_ident[4], elf_header->e_ident[5], elf_header->e_ident[6], elf_header->e_ident[7], elf_header->e_ident[8], elf_header->e_ident[9], elf_header->e_ident[10], elf_header->e_ident[11], elf_header->e_ident[12], elf_header->e_ident[13], elf_header->e_ident[14], elf_header->e_ident[15]);
+    //kprintf("  Class: %s\n", elf_class[elf_header->e_ident[EI_CLASS]]);
+    //kprintf("  Data: %s\n", elf_data[elf_header->e_ident[EI_DATA]]);
+    //kprintf("  Version: %s\n", elf_version[elf_header->e_ident[EI_VERSION]]);
+    //kprintf("  OS/ABI: %s\n", elf_osabi[elf_header->e_ident[EI_OSABI]]);
+    //kprintf("  ABI Version: %d\n", elf_header->e_ident[EI_ABIVERSION]);
+    //kprintf("  Type: %s\n", elf_type[elf_header->e_type]);
+    //kprintf("  Machine: %s\n", elf_machine[elf_header->e_machine]);
+    //kprintf("  Version: 0x%x\n", elf_header->e_version);
+    //kprintf("  Entry point address: 0x%x\n", elf_header->e_entry);
+    //kprintf("  Start of program headers: %d (bytes into file)\n", elf_header->e_phoff);
+    //kprintf("  Start of section headers: %d (bytes into file)\n", elf_header->e_shoff);
+    //kprintf("  Flags: 0x%x\n", elf_header->e_flags);
+    //kprintf("  Size of this header: %d (bytes)\n", elf_header->e_ehsize);
+    //kprintf("  Size of program headers: %d (bytes)\n", elf_header->e_phentsize);
+    //kprintf("  Number of program headers: %d\n", elf_header->e_phnum);
+    //kprintf("  Size of section headers: %d (bytes)\n", elf_header->e_shentsize);
+    //kprintf("  Number of section headers: %d\n", elf_header->e_shnum);
+    //kprintf("  Section header string table index: %d\n", elf_header->e_shstrndx);
 
     if (elf_header->e_type == ET_DYN) {
-        panic("Dynamic ELF not supported\n");
+        kfree(elf_datab);
+        //panic("Dynamic ELF not supported\n");
         return NULL;
     }
 
     if (elf_header->e_type != ET_EXEC) {
-        panic("Invalid ELF type\n");
+        kfree(elf_datab);
+        //panic("Invalid ELF type\n");
         return NULL;
+    }
+
+    vmarea_remove_all(process);
+    
+    //Iterate all threads and remove them
+    for (int i = 0; i < MAX_THREADS_PER_PROCESS; i++) {
+        thread_t * t = process->threads[i];
+        if (t && t != thread) {
+            process_destroy_thread(process, t);
+            process->threads[i] = NULL;
+        }
     }
 
     Elf64_Phdr * program_header = (Elf64_Phdr *) (elf_datab + elf_header->e_phoff);

@@ -201,6 +201,16 @@ status_t vfs_open(const char *path, int flags, vfs_file_descriptor_t *fd) {
         return FAILURE;
     }
     fd->valid = 1;
+
+    //Make sure file exists by calling fstat
+    vfs_stat_t stat_buf;
+    status_t res = vfs_fstat(fd, &stat_buf);
+    if (res != SUCCESS) {
+        kfree(fd->native_path);
+        fd->valid = 0;
+        return FAILURE;
+    }
+
     return SUCCESS;
 }
 

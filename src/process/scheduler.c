@@ -151,12 +151,12 @@ int scheduler_waitpid(thread_t * caller, int pid, int * status, int options) {
 
             if (comparator(caller_process, iterated_process, pid)) {
                 found_one = 1;
-                kprintf("scheduler_waitpid: Found matching process %d for caller %d\n", iterated_process->pid, caller_process->pid);
+                //kprintf("scheduler_waitpid: Found matching process %d for caller %d\n", iterated_process->pid, caller_process->pid);
                 //Check if the process has exited
                 if (options & WNOHANG) {
-                    kprintf("WNOHANG option set\n");
+                    //kprintf("WNOHANG option set\n");
                     if (iterated_process->state == SCHEDULER_STATUS_ZOMBIE) {
-                        kprintf("scheduler_waitpid WNOHANG: Reaping process %d for caller %d\n", iterated_process->pid, caller_process->pid);
+                        //kprintf("scheduler_waitpid WNOHANG: Reaping process %d for caller %d\n", iterated_process->pid, caller_process->pid);
                         //Reap process
                         if (status) {
                             *status = generate_status(WREASON_EXIT, iterated_process->exit_code);
@@ -165,21 +165,21 @@ int scheduler_waitpid(thread_t * caller, int pid, int * status, int options) {
                     }
                     changed_pid = iterated_process->pid;
                 } else if ((options & WUNTRACED) && iterated_process->state == SCHEDULER_STATUS_STOPPED) {
-                    kprintf("scheduler_waitpid: Process %d is stopped for caller %d\n", iterated_process->pid, caller_process->pid);
+                    //kprintf("scheduler_waitpid: Process %d is stopped for caller %d\n", iterated_process->pid, caller_process->pid);
                     if (status) {
                         *status = generate_status(WREASON_STOP, iterated_process->exit_code);
                     }
                     changed_pid = iterated_process->pid;
                 } else if ((options & WCONTINUED) && iterated_process->state == SCHEDULER_STATUS_CONTINUED) {
-                    kprintf("scheduler_waitpid: Process %d is continued for caller %d\n", iterated_process->pid, caller_process->pid);
+                    //kprintf("scheduler_waitpid: Process %d is continued for caller %d\n", iterated_process->pid, caller_process->pid);
                     if (status) {
                         *status = generate_status(WREASON_CONT, 0);
                     }
                     changed_pid = iterated_process->pid;
                 } else {
-                    kprintf("ELSE BRANCH\n");
+                    //kprintf("ELSE BRANCH\n");
                     if (iterated_process->state == SCHEDULER_STATUS_ZOMBIE) {
-                        kprintf("scheduler_waitpid: Reaping process %d for caller %d\n", iterated_process->pid, caller_process->pid);
+                        //kprintf("scheduler_waitpid: Reaping process %d for caller %d\n", iterated_process->pid, caller_process->pid);
                         //Reap process
                         if (status) {
                             *status = generate_status(WREASON_EXIT, iterated_process->exit_code);
@@ -190,14 +190,14 @@ int scheduler_waitpid(thread_t * caller, int pid, int * status, int options) {
                 }
             }
             current = current->next;
-            kprintf("scheduler_waitpid: Moving to next process in scheduler queue\n");
+            //kprintf("scheduler_waitpid: Moving to next process in scheduler queue\n");
         }
         if (!found_one) return -ECHILD;
         //No matching exited process found, sleep the caller thread
         if (!changed_pid) sleep(caller, SIGNAL_WAITPID);
-        kprintf("Moving on to next iteration of waitpid loop\n");
+        //kprintf("Moving on to next iteration of waitpid loop\n");
     }
-    kprintf("scheduler_waitpid: Returning changed_pid %d\n", changed_pid);
+    //kprintf("scheduler_waitpid: Returning changed_pid %d\n", changed_pid);
     return changed_pid;
 }
 
@@ -346,11 +346,11 @@ void dump_scheduler_status() {
 void scheduler_sigreturn(cpu_context_t* ctx, thread_t * thread) {
     if (thread->scontext) panic("scheduler_sigreturn: thread still has a signal context");
     if (thread->kcontext_pending) {
-        kprintf("scheduler_sigreturn: Restoring KERNEL context for thread %p\n", thread);
+        //kprintf("scheduler_sigreturn: Restoring KERNEL context for thread %p\n", thread);
         context_restore(thread->kcontext, ctx);
         thread->kcontext_pending = 0;
     } else {
-        kprintf("scheduler_sigreturn: Restoring USER context for thread %p\n", thread);
+        //kprintf("scheduler_sigreturn: Restoring USER context for thread %p\n", thread);
         context_restore(thread->context, ctx);
     }
 
@@ -358,7 +358,7 @@ void scheduler_sigreturn(cpu_context_t* ctx, thread_t * thread) {
 }
 
 void scheduler_handler(cpu_context_t* ctx, uint8_t cpu_id, uint8_t is_kernel_ctx, uint8_t save_current) {
-    kprintf("scheduler_handler invoked on CPU %d | is_kernel_ctx: %d | save_current: %d\n", cpu_id, is_kernel_ctx, save_current);
+    //kprintf("scheduler_handler invoked on CPU %d | is_kernel_ctx: %d | save_current: %d\n", cpu_id, is_kernel_ctx, save_current);
     if (ctx == NULL) {
         panic("scheduler_handler: ctx is NULL");
     }
@@ -368,34 +368,34 @@ void scheduler_handler(cpu_context_t* ctx, uint8_t cpu_id, uint8_t is_kernel_ctx
     }
 
     thread_t * ending_thread = ctx->ctx_info->thread;
-    process_t * ending_process = NULL;
+    //process_t * ending_process = NULL;
     if (ending_thread) {
         if (ending_thread->scontext && ending_thread->scontext->in_progress) {
             if (save_current) {
-                kprintf("scheduler_handler: Saving SIGNAL context for thread %p\n", ending_thread);
+                //kprintf("scheduler_handler: Saving SIGNAL context for thread %p\n", ending_thread);
                 context_save(ending_thread->scontext->context, ctx);
             } else {
-                kprintf("scheduler_handler: Not saving SIGNAL context for thread %p\n", ending_thread);
+                //kprintf("scheduler_handler: Not saving SIGNAL context for thread %p\n", ending_thread);
             }
         } else {
             if (is_kernel_ctx) {
                 if (save_current) {
-                    kprintf("scheduler_handler: Saving KERNEL context for thread %p\n", ending_thread);
+                    //kprintf("scheduler_handler: Saving KERNEL context for thread %p\n", ending_thread);
                     context_save(ending_thread->kcontext, ctx);
                 } else {
-                    kprintf("scheduler_handler: Not saving KERNEL context for thread %p\n", ending_thread);
+                    //kprintf("scheduler_handler: Not saving KERNEL context for thread %p\n", ending_thread);
                 }
                 ending_thread->kcontext_pending = 1;
             } else {
                 if (save_current) {
-                    kprintf("scheduler_handler: Saving USER context for thread %p\n", ending_thread);
+                    //kprintf("scheduler_handler: Saving USER context for thread %p\n", ending_thread);
                     context_save(ending_thread->context, ctx);
                 } else {
-                    kprintf("scheduler_handler: Not saving USER context for thread %p\n", ending_thread);
+                    //kprintf("scheduler_handler: Not saving USER context for thread %p\n", ending_thread);
                 }
             }
         }
-       ending_process = (process_t*)ending_thread->process;
+       //ending_process = (process_t*)ending_thread->process;
     }
 
     thread_t * next_thread = scheduler_get_next_thread();
@@ -407,37 +407,37 @@ void scheduler_handler(cpu_context_t* ctx, uint8_t cpu_id, uint8_t is_kernel_ctx
         panic("scheduler_handler: No next process found");
     }
 
-    if (next_process->pid == 103) match();    
+    //if (next_process->pid == 103) match();    
     if (next_thread->state != SCHEDULER_STATUS_RUNABLE) {
         panic("scheduler_handler: Next thread is not runable");
     }
 
     if (next_thread->scontext) {
-        kprintf("scheduler_handler: Restoring SIGNAL context for thread %p\n", next_thread);
+        //kprintf("scheduler_handler: Restoring SIGNAL context for thread %p\n", next_thread);
         next_thread->scontext->in_progress = 1;
         context_restore(next_thread->scontext->context, ctx);
     } else {
         if (next_thread->kcontext_pending) {
-            kprintf("scheduler_handler: Restoring KERNEL context for thread %p\n", next_thread);
+            //kprintf("scheduler_handler: Restoring KERNEL context for thread %p\n", next_thread);
             next_thread->kcontext_pending = 0;
             context_restore(next_thread->kcontext, ctx);
         } else {
-            kprintf("scheduler_handler: Restoring USER context for thread %p\n", next_thread);
+            //kprintf("scheduler_handler: Restoring USER context for thread %p\n", next_thread);
             context_restore(next_thread->context, ctx);
         }
     }
     cpu_set_context_info(ctx->ctx_info);
 
-    if (ending_process) {
-        kprintf("ROBERT, ITS PISSING ME OFF from %d to %d\n", ending_process->pid, next_process->pid);
-        kprintf("Setting cpu kstack to 0x%llx\n", (uint64_t)next_thread->kstack->top);
-    } else {
-        kprintf("ROBERT, ITS PISSING ME OFF from NULL to %d\n", next_process->pid);
-        kprintf("Setting cpu kstack to 0x%llx\n", (uint64_t)next_thread->kstack->top);
-    }
+    //if (ending_process) {
+    //    kprintf("ROBERT, ITS PISSING ME OFF from %d to %d\n", ending_process->pid, next_process->pid);
+    //    kprintf("Setting cpu kstack to 0x%llx\n", (uint64_t)next_thread->kstack->top);
+    //} else {
+    //    kprintf("ROBERT, ITS PISSING ME OFF from NULL to %d\n", next_process->pid);
+    //    kprintf("Setting cpu kstack to 0x%llx\n", (uint64_t)next_thread->kstack->top);
+    //}
     
     apic_arm_lapic_timer(cpu_id, SCHEDULER_TIMESLICE_MS);
-    kprintf("scheduler_handler exiting\n");
+    //kprintf("scheduler_handler exiting\n");
 }
 
 process_t * scheduler_get_process_by_pid(pid_t pid) {
