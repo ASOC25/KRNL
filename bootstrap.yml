@@ -1,0 +1,29 @@
+general:
+    patch_author: Krnl Osdev
+
+directories:
+    system_root: 'ramdisk'
+
+declare_options:
+  - name: "arch"
+    default: "x86_64"
+  - name: "arch_name"
+    default: "amd64"
+  - name: "boot_name"
+    default: "limine"
+  - name: "ar"
+    default: "x86_64-krnl-ar"
+  - name: "cc"
+    default: "x86_64-krnl-gcc"
+  - name: "cxx"
+    default: "x86_64-krnl-g++"
+  - name: "ld"
+    default: "x86_64-krnl-ld"
+  - name: "asmc"
+    default: "nasm"
+
+imports:
+  - file: bootstrap/sys-libs.yml
+  - file: bootstrap/sys-apps.yml
+  - file: bootstrap/sys-tools.yml
+  - file: bootstrap/sys-modules.yml

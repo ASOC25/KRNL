@@ -48,3 +48,21 @@ core.*
 # NOTE: The firmware blobs in OVMFbin/ and the Limine binaries in limine/ are
 # currently tracked. Remove them from version control or add entries here if
 # you prefer to fetch them dynamically.
+**/*.out
+**/*.o
+**/*.unit-test-out
+build/
+dependencies/
+**/.cache/
+**/compile_commands.json
+.vscode/
+*.gdb
+*.xbstrap
+bootstrap.link
+packages
+pkg-builds
+tool-builds
+bundled
+.xbstrap
+sysroot
+tools

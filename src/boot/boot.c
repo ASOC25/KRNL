@@ -68,7 +68,7 @@ void boot_startup() {
     kprintf("Using bootloader: %s version: %s\n", get_bootloader_name(), get_bootloader_version());
     //run_all_tests();
 
-    process_init("/init.elf", "/dev/tty0", cwd_path, root_path);
+    process_init("/bin/init.elf", "/dev/tty0", cwd_path, root_path);
     __asm__("sti");
     while (1);
 }

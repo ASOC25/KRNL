@@ -327,6 +327,71 @@ status_t allocate_segment(process_t* process, uint8_t * elf_datab, Elf64_Phdr * 
     return SUCCESS;
 }
 
+//Load dynamic linker at DYNAMIC_LINKER_BASE
+status_t load_dynamic_linker(process_t* process, char* dynamic_linker_path) {
+    vfs_file_descriptor_t fd;
+    status_t st = vfs_open(dynamic_linker_path, 0, &fd);
+    if(st != SUCCESS || !fd.valid) {
+        return FAILURE;
+    }
+    vfs_stat_t stat_buf;
+    if (vfs_fstat(&fd, &stat_buf) != SUCCESS) {
+        vfs_close(&fd);
+        return FAILURE;
+    }
+
+    size_t file_size = stat_buf.st_size;
+    uint8_t * elf_datab = (uint8_t *)kmalloc(file_size);
+    if (!elf_datab) {
+        vfs_close(&fd);
+        return FAILURE;
+    }
+
+    ssize_t bytes_read = vfs_read(&fd, elf_datab, file_size);
+    if ((size_t)bytes_read != file_size) {
+        kfree(elf_datab);
+        vfs_close(&fd);
+        return FAILURE;
+    }
+
+    vfs_close(&fd);
+
+    if (parse_elf_file(elf_datab) != SUCCESS) {
+        kfree(elf_datab);
+        return FAILURE;
+    }
+
+    Elf64_Ehdr * elf_header = (Elf64_Ehdr *)elf_datab;
+    if (elf_header->e_ident[EI_CLASS] != ELFCLASS64) {
+        kfree(elf_datab);
+        return FAILURE;
+    }
+    
+    if (elf_header->e_type != ET_DYN) {
+        kfree(elf_datab);
+        return FAILURE;
+    }
+
+    for (int i = 0; i < elf_header->e_phnum; i++) {
+        Elf64_Phdr * program_header = (Elf64_Phdr *)(elf_datab + elf_header->e_phoff + i * elf_header->e_phentsize);
+        if (allocate_segment(process, elf_datab, program_header, (void *)DYNAMIC_LINKER_BASE_ADDRESS) != SUCCESS) {
+            kfree(elf_datab);
+            return FAILURE;
+        }
+    }
+    kfree(elf_datab);
+    return SUCCESS;
+}
+
+void * loader_get_binentry(loaded_elf_t* elf) {
+    //If it has a dynamic linker, the entry point will be in the dynamic linker base address + the offset of the entry point in the ELF file
+    struct proc_ld *pld = elf->ld;
+    if (pld->ld_path) {
+        return (void *)(DYNAMIC_LINKER_BASE_ADDRESS + (elf->ehdr->e_entry));
+    }
+    return (void *)(elf->ehdr->e_entry);
+}
+
 loaded_elf_t* elf_load_elf(process_t * process, const char * filename, thread_t* thread) {
     vfs_file_descriptor_t fd;
     status_t st = vfs_open(filename, 0, &fd);
@@ -393,13 +458,13 @@ loaded_elf_t* elf_load_elf(process_t * process, const char * filename, thread_t*
 
     if (elf_header->e_type == ET_DYN) {
         kfree(elf_datab);
-        //panic("Dynamic ELF not supported\n");
+        panic("HEY!!!Dynamic ELF not supported\n");
         return NULL;
     }
 
     if (elf_header->e_type != ET_EXEC) {
         kfree(elf_datab);
-        //panic("Invalid ELF type\n");
+        panic("Invalid ELF type\n");
         return NULL;
     }
 
@@ -455,6 +520,17 @@ loaded_elf_t* elf_load_elf(process_t * process, const char * filename, thread_t*
         kfree(elf_datab);
         return NULL;
     }
+
+    if (pld.ld_path) {
+        status_t dyn_st = load_dynamic_linker(process, pld.ld_path);
+        if (dyn_st != SUCCESS) {
+            panic("elf_load_elf: Failed to load dynamic linker\n");
+            kfree(elf_datab);
+            kfree(vectors);
+            return NULL;
+        }
+    }
+
     memset(vectors, 0, sizeof(struct auxv) * 7);
     vectors[0].a_type = AT_ENTRY;
     vectors[0].a_val = (void*)elf_header->e_entry;
@@ -473,23 +549,16 @@ loaded_elf_t* elf_load_elf(process_t * process, const char * filename, thread_t*
     vectors[7].a_type = AT_NULL;
     vectors[7].a_val = 0;
 
-    if (pld.ld_path) {
-        panic("Dynamic linker not supported yet\n");
+    loaded_elf_t * ld = kmalloc(sizeof(loaded_elf_t));
+    if (!ld) {
+        panic("Could not allocate loaded elf\n");
         return NULL;
-    } else {
-
-        loaded_elf_t * ld = kmalloc(sizeof(loaded_elf_t));
-        if (!ld) {
-            panic("Could not allocate loaded elf\n");
-            return NULL;
-        }
-
-        memset(ld, 0, sizeof(loaded_elf_t));
-        ld->ehdr = elf_header;
-        ld->auxv = vectors;
-        ld->auxv_size = sizeof(struct auxv) * 8;
-        ld->ld = &pld;
-        ld->ld_size = sizeof(struct proc_ld);
-        return ld;
     }
+    memset(ld, 0, sizeof(loaded_elf_t));
+    ld->ehdr = elf_header;
+    ld->auxv = vectors;
+    ld->auxv_size = sizeof(struct auxv) * 8;
+    ld->ld = &pld;
+    ld->ld_size = sizeof(struct proc_ld);
+    return ld;
 }

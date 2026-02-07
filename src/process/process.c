@@ -157,7 +157,7 @@ process_t * process_create(process_t * parent, const char * filename, const char
 
     create_args(new_process, (char**)argv, (char**)envp, &elf->auxv, &elf->auxv_size);
     memset(new_process->threads, 0, MAX_THREADS_PER_PROCESS * sizeof(thread_t *));
-    new_process->binary_entry = (void *)elf->ehdr->e_entry;
+    new_process->binary_entry = loader_get_binentry(elf);
     new_process->thread_count = 0;
     new_process->current_thread = NULL;
     new_process->nice = 0xA;
@@ -1050,7 +1050,7 @@ status_t process_execve(thread_t * thread, cpu_context_t * ctx, char * filename,
     kfree(process->auxv);
     create_args(process, argv, envp, &elf->auxv, &elf->auxv_size);
 
-    process->binary_entry = (void *)elf->ehdr->e_entry;
+    process->binary_entry = loader_get_binentry(elf);
     process->main_thread = thread;
     process->current_thread = thread;
     process->threads[0] = thread;
