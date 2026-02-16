@@ -1,0 +1,20 @@
+packages:
+  - name: kernel
+    architecture: '@OPTION:arch@'
+    tools_required:
+      - host-gcc
+      - host-binutils
+    source:
+      subdir: '.'
+    build:
+      - args: 
+        - 'make'
+        - '-C'
+        - '@THIS_SOURCE_DIR@/'
+        - 'all'
+        - "RAMDISK=@SYSROOT_DIR@/../build/ramdisk.img"
+        environ:
+          CC: "@OPTION:cc@"
+          CXX: "@OPTION:cxx@"
+          LD: "@OPTION:ld@"
+          ASMC: "@OPTION:asmc@"

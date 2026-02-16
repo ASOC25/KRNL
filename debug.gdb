@@ -4,7 +4,7 @@ target remote :1234
 set mem inaccessible-by-default off
 set disassembly-flavor intel
 set remotetimeout 999
-add-symbol-file /home/tretorn/KRNL/ramdisk/sym/init.elf.sym
+add-symbol-file /home/tretorn/KRNL/sysroot/init.sym
 define hook-stop
   x/10ig $rip
 end

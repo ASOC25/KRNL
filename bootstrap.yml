@@ -1,8 +1,8 @@
 general:
-    patch_author: Krnl Osdev
+    patch_author: ASOC
 
 directories:
-    system_root: 'ramdisk'
+    system_root: 'sysroot'
 
 declare_options:
   - name: "arch"
@@ -23,7 +23,8 @@ declare_options:
     default: "nasm"
 
 imports:
-  - file: bootstrap/sys-libs.yml
-  - file: bootstrap/sys-apps.yml
-  - file: bootstrap/sys-tools.yml
-  - file: bootstrap/sys-modules.yml
+  - file: env/bootstrap/sys-libs.yml
+  - file: env/bootstrap/sys-apps.yml
+  - file: env/bootstrap/sys-kernel.yml
+  - file: env/bootstrap/sys-tools.yml
+  - file: env/bootstrap/sys-modules.yml
