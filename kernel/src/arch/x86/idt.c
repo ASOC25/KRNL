@@ -84,8 +84,31 @@ void tracestacktrace(unsigned int max_frames)
 void exception(cpu_context_t * ctx) {
     //Print cr2 , offending address
     uint64_t cr2;
-    tracestacktrace(10);
     __asm__ volatile("mov %%cr2, %0" : "=r"(cr2));
+    thread_t * current_thread = (thread_t *)ctx->ctx_info->thread;
+    if (current_thread) {
+        stack_t * ustack = current_thread->ustack;
+        if (!ustack) {
+            panic("CPU EXCEPTION: %d | CR2: 0x%llx | No user stack", ctx->interrupt_number, cr2);
+        }
+        uint64_t ustack_size = ustack->top - ustack->base;
+        uint64_t offset = 0x1000; 
+        //Check if the cr2 is near the user stack
+        if (cr2 >= (uint64_t)ustack->base - offset && cr2 < (uint64_t)ustack->base + ustack_size + offset) {
+            //Check if the stack has been overflowed or underflowed
+            if (cr2 < (uint64_t)ustack->base) {
+                panic("CPU EXCEPTION: %d | CR2: 0x%llx | Stack overflow (ustack->base: 0x%llx)", ctx->interrupt_number, cr2, ustack->base);
+            } else if (cr2 >= (uint64_t)ustack->base + ustack_size) {
+                panic("CPU EXCEPTION: %d | CR2: 0x%llx | Stack underflow (ustack->top: 0x%llx)", ctx->interrupt_number, cr2, ustack->top);
+            } else {
+                panic("CPU EXCEPTION: %d | CR2: 0x%llx | Stack access violation", ctx->interrupt_number, cr2);
+            }
+        } else {
+            panic("CPU EXCEPTION: %d | CR2: 0x%llx", ctx->interrupt_number, cr2);
+        }
+    }
+    tracestacktrace(10);
+    
     panic("CPU EXCEPTION: %d | Stacktrace (CR2: 0x%llx):", ctx->interrupt_number, cr2);
 }
 

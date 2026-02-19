@@ -37,13 +37,18 @@ if [ "$1" = "--build" ]; then
                 if [ -f "$elf" ]; then
                     echo "Copying $elf to sysroot/$(basename "$elf")..."
                     cp "$elf" "sysroot/$(basename "$elf")"
-                    echo "Extracting symbols from $elf to sysroot/$(basename "$elf" .elf).sym..."
-                    #Extract symbols from the .elf file and save them to sysroot/(name).sym
-                    objcopy --only-keep-debug "$elf" "sysroot/$(basename "$elf" .elf).sym"
                 fi
             done
         fi
     done
+    echo "Copying symbols for each binary in sysroot..."
+    #Generate symbols for each file in sysroot with extension .elf and .so, do it recursively
+    #Place the symbol file in the same path as the binary, with the same name but with extension .sym
+    find sysroot/ -type f \( -name "*.elf" -o -name "*.so" \) | while read -r file; do
+        echo "Generating symbols for $file..."
+        objcopy --only-keep-debug "$file" "${file%.elf}.sym"
+    done
+    
     echo "Bundling ramdisk..."
     #If build does not exist, create it
     if [ ! -d "build" ]; then

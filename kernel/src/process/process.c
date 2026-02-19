@@ -52,7 +52,7 @@ int process_allocate_fd_slot(process_t *proc) {
     return slot;
 }
 
-void create_args(process_t * process, char ** argv, char ** envp, struct auxv ** out_auxv, uint64_t * out_auxv_size) {
+void duplicate_args(process_t * process, char ** argv, char ** envp, struct auxv ** out_auxv, uint64_t * out_auxv_size) {
     //Allocate and build in new buffers
 
     //Copy argv
@@ -807,7 +807,7 @@ process_t * process_fork(process_t * parent, thread_t * forking_thread) {
         child->signal_queue[i] = NULL;
     }
 
-    create_args(child, (char **)parent->argv, (char **)parent->envp, &parent->auxv, &parent->auxv_size);
+    duplicate_args(child, (char **)parent->argv, (char **)parent->envp, &parent->auxv, &parent->auxv_size);
     child->threads[0]->context->cpu_ctx.rax = 0; // Child process gets 0 return value from fork
 
     return child;
@@ -1048,7 +1048,7 @@ status_t process_execve(thread_t * thread, cpu_context_t * ctx, char * filename,
     kfree(process->argv);
     kfree(process->envp);
     kfree(process->auxv);
-    create_args(process, argv, envp, &elf->auxv, &elf->auxv_size);
+    duplicate_args(process, argv, envp, &elf->auxv, &elf->auxv_size);
 
     process->binary_entry = elf->entry;
     process->main_thread = thread;

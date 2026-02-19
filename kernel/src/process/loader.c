@@ -328,59 +328,59 @@ status_t allocate_segment(process_t* process, uint8_t * elf_datab, Elf64_Phdr * 
 }
 
 //Load dynamic linker at DYNAMIC_LINKER_BASE
-status_t load_dynamic_linker(process_t* process, char* dynamic_linker_path) {
+uint64_t load_dynamic_linker(process_t* process, char* dynamic_linker_path) {
     vfs_file_descriptor_t fd;
     status_t st = vfs_open(dynamic_linker_path, 0, &fd);
     if(st != SUCCESS || !fd.valid) {
-        return FAILURE;
+        return 0;
     }
     vfs_stat_t stat_buf;
     if (vfs_fstat(&fd, &stat_buf) != SUCCESS) {
         vfs_close(&fd);
-        return FAILURE;
+        return 0;
     }
 
     size_t file_size = stat_buf.st_size;
     uint8_t * elf_datab = (uint8_t *)kmalloc(file_size);
     if (!elf_datab) {
         vfs_close(&fd);
-        return FAILURE;
+        return 0;
     }
 
     ssize_t bytes_read = vfs_read(&fd, elf_datab, file_size);
     if ((size_t)bytes_read != file_size) {
         kfree(elf_datab);
         vfs_close(&fd);
-        return FAILURE;
+        return 0;
     }
 
     vfs_close(&fd);
 
     if (parse_elf_file(elf_datab) != SUCCESS) {
         kfree(elf_datab);
-        return FAILURE;
+        return 0;
     }
 
     Elf64_Ehdr * elf_header = (Elf64_Ehdr *)elf_datab;
     if (elf_header->e_ident[EI_CLASS] != ELFCLASS64) {
         kfree(elf_datab);
-        return FAILURE;
+        return 0;
     }
     
     if (elf_header->e_type != ET_DYN) {
         kfree(elf_datab);
-        return FAILURE;
+        return 0;
     }
 
     for (int i = 0; i < elf_header->e_phnum; i++) {
         Elf64_Phdr * program_header = (Elf64_Phdr *)(elf_datab + elf_header->e_phoff + i * elf_header->e_phentsize);
         if (allocate_segment(process, elf_datab, program_header, (void *)DYNAMIC_LINKER_BASE_ADDRESS) != SUCCESS) {
             kfree(elf_datab);
-            return FAILURE;
+            return 0;
         }
     }
     kfree(elf_datab);
-    return SUCCESS;
+    return (uint64_t)DYNAMIC_LINKER_BASE_ADDRESS+elf_header->e_entry;
 }
 
 loaded_elf_t* elf_load_elf(process_t * process, const char * filename, thread_t* thread) {
@@ -421,7 +421,7 @@ loaded_elf_t* elf_load_elf(process_t * process, const char * filename, thread_t*
 
     Elf64_Ehdr * elf_header = (Elf64_Ehdr *)elf_datab;
     if (elf_header->e_ident[EI_CLASS] != ELFCLASS64) {
-        //panic("elf_load_elf: Only ELF64 files are supported\n");
+        panic("elf_load_elf: Only ELF64 files are supported\n");
         kfree(elf_datab);
         return NULL;
     }
@@ -515,21 +515,24 @@ loaded_elf_t* elf_load_elf(process_t * process, const char * filename, thread_t*
     loaded_elf_t * ld = kmalloc(sizeof(loaded_elf_t));
     if (!ld) {
         panic("Could not allocate loaded elf\n");
+        kfree(elf_datab);
+        kfree(vectors);
+        kfree(ld);
         return NULL;
     }
     memset(ld, 0, sizeof(loaded_elf_t));
 
     if (pld.ld_path) {
-        status_t dyn_st = load_dynamic_linker(process, pld.ld_path);
-        if (dyn_st != SUCCESS) {
+        ld->entry = load_dynamic_linker(process, pld.ld_path);
+        if (ld->entry == 0) {
             panic("elf_load_elf: Failed to load dynamic linker\n");
             kfree(elf_datab);
             kfree(vectors);
+            kfree(ld);
             return NULL;
         }
-        ld->entry = (uint64_t)DYNAMIC_LINKER_BASE_ADDRESS + (elf_header->e_entry);
     } else {
-        ld->entry = (uint64_t)elf_header->e_entry;
+        ld->entry = (void*)elf_header->e_entry;
     }
 
     memset(vectors, 0, sizeof(struct auxv) * 7);

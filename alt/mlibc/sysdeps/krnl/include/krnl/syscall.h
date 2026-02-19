@@ -8,53 +8,74 @@
 using sc_word_t = long;
 
 /* list */
-#define SYS_COUNT               32
+#define SYS_COUNT               54
+
 #define SYS_FILE_READ           0
 #define SYS_FILE_WRITE          1
 #define SYS_FILE_OPEN           2
 #define SYS_FILE_CLOSE          3
 #define SYS_PATH_STAT           4
 #define SYS_FD_STAT             5
-#define SYS_FILE_SEEK           8
+
+#define SYS_FILE_SEEK           6
+#define SYS_FILE_IOCTL          7
+#define SYS_EXIT                8
 #define SYS_MMAP                9
-#define SYS_MPROTECT            10
-#define SYS_MUNMAP              11
-#define SYS_SIGACTION           13
-#define SYS_SIGPROCMASK         14
-#define SYS_SIGRETURN           15
-#define SYS_FILE_IOCTL          16
-#define SYS_FILE_PREAD          17
-#define SYS_DUP                 32
-#define SYS_DUP2                33
-#define SYS_NANOSLEEP           35
-#define SYS_GETPID              39
-#define SYS_FORK                57
-#define SYS_EXECVE              59
-#define SYS_EXIT                60
-#define SYS_WAITPID             61
-#define SYS_KILL                62
-#define SYS_FCNTL               72
-#define SYS_GETCWD              79
-#define SYS_CHDIR               80
-#define SYS_RENAME              82
-#define SYS_MKDIR               83
-#define SYS_RMDIR               84
-#define SYS_CREAT               85
-#define SYS_GETPPID             110
-#define SYS_ARCH_PRCTL          158
-#define SYS_GET_TID             186
-#define SYS_CLOCK_GET           228
-#define SYS_CLOCK_GETRES        229
-#define SYS_UNLINKAT            263
-#define SYS_RENAMEAT            264
-#define SYS_PSELECT             270
-#define SYS_STATX               332
-#define SYS_THREAD_EXIT         336
-#define SYS_LOG                 337
-#define SYS_FUTEX_WAIT          338
-#define SYS_FUTEX_WAKE          339
-#define SYS_DIR_OPEN            340
-#define SYS_DIR_READ            341
+#define SYS_MUNMAP              10
+
+
+#define SYS_MPROTECT            11
+#define SYS_YIELD               12
+#define SYS_FILE_PREAD          13
+#define SYS_FILE_TELL           14
+#define SYS_FORK                15
+
+#define SYS_EXECVE              16
+#define SYS_WAITPID             17
+#define SYS_GETPID              18
+#define SYS_NANOSLEEP           19
+#define SYS_SETGID              20
+
+#define SYS_DUP                 21
+#define SYS_DUP2                22
+#define SYS_CHDIR               23
+#define SYS_GETCWD              24
+#define SYS_GETPPID             25
+
+#define SYS_GET_TID             26
+#define SYS_THREAD_EXIT         27
+#define SYS_FUTEX_WAIT          28
+#define SYS_FUTEX_WAKE          29
+#define SYS_DIR_OPEN            30
+
+#define SYS_DIR_READ            31
+#define SYS_CLOCK_SET           32
+#define SYS_CLOCK_GET           33
+#define SYS_CLOCK_GETRES        34
+#define SYS_GETTIMEOFDAY        35
+
+#define SYS_KILL                36
+#define SYS_FCNTL               37
+#define SYS_RENAME              38
+#define SYS_MKDIR               39
+#define SYS_CREAT               40
+
+#define SYS_ARCH_PRCTL          41
+#define SYS_FCHOWNAT            42
+#define SYS_UNLINKAT            43
+#define SYS_RENAMEAT            44
+#define SYS_PSELECT             45
+
+#define SYS_STATX               46
+#define SYS_DEBUG               47
+//define SYS_KILL 48
+#define SYS_SIGRETURN           49
+#define SYS_SIGACTION           50
+#define SYS_SIGPROCMASK           51
+#define SYS_RMDIR               52
+
+#define SYS_LOG               53
+
 
 /* extern functions */
 sc_word_t do_syscall0(long sc);

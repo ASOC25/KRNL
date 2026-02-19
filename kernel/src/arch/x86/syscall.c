@@ -22,6 +22,13 @@
 
 typedef int64_t (*syscall_handler_t)(thread_t * thread, cpu_context_t * context);
 
+int64_t syscall_log(thread_t*thread, cpu_context_t* ctx) {
+    (void)thread; // Unused
+    char * message = (char *)SYSCALL_ARG0(ctx);
+    kprintf("[SYSCALL LOG] %s\n", message);
+    return 0;
+}
+
 int64_t syscall_read(thread_t * thread, cpu_context_t * context) {
     int fd = (int)SYSCALL_ARG0(context);
     void *buf = (void *)SYSCALL_ARG1(context);
@@ -683,6 +690,20 @@ int64_t syscall_sigaction(thread_t * thread, cpu_context_t * context) {
     return (process_sigaction(proc, signum, act, oldact) == SUCCESS) ? 0 : -EINVAL;
 }
 
+int64_t syscall_sigprocmask(thread_t * thread, cpu_context_t * context) {
+    (void)thread;
+    (void)context;
+    kprintf("UNIMPLEMENTED: syscall_sigprocmask\n");
+    return -ENOSYS;
+}
+
+int64_t syscall_rmdir(thread_t * thread, cpu_context_t * context) {
+    (void)thread;
+    (void)context;
+    kprintf("UNIMPLEMENTED: syscall_rmdir\n");
+    return -ENOSYS;
+}
+
 static syscall_handler_t handlers[SYS_COUNT] = { 
     syscall_read, //0
     syscall_write,
@@ -734,7 +755,10 @@ static syscall_handler_t handlers[SYS_COUNT] = {
     syscall_debug,
     syscall_kill,
     syscall_sigret, //49
-    syscall_sigaction //50
+    syscall_sigaction, //50
+    syscall_sigprocmask,
+    syscall_rmdir,
+    syscall_log, //53
 };
 
 void syscall_handler(cpu_context_t * context) {

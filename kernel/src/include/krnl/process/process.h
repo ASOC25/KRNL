@@ -11,7 +11,7 @@
 #include <krnl/mem/allocator.h>
 #include <krnl/process/sigstructs.h>
 
-#define NEW_PROCESS_STACK_SIZE 0x4000 //16KB
+#define NEW_PROCESS_STACK_SIZE 0x4000000 //64MB
 #define MAX_THREADS_PER_PROCESS 16
 #define MAX_OPEN_FILES 32
 #define INIT_PROCESS_PARENT_CODE (process_t *)0xFFFFFFFFFFFFFFFF
