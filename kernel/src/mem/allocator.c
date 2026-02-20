@@ -317,12 +317,16 @@ void * malloc(vmm_root_t * root, uint64_t size, uint64_t vaddr, uint8_t flags) {
     return (void*)vaddr;
 }
 
-stack_t * stackalloc(vmm_root_t * root, uint64_t size, uint64_t vaddr, uint8_t flags) {
+stack_t * stackalloc(vmm_root_t * root, uint64_t size, uint64_t vaddr, uint8_t flags, uint8_t unique) {
     
     uint64_t pages = (size + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE;
     void * phys_addr = pmm_alloc_pages(pages);
     if (phys_addr == NULL) {
         panic("stackalloc: Failed to allocate physical memory");
+    }
+
+    if (!unique) {
+        vaddr += phys_addr;
     }
 
     status_t st = vmm_map_pages(
@@ -347,10 +351,6 @@ stack_t * stackalloc(vmm_root_t * root, uint64_t size, uint64_t vaddr, uint8_t f
         top_address -= top_address % 0x10;
     }
     top_address -= 0x8;
-
-    if (st != SUCCESS) {
-        panic("stackalloc: Failed to map user pages");
-    }
 
     void * identity = (void *)vmm_to_identity_map((uint64_t)phys_addr);
     memset(identity, 0, pages * PMM_PAGE_SIZE);
@@ -411,42 +411,6 @@ void stackfree(vmm_root_t * cr3, stack_t * stack) {
         current = current->next;
     }
     panic("stackfree: Allocation not found for pointer %p\n", stack->base);
-}
-
-stack_t * copy_kstack(vmm_root_t * dest_root, stack_t * source) {
-    uint64_t stack_size = ((uint64_t)source->top - (uint64_t)source->base);
-    uint64_t pages = (stack_size + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE;
-    void * phys_addr = pmm_alloc_pages(pages);
-    if (phys_addr == NULL) {
-        panic("copy_stack: Failed to allocate physical memory");
-    }
-    memcpy((void*)vmm_to_identity_map((uint64_t)phys_addr), source->base, pages * PMM_PAGE_SIZE);
-    //Unmap the old stack if it exists and map it again to the new physical address
-    status_t st = vmm_unmap_pages(
-        dest_root,
-        (uint64_t)source->base,
-        pages,
-        PMM_PAGE_SIZE
-    );
-    if (st != SUCCESS) {
-        panic("copy_stack: Failed to unmap old stack pages");
-    }
-
-    st = vmm_map_pages(
-        dest_root,
-        (uint64_t)source->base,
-        (uint64_t)phys_addr,
-        pages,
-        PMM_PAGE_SIZE,
-        source->flags
-    );
-    if (st != SUCCESS) {
-        panic("copy_stack: Failed to map new stack pages");
-    }
-
-    //add allocation
-    add_allocation(dest_root, phys_addr, (void*)source->base, stack_size, source->flags);
-    return source;
 }
 
 stack_t * copy_stack(vmm_root_t * dest_root, stack_t * source) {

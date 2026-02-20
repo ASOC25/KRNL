@@ -191,6 +191,7 @@ struct apic_context {
 
 void apic_init(void);
 void apic_local_eoi(uint8_t cpu_id);
+uint8_t apic_lapic_vector_in_service(uint8_t cpu_id, uint8_t vector);
 void apic_start_lapic_timer(void);
 uint8_t apic_ioapic_mask(uint8_t irq, uint8_t enable);
 void apic_arm_lapic_timer(uint8_t cpu_id, uint32_t ms);

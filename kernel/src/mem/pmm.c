@@ -128,8 +128,13 @@ void pmm_free_pages(void *addr, uint64_t num_pages) {
 
         // Free the pages (clear bits)
         for (uint64_t p = start_page; p < start_page + num_pages; p++) {
+            //Make sure we are not double freeing
+
             uint64_t byte_index = p >> 3;
             uint8_t  bit_index  = p & 7;
+            if (!(region->locks[byte_index] & (1u << bit_index))) {
+                panic("PMM: Attempted to free already-free page at address %p\n", (void*)(region->start + p * PMM_PAGE_SIZE));
+            }
             region->locks[byte_index] &= ~(1u << bit_index);
         }
 

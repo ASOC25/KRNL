@@ -157,13 +157,15 @@ int scheduler_waitpid(thread_t * caller, int pid, int * status, int options) {
                     //kprintf("WNOHANG option set\n");
                     if (iterated_process->state == SCHEDULER_STATUS_ZOMBIE) {
                         //kprintf("scheduler_waitpid WNOHANG: Reaping process %d for caller %d\n", iterated_process->pid, caller_process->pid);
-                        //Reap process
+                        //Reap process — save PID before destroy to avoid use-after-free (BUG-25)
+                        pid_t reaped_pid = iterated_process->pid;
                         if (status) {
                             *status = generate_status(WREASON_EXIT, iterated_process->exit_code);
                         }
                         process_destroy(iterated_process);
+                        changed_pid = reaped_pid;  // only set when a zombie was actually reaped (BUG-24)
                     }
-                    changed_pid = iterated_process->pid;
+                    // If not a zombie, changed_pid stays 0 — POSIX requires returning 0 for WNOHANG
                 } else if ((options & WUNTRACED) && iterated_process->state == SCHEDULER_STATUS_STOPPED) {
                     //kprintf("scheduler_waitpid: Process %d is stopped for caller %d\n", iterated_process->pid, caller_process->pid);
                     if (status) {
@@ -184,8 +186,9 @@ int scheduler_waitpid(thread_t * caller, int pid, int * status, int options) {
                         if (status) {
                             *status = generate_status(WREASON_EXIT, iterated_process->exit_code);
                         }
+                        pid_t reaped_pid = iterated_process->pid;
                         process_destroy(iterated_process);
-                        changed_pid = iterated_process->pid;
+                        changed_pid = reaped_pid;
                     }
                 }
             }
@@ -193,8 +196,12 @@ int scheduler_waitpid(thread_t * caller, int pid, int * status, int options) {
             //kprintf("scheduler_waitpid: Moving to next process in scheduler queue\n");
         }
         if (!found_one) return -ECHILD;
-        //No matching exited process found, sleep the caller thread
-        if (!changed_pid) sleep(caller, SIGNAL_WAITPID);
+        //No matching exited process found
+        if (!changed_pid) {
+            //WNOHANG: POSIX requires returning 0 when no child has changed state (BUG-24)
+            if (options & WNOHANG) return 0;
+            sleep(caller, SIGNAL_WAITPID);
+        }
         //kprintf("Moving on to next iteration of waitpid loop\n");
     }
     //kprintf("scheduler_waitpid: Returning changed_pid %d\n", changed_pid);
@@ -344,7 +351,7 @@ void dump_scheduler_status() {
 }
 
 void scheduler_sigreturn(cpu_context_t* ctx, thread_t * thread) {
-    if (thread->scontext) panic("scheduler_sigreturn: thread still has a signal context");
+    //if (thread->scontext) panic("scheduler_sigreturn: thread still has a signal context");
     if (thread->kcontext_pending) {
         //kprintf("scheduler_sigreturn: Restoring KERNEL context for thread %p\n", thread);
         context_restore(thread->kcontext, ctx);

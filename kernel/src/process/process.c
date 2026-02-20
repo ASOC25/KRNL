@@ -340,7 +340,7 @@ status_t process_create_scontext(thread_t * thread, signal_t * signal) {
 
     new_scontext->signal = signal;
     new_scontext->context = sig_ctx;
-    new_scontext->stack = stackalloc(process->vmm, thread->stack_size, VMM_REGION_S_STACK - thread->stack_size, VMM_WRITE_BIT | VMM_USER_BIT);
+    new_scontext->stack = stackalloc(process->vmm, thread->stack_size, VMM_REGION_S_STACK_INI, VMM_WRITE_BIT | VMM_USER_BIT, 0);
     new_scontext->kstack = kstackalloc(process->vmm, KERNEL_STACK_SIZE);
     if (!new_scontext->stack || !new_scontext->kstack) {
         panic("process_create_scontext: Failed to allocate signal stack");
@@ -984,13 +984,7 @@ thread_t * process_create_thread(process_t * process, void * entry_point) {
         return NULL;
     }
 
-    new_thread->ustack = kmalloc(sizeof(stack_t));
-    if (!new_thread->ustack) {
-        panic("process_create_thread: Failed to allocate user stack structure");
-        return NULL;
-    }
-    memset(new_thread->ustack, 0, sizeof(stack_t));
-    new_thread->ustack = stackalloc(process->vmm, new_thread->stack_size, VMM_REGION_U_STACK - new_thread->stack_size, VMM_WRITE_BIT | VMM_USER_BIT);
+    new_thread->ustack = stackalloc(process->vmm, new_thread->stack_size, VMM_REGION_U_STACK - new_thread->stack_size, VMM_WRITE_BIT | VMM_USER_BIT, 1);
     if (new_thread->ustack == NULL) {
         panic("process_create_thread: Failed to allocate user stack");
         return NULL;
@@ -1042,11 +1036,22 @@ status_t process_execve(thread_t * thread, cpu_context_t * ctx, char * filename,
 
     //Empty signal handlers
     for (int i = 0; i < NSIG; i++) {
-        process->signal_actions[i] = 0x0;
+        if (process->signal_actions[i]) {
+            kfree(process->signal_actions[i]);
+            process->signal_actions[i] = NULL;
+        }
     }
 
-    kfree(process->argv);
-    kfree(process->envp);
+    if (process->argv) {
+        for (int i = 0; process->argv[i] != NULL; i++)
+            kfree(process->argv[i]);
+        kfree(process->argv);
+    }
+    if (process->envp) {
+        for (int i = 0; process->envp[i] != NULL; i++)
+            kfree(process->envp[i]);
+        kfree(process->envp);
+    }
     kfree(process->auxv);
     duplicate_args(process, argv, envp, &elf->auxv, &elf->auxv_size);
 
@@ -1094,10 +1099,12 @@ status_t process_destroy(process_t * process) {
         return FAILURE;
     }
 
-    for (int i = 0; i < process->thread_count; i++) {
-        //kprintf("process_destroy: Destroying thread %d of process %d\n", i, process->pid);
-        process_destroy_thread(process, process->threads[i]);
-        process->threads[i] = NULL;
+    for (int i = 0; i < MAX_THREADS_PER_PROCESS; i++) {
+        if (process->threads[i]) {
+            //kprintf("process_destroy: Destroying thread %d of process %d\n", i, process->pid);
+            process_destroy_thread(process, process->threads[i]);
+            process->threads[i] = NULL;
+        }
     }
 
     //kprintf("process_destroy: Removing all VM areas for process %d\n", process->pid);
@@ -1116,8 +1123,9 @@ status_t process_exit(process_t * process, int code) {
 
     process_set_exit_code(process, code);
     //Change all threads to ZOMBIE
-    for (int i = 0; i < process->thread_count; i++) {
-        process->threads[i]->state = SCHEDULER_STATUS_ZOMBIE;
+    for (int i = 0; i < MAX_THREADS_PER_PROCESS; i++) {
+        if (process->threads[i])
+            process->threads[i]->state = SCHEDULER_STATUS_ZOMBIE;
     }
     process->state = SCHEDULER_STATUS_ZOMBIE;
     wakeup(SIGNAL_WAITPID);
@@ -1177,6 +1185,18 @@ int process_dup(process_t * process, int old_fd, int new_fd) {
             panic("process_dup: new_fd is out of bounds");
             return -1;
         }
+    }
+
+    if (new_fd == old_fd)
+        return new_fd;
+
+    if (process->open_files[new_fd].valid) {
+        vfs_close(&process->open_files[new_fd]);
+        process->open_files[new_fd].mount = NULL;
+        process->open_files[new_fd].native_path = NULL;
+        process->open_files[new_fd].flags = 0;
+        process->open_files[new_fd].position = 0;
+        if (process->open_file_count > 0) process->open_file_count--;
     }
 
     process->open_files[new_fd] = process->open_files[old_fd];

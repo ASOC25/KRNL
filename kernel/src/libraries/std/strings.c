@@ -12,20 +12,21 @@ void *memchr(const void *s, int c, size_t n) {
     }
     return 0;
 }
-void *memmove(void *dest, const void *src, size_t n) {
-
-    //TODO improve this by specification, since this is just a hack
-    uint8_t *d = (uint8_t *)dest;
-    uint8_t *s = (uint8_t *)src;
-    
-    if(d < s) {
-        for(uint64_t i = 0; i < n; i++) {
-            d[i] = s[i];
-            s[i] = 0;
-        }
+void *memmove (void *dest, const void *src, size_t len)
+{
+  char *d = dest;
+  const char *s = src;
+  if (d < s)
+    while (len--)
+      *d++ = *s++;
+  else
+    {
+      char *lasts = s + (len-1);
+      char *lastd = d + (len-1);
+      while (len--)
+        *lastd-- = *lasts--;
     }
-    
-    return dest;
+  return dest;
 }
 void *strcat(char *dest, const char *src) {
     char *dest_start = dest;

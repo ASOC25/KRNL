@@ -300,3 +300,18 @@ void apic_local_eoi(uint8_t cpu_id) {
     assert(actx.lapic_addresses[cpu_id].virtual_address != NULL);
     write_lapic_register(actx.lapic_addresses[cpu_id].virtual_address, LAPIC_EOI, 0);
 }
+
+// The LAPIC In-Service Register (ISR) is eight 32-bit registers at offsets
+// 0x100..0x170.  Each covers 32 vectors: register index = vector/32,
+// offset = 0x100 + index*0x10, bit = vector%32.
+// Returns 1 if the given vector is currently being serviced by this LAPIC
+// (i.e. it arrived as a hardware interrupt), 0 if not (software int).
+uint8_t apic_lapic_vector_in_service(uint8_t cpu_id, uint8_t vector) {
+    assert(actx.initialized);
+    assert(cpu_id < actx.lapic_count);
+    uint32_t reg_offset = 0x100 + ((vector / 32) * 0x10);
+    uint32_t bit        = vector % 32;
+    uint32_t isr_val    = read_lapic_register(
+        actx.lapic_addresses[cpu_id].virtual_address, reg_offset);
+    return (uint8_t)((isr_val >> bit) & 1);
+}

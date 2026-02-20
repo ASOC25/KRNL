@@ -177,9 +177,15 @@ void * loader_create_args(void * stack, uint64_t max_size, char ** argv, char **
     int envc = 0; if (envp != NULL) {while (envp[envc] != NULL) envc++;} else envc = 0;
     int auxc = 0; if (auxv != NULL) {while (auxv[auxc].a_type != AT_NULL) auxc++;} else auxc = 0;
 
-    uint64_t argv_pointers[argc];
-    uint64_t envp_pointers[envc];
-    uint64_t ptr_buffer[0x4000];
+    uint64_t * argv_pointers = (uint64_t *)kmalloc((argc + 1) * sizeof(uint64_t));
+    uint64_t * envp_pointers = (uint64_t *)kmalloc((envc + 1) * sizeof(uint64_t));
+    uint64_t * ptr_buffer    = (uint64_t *)kmalloc(max_size);
+    if (!argv_pointers || !envp_pointers || !ptr_buffer) {
+        kfree(argv_pointers);
+        kfree(envp_pointers);
+        kfree(ptr_buffer);
+        panic("loader_create_args: Failed to allocate staging buffers");
+    }
     uint64_t * ptr = ptr_buffer;
     uint64_t original_addr = (uint64_t)ptr;
     kprintf("Argc at address: %p, value: %d\n", (void *)ptr, argc);
@@ -254,6 +260,9 @@ void * loader_create_args(void * stack, uint64_t max_size, char ** argv, char **
         }
     }
     
+    kfree(argv_pointers);
+    kfree(envp_pointers);
+    kfree(ptr_buffer);
     return stack - size;
 }
 
@@ -379,8 +388,9 @@ uint64_t load_dynamic_linker(process_t* process, char* dynamic_linker_path) {
             return 0;
         }
     }
+    uint64_t entry_point = (uint64_t)elf_header->e_entry+DYNAMIC_LINKER_BASE_ADDRESS;
     kfree(elf_datab);
-    return (uint64_t)DYNAMIC_LINKER_BASE_ADDRESS+elf_header->e_entry;
+    return entry_point;
 }
 
 loaded_elf_t* elf_load_elf(process_t * process, const char * filename, thread_t* thread) {
@@ -505,7 +515,7 @@ loaded_elf_t* elf_load_elf(process_t * process, const char * filename, thread_t*
         return NULL;
     }
 
-    struct auxv * vectors = kmalloc(sizeof(struct auxv) * 7);
+    struct auxv * vectors = kmalloc(sizeof(struct auxv) * 8);
     if (!vectors) {
         panic("elf_load_elf: Failed to allocate memory for auxiliary vectors\n");
         kfree(elf_datab);

@@ -13,6 +13,7 @@ typedef struct snode {
     struct timespec rem;
 
     uint64_t elapsed_nanos;
+    uint8_t is_timed;   /* 1 → sleeping_threads list, 0 → waiting_threads list */
 
     struct snode * next;
     struct snode * prev;
@@ -49,6 +50,7 @@ void new(int id, thread_t * thread, struct timespec *duration, struct timespec *
 
     //If duration is not zero add to sleeping threads list
     if (new_node->duration.tv_sec != 0 || new_node->duration.tv_nsec != 0) {
+        new_node->is_timed = 1;
         if (!sleeping_threads_head) {
             sleeping_threads_head = new_node;
         } else {
@@ -61,6 +63,7 @@ void new(int id, thread_t * thread, struct timespec *duration, struct timespec *
         }
         hpet_enable();
     } else {
+        new_node->is_timed = 0;
         if (!waiting_threads_head) {
             waiting_threads_head = new_node;
         } else {
@@ -80,7 +83,7 @@ void remove(sleeping_thread_t * node) {
     if (node->prev) {
         node->prev->next = node->next;
     } else {
-        if (node->duration.tv_sec != 0 || node->duration.tv_nsec != 0)
+        if (node->is_timed)
             sleeping_threads_head = node->next;
         else
             waiting_threads_head = node->next;
@@ -132,15 +135,25 @@ void sleep(thread_t * thread, int condition) {
 
 int generate_id(thread_t* thread) {
     int current_id = (int)(uintptr_t)thread;
-    sleeping_thread_t * current = sleeping_threads_head;
-    while (current) {
-        if (current->id == current_id) {
-            current_id++;
-            current = sleeping_threads_head;;
-        } else {
+    int start_id = current_id;
+    int collision;
+    do {
+        collision = 0;
+        sleeping_thread_t *current = sleeping_threads_head;
+        while (current) {
+            if (current->id == current_id) {
+                current_id++;
+                if (current_id == start_id) {
+                    /* Full integer wrap-around: all IDs exhausted (unreachable
+                       in practice).  Return whatever we have and move on. */
+                    return current_id;
+                }
+                collision = 1;
+                break;
+            }
             current = current->next;
         }
-    }
+    } while (collision);
     return current_id;
 }
 

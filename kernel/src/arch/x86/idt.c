@@ -122,6 +122,11 @@ void interrupt_handler(cpu_context_t* ctx, uint8_t cpu_id) {
         //Page fault
         uint64_t cr2;
         __asm__ volatile("mov %%cr2, %0" : "=r"(cr2));
+        // Bit 2 of the page fault error code (U/S) is 0 for supervisor-mode
+        // faults. A kernel-mode fault is never a user-space COW fault.
+        if (!(ctx->error_code & 0x4)) {
+            exception(ctx);
+        }
         process_t * current_process = 0x0;
         thread_t *  current_thread = (thread_t *)ctx->ctx_info->thread;
         if (current_thread) {
@@ -143,10 +148,22 @@ void interrupt_handler(cpu_context_t* ctx, uint8_t cpu_id) {
         //last_us = current_us;
         update_counters();
     } else if (ctx->interrupt_number == INT_SCHEDULE_APIC_TIMER) {
+        // Send EOI *before* the context switch so it is never bypassed by a
+        // thread that never returns here.  Only send it when the LAPIC ISR
+        // actually has this vector in service (i.e. a real hardware timer
+        // interrupt); skip the EOI for software int $0x40 (e.g. syscall_exit)
+        // to avoid spuriously acknowledging an unrelated in-service interrupt.
+        if (apic_lapic_vector_in_service(cpu_id, INT_SCHEDULE_APIC_TIMER)) {
+            apic_local_eoi(cpu_id);
+        }
         scheduler_handler(ctx, cpu_id, SCHEDULER_USER_CONTEXT, 1);
+        return;
     } else if (ctx->interrupt_number == SIGNAL_SLEEP_INTERRUPT) {
-        //kprintf("Sleep signal on CPU %d\n", cpu_id);
+        if (apic_lapic_vector_in_service(cpu_id, SIGNAL_SLEEP_INTERRUPT)) {
+            apic_local_eoi(cpu_id);
+        }
         scheduler_handler(ctx, cpu_id, SCHEDULER_KERNEL_CONTEXT, 1);
+        return;
     } else if (ctx->interrupt_number < 32) {
         exception(ctx);
     } else {

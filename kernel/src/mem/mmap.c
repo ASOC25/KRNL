@@ -122,19 +122,30 @@ status_t vmarea_try_cow(process_t * process, void * address) {
         return FAILURE;
     }
 
-    uint64_t original_physical;
-    status_t st = vmm_get_physical_address((vmm_root_t *)process->vmm, (uint64_t)vma->start, &original_physical);
-    if (st != SUCCESS) {
-        panic("vmarea_try_cow: Failed to get original physical address");
+    uint64_t num_pages = (vma->size + vma->page_size - 1) / vma->page_size;
+
+    // Save physical addresses of ALL pages before unmapping any of them
+    uint64_t * phys_addrs = (uint64_t *)kmalloc(num_pages * sizeof(uint64_t));
+    if (!phys_addrs) {
+        panic("vmarea_try_cow: Failed to allocate physical address array");
     }
-    
-    st = vmm_unmap_pages(
+    for (uint64_t i = 0; i < num_pages; i++) {
+        uint64_t vaddr = (uint64_t)vma->start + i * vma->page_size;
+        status_t st = vmm_get_physical_address((vmm_root_t *)process->vmm, vaddr, &phys_addrs[i]);
+        if (st != SUCCESS) {
+            kfree(phys_addrs);
+            panic("vmarea_try_cow: Failed to get physical address for page %llu", i);
+        }
+    }
+
+    status_t st = vmm_unmap_pages(
         (vmm_root_t *)process->vmm,
         (uint64_t)vma->start,
-        (vma->size + vma->page_size - 1) / vma->page_size,
+        num_pages,
         vma->page_size
     );
     if (st != SUCCESS) {
+        kfree(phys_addrs);
         panic("vmarea_try_cow: Failed to unmap original pages");
     }
 
@@ -144,13 +155,28 @@ status_t vmarea_try_cow(process_t * process, void * address) {
         (uint64_t)vma->start,
         VMM_USER_BIT | ((vma->prot & PROT_WRITE) ? VMM_WRITE_BIT : 0) | ((!(vma->prot & PROT_EXEC)) ? VMM_NX_BIT : 0)
     );
-
     if (ptr == NULL) {
-        panic("vmarea_try_cow: Failed to allocate new page for copy-on-write");
+        kfree(phys_addrs);
+        panic("vmarea_try_cow: Failed to allocate new pages for copy-on-write");
     }
-    
-    //Copy the data from the original physical page to the new page
-    memcpy(ptr, (void *)vmm_to_identity_map(original_physical), vma->size);
+
+    // Copy each page from its original physical address to the new physical address
+    for (uint64_t i = 0; i < num_pages; i++) {
+        uint64_t new_phys;
+        uint64_t new_vaddr = (uint64_t)vma->start + i * vma->page_size;
+        st = vmm_get_physical_address((vmm_root_t *)process->vmm, new_vaddr, &new_phys);
+        if (st != SUCCESS) {
+            kfree(phys_addrs);
+            panic("vmarea_try_cow: Failed to get new physical address for page %llu", i);
+        }
+        memcpy(
+            (void *)vmm_to_identity_map(new_phys),
+            (void *)vmm_to_identity_map(phys_addrs[i]),
+            vma->page_size
+        );
+    }
+
+    kfree(phys_addrs);
     vma->cow = 0; //No longer copy-on-write
     return SUCCESS;
 }
@@ -279,7 +305,7 @@ status_t vmarea_mprotect(process_t * process, void * address, uint64_t size, uin
         }
         current = current->next;
     }
-    return FAILURE;
+    return SUCCESS;
 }
 
 void * vmarea_mmap(process_t * process, void * addr, uint64_t length, uint8_t prot, uint8_t flags, int fd, uint64_t offset, uint8_t force) {
@@ -355,10 +381,10 @@ status_t vmarea_munmap(process_t * process, void * address) {
     }
 
     //Unmap with kfree_userland
-    free(process->vmm, address);
+    free(process->vmm, vma->start);
 
     //Remove vm area
-    status_t st = vmarea_remove_locked(process, address);
+    status_t st = vmarea_remove_locked(process, vma->start);
     if (st != SUCCESS) {
         return st;
     }
