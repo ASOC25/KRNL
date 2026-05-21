@@ -21,7 +21,7 @@ void *memmove (void *dest, const void *src, size_t len)
       *d++ = *s++;
   else
     {
-      char *lasts = s + (len-1);
+      const char *lasts = s + (len-1);
       char *lastd = d + (len-1);
       while (len--)
         *lastd-- = *lasts--;
@@ -187,9 +187,7 @@ uint64_t atou64(const char *nptr) {
         nptr += 2;
     }
 
-    while (!isdigit(*nptr)) {
-        nptr++;
-    }
+    /* BUG-51 fix: do NOT skip non-decimal chars here; hex digits A-F are valid */
 
     uint64_t result = 0;
     uint64_t multiplier = 1;
@@ -330,13 +328,21 @@ char *strcpy(char *dest, const char *src) {
 }
 
 void strncpy(char *dest, const char *src, uint64_t n) {
+    if (n == 0) return;
     uint64_t i = 0;
-    if (strlen(src) < n) {
-        n = strlen(src);
-    }
-    while (i < n && src[i] != '\0') {
-        dest[i] = src[i];
-        i++;
+    uint64_t src_len = strlen(src);
+    if (src_len < n) {
+        /* src fits within n; copy all bytes then null-terminate */
+        while (i < src_len) {
+            dest[i] = src[i];
+            i++;
+        }
+    } else {
+        /* src is >= n bytes; copy n-1 bytes so we can null-terminate (BUG-50) */
+        while (i < n - 1) {
+            dest[i] = src[i];
+            i++;
+        }
     }
     dest[i] = '\0';
 }
@@ -360,12 +366,12 @@ int zerocheck(const void *dest, uint64_t size) {
     return -1;
 }
 
- uint64_t memcmp(const void *dest, const void *src, uint64_t size) {
-    uint8_t *d = (uint8_t *)dest;
-    uint8_t *s = (uint8_t *)src;
+ int memcmp(const void *dest, const void *src, uint64_t size) {
+    const uint8_t *d = (const uint8_t *)dest;
+    const uint8_t *s = (const uint8_t *)src;
     for (uint64_t i = 0; i < size; i++) {
         if (d[i] != s[i]) {
-            return 1;
+            return (int)d[i] - (int)s[i];
         }
     }
     return 0;
@@ -413,10 +419,10 @@ void store16(void* dest, uint16_t value) {
 uint64_t load64(const void* src) {
     uint64_t value = 0;
     const uint8_t* src_ptr = (const uint8_t *)src;
-    value |= *src_ptr++;
-    value |= (*src_ptr++ << 8);
-    value |= (*src_ptr++ << 16);
-    value |= (*src_ptr++ << 24);
+    value |= (uint64_t)*src_ptr++;
+    value |= ((uint64_t)*src_ptr++ << 8);
+    value |= ((uint64_t)*src_ptr++ << 16);
+    value |= ((uint64_t)*src_ptr++ << 24);
     value |= ((uint64_t)*src_ptr++ << 32);
     value |= ((uint64_t)*src_ptr++ << 40);
     value |= ((uint64_t)*src_ptr++ << 48);
@@ -428,9 +434,9 @@ uint64_t load48(const void* src) {
     uint64_t value = 0;
     const uint8_t* src_ptr = (const uint8_t *)src;
     value |= *src_ptr++;
-    value |= (*src_ptr++ << 8);
-    value |= (*src_ptr++ << 16);
-    value |= (*src_ptr++ << 24);
+    value |= ((uint64_t)*src_ptr++ << 8);
+    value |= ((uint64_t)*src_ptr++ << 16);
+    value |= ((uint64_t)*src_ptr++ << 24);
     value |= ((uint64_t)*src_ptr++ << 32);
     value |= ((uint64_t)*src_ptr++ << 40);
     return value;
@@ -440,9 +446,9 @@ uint32_t load32(const void* src) {
 	uint32_t value = 0;
 	const uint8_t* src_ptr = (const uint8_t *)src;
 	value |= *src_ptr++;
-	value |= (*src_ptr++ << 8);
-	value |= (*src_ptr++ << 16);
-	value |= (*src_ptr++ << 24);
+	value |= ((uint32_t)*src_ptr++ << 8);
+	value |= ((uint32_t)*src_ptr++ << 16);
+	value |= ((uint32_t)*src_ptr++ << 24);
 	return value;
 }
 

@@ -4,6 +4,7 @@
 #include <krnl/vfs/vfs.h>
 #include <krnl/libraries/std/errno.h>
 #include <krnl/debug/debug.h>
+#include <krnl/debug/perf.h>
 #include <krnl/mem/mmap.h>
 #include <krnl/mem/allocator.h>
 #include <krnl/libraries/assert/assert.h>
@@ -63,8 +64,8 @@ int64_t syscall_open(thread_t * thread, cpu_context_t * context) {
     }
     vfs_file_descriptor_t newfd;
     status_t st = vfs_open(path, flags, &newfd);
+    if (st == ALREADY_EXISTS) return -EEXIST;
     if (st != SUCCESS || !newfd.valid) {
-        // Unknown reason; default to ENOENT per open(2) common case
         return -ENOENT;
     }
     // Copy into process table slot
@@ -93,9 +94,10 @@ int64_t syscall_close(thread_t * thread, cpu_context_t * context) {
 }
 
 int64_t syscall_stat(thread_t * thread, cpu_context_t * context) {
-    (void)thread; // Unused
+    (void)thread;
     const char *path = (const char *)SYSCALL_ARG0(context);
-    vfs_stat_t *buf = (vfs_stat_t *)SYSCALL_ARG1(context);
+    /* mlibc calls: SYS_PATH_STAT(path, strlen(path), flags, statbuf) */
+    vfs_stat_t *buf = (vfs_stat_t *)SYSCALL_ARG3(context);
     // Open read-only, then fstat and close
     vfs_file_descriptor_t tmp;
     status_t st = vfs_open(path, /*O_RDONLY*/ 0, &tmp);
@@ -110,7 +112,8 @@ int64_t syscall_stat(thread_t * thread, cpu_context_t * context) {
 
 int64_t syscall_fstat(thread_t * thread, cpu_context_t * context) {
     int fd = (int)SYSCALL_ARG0(context);
-    vfs_stat_t *buf = (vfs_stat_t *)SYSCALL_ARG1(context);
+    /* mlibc calls: SYS_FD_STAT(fd, flags, statbuf) */
+    vfs_stat_t *buf = (vfs_stat_t *)SYSCALL_ARG2(context);
     vfs_file_descriptor_t *desc = process_get_fd((process_t *)thread->process, fd);
     if (!desc) {
         return -EBADF;
@@ -180,7 +183,7 @@ int64_t syscall_mmap(thread_t * thread, cpu_context_t * context) {
     if ((uint64_t)addr & 0xFFF) return -EINVAL;
     if (length == 0)return -EINVAL;
     if (length & 0xFFF) length = (length + 0xFFF) & ~0xFFF;
-    if (prot == 0x0) return -EINVAL;
+    /* BUG-35: PROT_NONE (0x0) is valid — do not reject it here */
     if (prot != PROT_NONE && (prot & ~(PROT_READ | PROT_WRITE | PROT_EXEC))) return -EINVAL;
     if (!((flags & MAP_SHARED) ^ (flags & MAP_PRIVATE))) return -EINVAL;
 
@@ -206,9 +209,10 @@ int64_t syscall_mmap(thread_t * thread, cpu_context_t * context) {
     }
 
     //Check unimplemented flags and protections
-    if (flags & MAP_SHARED) panic("syscall_mmap: MAP_SHARED not implemented yet");
-    if (prot & PROT_NONE) panic("syscall_mmap: PROT_NONE not implemented yet");
-    if (!(prot & PROT_READ)) panic("syscall_mmap: PROT_READ must be set, guard pages not implemented yet");
+    /* BUG-36: return ENOSYS instead of panicking for unimplemented features */
+    if (flags & MAP_SHARED) return -ENOSYS;
+    if (prot == PROT_NONE) return -ENOSYS; /* guard pages not yet implemented */
+    if (!(prot & PROT_READ)) return -ENOSYS; /* non-readable mappings not yet implemented */
     uint8_t vmm_flags = VMM_USER_BIT;
     if (prot & PROT_WRITE) vmm_flags |= VMM_WRITE_BIT;
     if (!(prot & PROT_EXEC)) vmm_flags |= VMM_NX_BIT;
@@ -298,17 +302,29 @@ int64_t syscall_schedule_yield(thread_t * thread, cpu_context_t * context) {
 
 int64_t syscall_fork(thread_t * thread, cpu_context_t * context) {
     process_t * parent_proc = (process_t *)thread->process;
-    
+
+    PERF_BEGIN(t_total);
+
     context_save(thread->context, context);
+
+    PERF_BEGIN(t_fork);
     process_t * child_proc = process_fork(parent_proc, thread);
+    PERF_END(t_fork, "fork/process_fork");
+
     if (!child_proc) {
         return -EAGAIN;
     }
+
+    PERF_BEGIN(t_sched);
     status_t std = scheduler_add(child_proc->main_thread);
+    PERF_END(t_sched, "fork/scheduler_add");
+
     if (std != SUCCESS) {
         process_destroy(child_proc);
         return -EAGAIN;
     }
+
+    PERF_END(t_total, "fork/total");
     return (int64_t)child_proc->pid;
 }
 
@@ -345,17 +361,33 @@ int64_t syscall_execve(thread_t * thread, cpu_context_t * context) {
     const char ** argv = (const char **)SYSCALL_ARG1(context);
     const char ** envp = (const char **)SYSCALL_ARG2(context);
 
-    //Copy filename to kernel space
+    PERF_BEGIN(t_total);
+
+    PERF_BEGIN(t_copy);
     size_t fname_len = strlen(filename);
     char * kfilename = kmalloc(fname_len + 1);
     strncpy(kfilename, filename, fname_len + 1);
-
-    //Copy argv to kernel space
     char ** kargv = duplicate_argv((char **)argv);
-    //Copy envp to kernel space
     char ** kenvp = duplicate_envp((char **)envp);
+    PERF_END(t_copy, "execve/copy-args");
 
+    PERF_BEGIN(t_exec);
     status_t st = process_execve(thread, context, kfilename, kargv, kenvp);
+    PERF_END(t_exec, "execve/process_execve");
+
+    /* BUG-37: free temporary kernel copies; process_execve made its own internal copies */
+    kfree(kfilename);
+    if (kargv) {
+        for (size_t i = 0; kargv[i] != NULL; i++) kfree(kargv[i]);
+        kfree(kargv);
+    }
+    if (kenvp) {
+        for (size_t i = 0; kenvp[i] != NULL; i++) kfree(kenvp[i]);
+        kfree(kenvp);
+    }
+
+    PERF_END(t_total, "execve/total");
+
     if (st != SUCCESS) {
         return -EIO;
     }
@@ -487,17 +519,27 @@ int64_t syscall_thread_exit(thread_t * thread, cpu_context_t * context) {
 }
 
 int64_t syscall_futex_wait(thread_t * thread, cpu_context_t * context) {
-    (void)thread;
-    (void)context;
-    kprintf("UNIMPLEMENTED: syscall_futex_wait\n");
-    return -ENOSYS;
+    int *pointer  = (int *)SYSCALL_ARG0(context);
+    int  expected = (int)SYSCALL_ARG1(context);
+    /* ARG2 = timeout (struct timespec *) — not yet implemented */
+
+    if (!pointer) return -EFAULT;
+    /* Atomic check: if value has already changed there is nothing to wait for */
+    if (*pointer != expected) return -EAGAIN;
+
+    /* Sleep until a futex_wake on the same address */
+    sleep(thread, (int64_t)(uintptr_t)pointer);
+    return 0;
 }
 
 int64_t syscall_futex_wake(thread_t * thread, cpu_context_t * context) {
     (void)thread;
-    (void)context;
-    kprintf("UNIMPLEMENTED: syscall_futex_wake\n");
-    return -ENOSYS;
+    int *pointer = (int *)SYSCALL_ARG0(context);
+    /* ARG1 = max threads to wake — wake all for simplicity */
+
+    if (!pointer) return -EFAULT;
+    wakeup((int64_t)(uintptr_t)pointer);
+    return 0;
 }
 
 int64_t syscall_clock_gettime(thread_t * thread, cpu_context_t * context) {
@@ -538,17 +580,27 @@ int64_t syscall_clock_settime(thread_t * thread, cpu_context_t * context) {
 }
 
 int64_t syscall_dir_open(thread_t * thread, cpu_context_t * context) {
-    (void)thread;
-    (void)context;
-    kprintf("UNIMPLEMENTED: syscall_dir_open\n");
-    return -ENOSYS;
+    const char *path = (const char *)SYSCALL_ARG0(context);
+    process_t *proc = (process_t *)thread->process;
+    int slot = process_allocate_fd_slot(proc);
+    if (slot < 0) return -EMFILE;
+
+    vfs_file_descriptor_t newfd;
+    status_t st = vfs_open_dir(path, &newfd);
+    if (st != SUCCESS) return -ENOENT;
+
+    proc->open_files[slot] = newfd;
+    proc->open_file_count++;
+    return slot;
 }
 
 int64_t syscall_readdir(thread_t * thread, cpu_context_t * context) {
-    (void)thread;
-    (void)context;
-    kprintf("UNIMPLEMENTED: syscall_readdir\n");
-    return -ENOSYS;
+    int fd = (int)SYSCALL_ARG0(context);
+    void *buf = (void *)SYSCALL_ARG1(context);
+    size_t count = (size_t)SYSCALL_ARG2(context);
+    vfs_file_descriptor_t *desc = process_get_fd((process_t *)thread->process, fd);
+    if (!desc) return -EBADF;
+    return vfs_readdir(desc, buf, count);
 }
 
 int64_t syscall_gettimeofday(thread_t * thread, cpu_context_t * context) {
@@ -566,32 +618,104 @@ int64_t syscall_gettimeofday(thread_t * thread, cpu_context_t * context) {
     return (int64_t)timeval_now(tv);
 }
 
+/* fcntl constants from mlibc abi-bits/fcntl.h */
+#define F_DUPFD  0
+#define F_GETFD  1
+#define F_SETFD  2
+#define F_GETFL  3
+#define F_SETFL  4
+#define FD_CLOEXEC 1
+
 int64_t syscall_fcntl(thread_t * thread, cpu_context_t * context) {
-    (void)thread;
-    (void)context;
-    kprintf("UNIMPLEMENTED: syscall_fcntl\n");
-    return -ENOSYS;
+    int fd = (int)SYSCALL_ARG0(context);
+    int request = (int)SYSCALL_ARG1(context);
+    uint64_t arg = SYSCALL_ARG2(context);
+    process_t *proc = (process_t *)thread->process;
+    vfs_file_descriptor_t *desc = process_get_fd(proc, fd);
+    if (!desc) return -EBADF;
+
+    switch (request) {
+        case F_DUPFD: {
+            int new_fd = process_dup(proc, fd, -1);
+            return (new_fd < 0) ? -EBADF : new_fd;
+        }
+        case F_GETFD:
+            return (desc->flags & O_CLOEXEC) ? FD_CLOEXEC : 0;
+        case F_SETFD:
+            if (arg & FD_CLOEXEC) desc->flags |= O_CLOEXEC;
+            else                  desc->flags &= ~O_CLOEXEC;
+            return 0;
+        case F_GETFL:
+            return desc->flags & ~O_CLOEXEC;
+        case F_SETFL:
+            /* Only allow changing O_NONBLOCK and O_APPEND */
+            desc->flags = (desc->flags & ~(O_NONBLOCK | O_APPEND))
+                        | ((int)arg & (O_NONBLOCK | O_APPEND));
+            return 0;
+        default:
+            return -EINVAL;
+    }
+}
+
+#define AT_FDCWD      (-100)
+#define AT_REMOVEDIR  0x200
+
+static int resolve_at(thread_t *thread, int dirfd, const char *path,
+                      char *out, size_t sz) {
+    if (!path || !path[0]) return -ENOENT;
+    if (path[0] == '/') {
+        if (strlen(path) >= sz) return -ENAMETOOLONG;
+        strncpy(out, path, sz);
+        return 0;
+    }
+    process_t *proc = (process_t *)thread->process;
+    const char *base = (dirfd == AT_FDCWD) ? proc->cwd.internal_path : NULL;
+    if (!base) return -ENOSYS; /* non-CWD relative paths not yet implemented */
+    size_t blen = strlen(base), plen = strlen(path);
+    if (blen + 1 + plen + 1 > sz) return -ENAMETOOLONG;
+    memcpy(out, base, blen);
+    if (blen && base[blen - 1] != '/') out[blen++] = '/';
+    memcpy(out + blen, path, plen + 1);
+    return 0;
 }
 
 int64_t syscall_rename(thread_t * thread, cpu_context_t * context) {
+    const char *oldpath = (const char *)SYSCALL_ARG0(context);
+    const char *newpath = (const char *)SYSCALL_ARG1(context);
     (void)thread;
-    (void)context;
-    kprintf("UNIMPLEMENTED: syscall_rename\n");
-    return -ENOSYS;
+    status_t st = vfs_rename(oldpath, newpath);
+    if (st == NOT_FOUND)      return -ENOENT;
+    if (st == NOT_IMPLEMENTED) return -EROFS;
+    return (st == SUCCESS) ? 0 : -EIO;
 }
 
 int64_t syscall_mkdir(thread_t * thread, cpu_context_t * context) {
+    const char *path = (const char *)SYSCALL_ARG0(context);
+    uint32_t mode    = (uint32_t)SYSCALL_ARG1(context);
     (void)thread;
-    (void)context;
-    kprintf("UNIMPLEMENTED: syscall_mkdir\n");
-    return -ENOSYS;
+    status_t st = vfs_mkdir(path, mode ? mode : 0755);
+    if (st == ALREADY_EXISTS)  return -EEXIST;
+    if (st == NOT_IMPLEMENTED) return -EROFS;
+    return (st == SUCCESS) ? 0 : -EIO;
 }
 
 int64_t syscall_creat(thread_t * thread, cpu_context_t * context) {
-    (void)thread;
-    (void)context;
-    kprintf("UNIMPLEMENTED: syscall_creat\n");
-    return -ENOSYS;
+    const char *path = (const char *)SYSCALL_ARG0(context);
+    process_t *proc  = (process_t *)thread->process;
+    int slot = process_allocate_fd_slot(proc);
+    if (slot < 0) return -EMFILE;
+
+    vfs_file_descriptor_t newfd;
+    /* creat = open(path, O_WRONLY|O_CREAT|O_TRUNC) */
+    status_t st = vfs_open(path, O_WRONLY | O_CREAT, &newfd);
+    if (st == ALREADY_EXISTS) {
+        /* file exists — open it for writing */
+        st = vfs_open(path, O_WRONLY, &newfd);
+    }
+    if (st != SUCCESS || !newfd.valid) return -EIO;
+    proc->open_files[slot] = newfd;
+    proc->open_file_count++;
+    return slot;
 }
 
 extern void set_cpu_fs_base(uint64_t base);
@@ -599,7 +723,6 @@ extern void set_cpu_gs_base(uint64_t base);
 extern void set_cpu_gs_base(uint64_t addr);
 extern uint64_t get_cpu_gs_base(void);
 int64_t syscall_arch_prctl(thread_t * thread, cpu_context_t * context) {
-    (void)thread;
     uint64_t option = SYSCALL_ARG0(context);
     
 
@@ -611,6 +734,7 @@ int64_t syscall_arch_prctl(thread_t * thread, cpu_context_t * context) {
         case ARCH_SET_FS:
             uint64_t new_fs = SYSCALL_ARG1(context);
             thread->context->fs_base = new_fs;
+            if (thread->kcontext) thread->kcontext->fs_base = new_fs;
             set_cpu_fs_base(new_fs);
             return 0;
         case ARCH_GET_FS:
@@ -634,36 +758,121 @@ int64_t syscall_arch_prctl(thread_t * thread, cpu_context_t * context) {
 int64_t syscall_fchownat(thread_t * thread, cpu_context_t * context) {
     (void)thread;
     (void)context;
-    kprintf("UNIMPLEMENTED: syscall_fchownat\n");
     return -ENOSYS;
 }
 
 int64_t syscall_unlinkat(thread_t * thread, cpu_context_t * context) {
-    (void)thread;
-    (void)context;
-    kprintf("UNIMPLEMENTED: syscall_unlinkat\n");
-    return -ENOSYS;
+    int         dirfd = (int)SYSCALL_ARG0(context);
+    const char *path  = (const char *)SYSCALL_ARG1(context);
+    int         flags = (int)SYSCALL_ARG2(context);
+    char resolved[VFS_PATH_MAX];
+    int r = resolve_at(thread, dirfd, path, resolved, sizeof(resolved));
+    if (r < 0) return r;
+    status_t st;
+    if (flags & AT_REMOVEDIR) {
+        st = vfs_rmdir(resolved);
+        if (st == FAILURE) return -ENOTEMPTY;
+    } else {
+        st = vfs_unlink(resolved);
+    }
+    if (st == NOT_FOUND)      return -ENOENT;
+    if (st == NOT_IMPLEMENTED) return -EROFS;
+    return (st == SUCCESS) ? 0 : -EIO;
 }
 
 int64_t syscall_renameat(thread_t * thread, cpu_context_t * context) {
-    (void)thread;
-    (void)context;
-    kprintf("UNIMPLEMENTED: syscall_renameat\n");
-    return -ENOSYS;
+    int         olddirfd = (int)SYSCALL_ARG0(context);
+    const char *oldpath  = (const char *)SYSCALL_ARG1(context);
+    int         newdirfd = (int)SYSCALL_ARG2(context);
+    const char *newpath  = (const char *)SYSCALL_ARG3(context);
+    char old_res[VFS_PATH_MAX], new_res[VFS_PATH_MAX];
+    int r = resolve_at(thread, olddirfd, oldpath, old_res, sizeof(old_res));
+    if (r < 0) return r;
+    r = resolve_at(thread, newdirfd, newpath, new_res, sizeof(new_res));
+    if (r < 0) return r;
+    status_t st = vfs_rename(old_res, new_res);
+    if (st == NOT_FOUND)      return -ENOENT;
+    if (st == NOT_IMPLEMENTED) return -EROFS;
+    if (st == FAILURE)         return -EXDEV;
+    return (st == SUCCESS) ? 0 : -EIO;
 }
 
+/* pselect: report all valid fds in readfds/writefds as ready.
+   Kernel fd_set is 128 bytes (1024 bits). */
 int64_t syscall_pselect(thread_t * thread, cpu_context_t * context) {
-    (void)thread;
-    (void)context;
-    kprintf("UNIMPLEMENTED: syscall_pselect\n");
-    return -ENOSYS;
+    int nfds = (int)SYSCALL_ARG0(context);
+    uint8_t *readfds   = (uint8_t *)SYSCALL_ARG1(context);
+    uint8_t *writefds  = (uint8_t *)SYSCALL_ARG2(context);
+    uint8_t *exceptfds = (uint8_t *)SYSCALL_ARG3(context);
+    /* timeout and sigmask (args 4,5) ignored */
+
+    process_t *proc = (process_t *)thread->process;
+    int ready = 0;
+
+    for (int fd = 0; fd < nfds; fd++) {
+        int byte = fd / 8, bit = fd % 8;
+        int in_read  = readfds  && (readfds[byte]  & (1 << bit));
+        int in_write = writefds && (writefds[byte]  & (1 << bit));
+        if (!in_read && !in_write) continue;
+
+        vfs_file_descriptor_t *desc = process_get_fd(proc, fd);
+        if (desc && desc->valid) {
+            ready += in_read + in_write;
+        } else {
+            /* fd not open — clear it from the sets */
+            if (in_read)  readfds[byte]  &= ~(1 << bit);
+            if (in_write) writefds[byte] &= ~(1 << bit);
+        }
+    }
+    /* Clear exceptfds entirely — no exceptional conditions */
+    if (exceptfds) {
+        int bytes = (nfds + 7) / 8;
+        for (int i = 0; i < bytes; i++) exceptfds[i] = 0;
+    }
+    return ready;
 }
 
 int64_t syscall_statx(thread_t * thread, cpu_context_t * context) {
+    /* mlibc calls: SYS_STATX(dirfd, path, flags, mask, statxbuf) */
+    const char *path    = (const char *)SYSCALL_ARG1(context);
+    vfs_statx_t *statxbuf = (vfs_statx_t *)SYSCALL_ARG4(context);
+
     (void)thread;
-    (void)context;
-    kprintf("UNIMPLEMENTED: syscall_statx\n");
-    return -ENOSYS;
+
+    if (!path || !statxbuf) return -EINVAL;
+
+    vfs_file_descriptor_t tmp;
+    status_t st = vfs_open(path, 0, &tmp);
+    if (st != SUCCESS || !tmp.valid) return -ENOENT;
+
+    vfs_stat_t s;
+    st = vfs_fstat(&tmp, &s);
+    vfs_close(&tmp);
+    if (st != SUCCESS) return -EIO;
+
+    memset(statxbuf, 0, sizeof(*statxbuf));
+    statxbuf->stx_mask       = STATX_BASIC_STATS;
+    statxbuf->stx_blksize    = (uint32_t)s.st_blksize;
+    statxbuf->stx_nlink      = (uint32_t)s.st_nlink;
+    statxbuf->stx_uid        = s.st_uid;
+    statxbuf->stx_gid        = s.st_gid;
+    statxbuf->stx_mode       = (uint16_t)s.st_mode;
+    statxbuf->stx_ino        = s.st_ino;
+    statxbuf->stx_size       = (uint64_t)s.st_size;
+    statxbuf->stx_blocks     = (uint64_t)s.st_blocks;
+    statxbuf->stx_atime.tv_sec  = s.st_atim.tv_sec;
+    statxbuf->stx_atime.tv_nsec = (uint32_t)s.st_atim.tv_nsec;
+    statxbuf->stx_btime.tv_sec  = s.st_mtim.tv_sec;
+    statxbuf->stx_btime.tv_nsec = (uint32_t)s.st_mtim.tv_nsec;
+    statxbuf->stx_ctime.tv_sec  = s.st_ctim.tv_sec;
+    statxbuf->stx_ctime.tv_nsec = (uint32_t)s.st_ctim.tv_nsec;
+    statxbuf->stx_mtime.tv_sec  = s.st_mtim.tv_sec;
+    statxbuf->stx_mtime.tv_nsec = (uint32_t)s.st_mtim.tv_nsec;
+    statxbuf->stx_dev_major  = (uint32_t)(s.st_dev >> 8) & 0xfff;
+    statxbuf->stx_dev_minor  = (uint32_t)(s.st_dev & 0xff);
+    statxbuf->stx_rdev_major = (uint32_t)(s.st_rdev >> 8) & 0xfff;
+    statxbuf->stx_rdev_minor = (uint32_t)(s.st_rdev & 0xff);
+    return 0;
 }
 
 int64_t syscall_debug(thread_t * thread, cpu_context_t * context) {
@@ -677,6 +886,11 @@ int64_t syscall_sigret(thread_t * thread, cpu_context_t * context) {
     (void)context;
     kprintf("syscall_sigret invoked by thread %lu\n", thread->tid);
     process_sigret(thread);
+    /* sysretq cannot return to kernel mode. If nanosleep's int $0x81 left
+       kcontext_pending set, restoring the kernel context here would cause sysretq
+       to jump to a kernel address with user CS → fault. Clear it so scheduler
+       falls through to restoring thread->context (last user-mode state). */
+    thread->kcontext_pending = 0;
     scheduler_handler(context, getApicId(), SCHEDULER_USER_CONTEXT, 0);
     return 0;
 }
@@ -691,17 +905,42 @@ int64_t syscall_sigaction(thread_t * thread, cpu_context_t * context) {
 }
 
 int64_t syscall_sigprocmask(thread_t * thread, cpu_context_t * context) {
-    (void)thread;
-    (void)context;
-    kprintf("UNIMPLEMENTED: syscall_sigprocmask\n");
-    return -ENOSYS;
+    int             how    = (int)SYSCALL_ARG0(context);
+    const sigset_t *set    = (const sigset_t *)SYSCALL_ARG1(context);
+    sigset_t       *oldset = (sigset_t *)SYSCALL_ARG2(context);
+    process_t *proc = (process_t *)thread->process;
+    status_t st = sigprocmask(&proc->sig_mask, how, set, oldset);
+    return (st == SUCCESS) ? 0 : -EINVAL;
 }
 
 int64_t syscall_rmdir(thread_t * thread, cpu_context_t * context) {
+    const char *path = (const char *)SYSCALL_ARG0(context);
     (void)thread;
+    status_t st = vfs_rmdir(path);
+    if (st == NOT_FOUND)      return -ENOENT;
+    if (st == NOT_IMPLEMENTED) return -EROFS;
+    if (st == FAILURE)         return -ENOTEMPTY;
+    return (st == SUCCESS) ? 0 : -EIO;
+}
+
+int64_t syscall_getuid(thread_t * thread, cpu_context_t * context) {
     (void)context;
-    kprintf("UNIMPLEMENTED: syscall_rmdir\n");
-    return -ENOSYS;
+    return (int64_t)((process_t *)thread->process)->uid;
+}
+
+int64_t syscall_getgid(thread_t * thread, cpu_context_t * context) {
+    (void)context;
+    return (int64_t)((process_t *)thread->process)->gid;
+}
+
+int64_t syscall_geteuid(thread_t * thread, cpu_context_t * context) {
+    (void)context;
+    return (int64_t)((process_t *)thread->process)->uid;
+}
+
+int64_t syscall_getegid(thread_t * thread, cpu_context_t * context) {
+    (void)context;
+    return (int64_t)((process_t *)thread->process)->gid;
 }
 
 static syscall_handler_t handlers[SYS_COUNT] = { 
@@ -759,9 +998,14 @@ static syscall_handler_t handlers[SYS_COUNT] = {
     syscall_sigprocmask,
     syscall_rmdir,
     syscall_log, //53
+    syscall_getuid,  //54
+    syscall_getgid,  //55
+    syscall_geteuid, //56
+    syscall_getegid, //57
 };
 
 void syscall_handler(cpu_context_t * context) {
+    //kprintf("syscall_handler: syscall number %lu\n", SYSCALL_NUMBER(context));
     uint64_t syscall_number = SYSCALL_NUMBER(context);
     if (syscall_number >= SYS_COUNT) {
         SYSCALL_RET(context) = -1; // Invalid syscall number

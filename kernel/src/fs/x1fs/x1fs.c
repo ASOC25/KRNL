@@ -3,6 +3,7 @@
 #include <krnl/libraries/std/stddef.h>
 #include <krnl/libraries/std/stdint.h>
 #include <krnl/libraries/std/string.h>
+#include <krnl/libraries/std/errno.h>
 #include <krnl/devices/devices.h>
 #include <krnl/debug/debug.h>
 #include <krnl/mem/allocator.h>
@@ -43,6 +44,11 @@ struct x1fs_fs {
 struct x1fs_fs *device_cache = NULL;
 struct x1fs_fs * x1fs_register_device(device_major_t major, device_minor_t minor);
 
+/* String table stores paths without a leading '/'; strip it from VFS-supplied paths. */
+static inline const char * x1fs_strip_root(const char *path) {
+    return (path && path[0] == '/') ? path + 1 : path;
+}
+
 status_t x1fs_detect(device_major_t major, device_minor_t minor) {
     uint8_t buffer[4];
     int64_t read_bytes = devices_read(major, minor, 0, 4, buffer); //Read first 4 bytes (signature)
@@ -77,9 +83,10 @@ ssize_t x1fs_read(device_major_t major, device_minor_t minor, const char * path,
     }
 
     // Find the file entry by path
+    const char *name = x1fs_strip_root(path);
     struct x1fs_entry *entry = NULL;
     for (uint32_t i = 0; i < fs->header.num_entries; i++) {
-        if (strcmp(fs->string_table[i], path) == 0) {
+        if (strcmp(fs->string_table[i], name) == 0) {
             entry = &fs->entries[i];
             break;
         }
@@ -211,31 +218,128 @@ struct x1fs_fs * x1fs_register_device(device_major_t major, device_minor_t minor
     return fs;
 }
 
+static int x1fs_is_directory(struct x1fs_fs *fs, const char *path) {
+    if (strcmp(path, "/") == 0) return 1;
+    const char *name = x1fs_strip_root(path);
+    if (*name == '\0') return 1; /* stripped "/" */
+    size_t plen = strlen(name);
+    for (uint32_t i = 0; i < fs->header.num_entries; i++) {
+        const char *ep = fs->string_table[i];
+        if (strncmp(ep, name, plen) == 0 && ep[plen] == '/') return 1;
+    }
+    return 0;
+}
+
 status_t x1fs_fstat(device_major_t major, device_minor_t minor, const char * path, vfs_stat_t * buf) {
     struct x1fs_fs *fs = x1fs_get_fs(major, minor);
     if (!fs) {
         panic("x1fs_fstat: Filesystem not found for device");
     }
 
-    // Find the file entry by path
-    struct x1fs_entry *entry = NULL;
+    // Find the file entry by exact path
+    const char *name = x1fs_strip_root(path);
     for (uint32_t i = 0; i < fs->header.num_entries; i++) {
-        if (strcmp(fs->string_table[i], path) == 0) {
-            entry = &fs->entries[i];
-            break;
+        if (strcmp(fs->string_table[i], name) == 0) {
+            memset(buf, 0, sizeof(vfs_stat_t));
+            buf->st_size = fs->entries[i].file_size;
+            buf->st_mode = 0x81A4; // Regular file rw-r--r--
+            buf->st_nlink = 1;
+            return SUCCESS;
         }
     }
-    if (!entry) {
-        //kprintf("x1fs_fstat: File '%s' not found on device %d:%d\n", path, major, minor);
-        return FAILURE; // File not found
+
+    // Check if the path is an implicit directory
+    if (x1fs_is_directory(fs, path)) {
+        memset(buf, 0, sizeof(vfs_stat_t));
+        buf->st_mode = 0x41ED; // S_IFDIR | rwxr-xr-x
+        buf->st_nlink = 2;
+        return SUCCESS;
     }
 
-    memset(buf, 0, sizeof(vfs_stat_t));
-    buf->st_size = entry->file_size;
-    buf->st_mode = 0x81A4; // Regular file with rw-r--r-- permissions
-    buf->st_nlink = 1;
+    return FAILURE;
+}
 
-    return SUCCESS;
+ssize_t x1fs_readdir(device_major_t major, device_minor_t minor, const char *path, size_t *index, void *buf, size_t count) {
+    struct x1fs_fs *fs = x1fs_get_fs(major, minor);
+    if (!fs) return -EIO;
+
+    /* Strip leading '/' — string table stores paths without it */
+    const char *stripped = x1fs_strip_root(path);
+    size_t stripped_len = strlen(stripped);
+    size_t virtual_idx = 0;
+    ssize_t bytes_written = 0;
+    uint8_t *out = (uint8_t *)buf;
+
+    /* Deduplicate subdirectory names: track names already emitted. */
+    char (*seen)[256] = (char (*)[256])kmalloc(fs->header.num_entries * 256);
+    if (!seen) return -ENOMEM;
+    int num_seen = 0;
+
+    for (uint32_t i = 0; i < fs->header.num_entries; i++) {
+        const char *ep = fs->string_table[i];
+        size_t prefix_len;
+
+        if (*stripped == '\0') {
+            /* root: all string table entries belong to the tree */
+            prefix_len = 0;
+        } else {
+            if (strncmp(ep, stripped, stripped_len) != 0 || ep[stripped_len] != '/') continue;
+            prefix_len = stripped_len + 1;
+        }
+
+        const char *child = ep + prefix_len;
+        if (child[0] == '\0') continue;
+        const char *slash = strchr(child, '/');
+
+        char name[256];
+        uint8_t dtype;
+
+        if (slash == NULL) {
+            strncpy(name, child, 255);
+            name[255] = '\0';
+            dtype = DT_REG;
+        } else {
+            size_t dlen = (size_t)(slash - child);
+            if (dlen >= 256) dlen = 255;
+            strncpy(name, child, dlen);
+            name[dlen] = '\0';
+            dtype = DT_DIR;
+
+            /* Skip duplicate subdirectory names */
+            int dup = 0;
+            for (int d = 0; d < num_seen; d++) {
+                if (strcmp(seen[d], name) == 0) { dup = 1; break; }
+            }
+            if (dup) continue;
+            strncpy(seen[num_seen], name, 255);
+            seen[num_seen][255] = '\0';
+            num_seen++;
+        }
+
+        /* This is unique virtual entry at virtual_idx */
+        if (virtual_idx >= *index) {
+            size_t name_len = strlen(name);
+            /* reclen = fixed header (19 bytes) + name + NUL, aligned to 8 */
+            size_t reclen = (19 + name_len + 1 + 7) & ~(size_t)7;
+
+            if ((size_t)bytes_written + reclen > count) break;
+
+            memset(out, 0, reclen);
+            *(uint64_t *)(out +  0) = virtual_idx + 1; /* d_ino */
+            *(uint64_t *)(out +  8) = virtual_idx + 1; /* d_off */
+            *(uint16_t *)(out + 16) = (uint16_t)reclen; /* d_reclen */
+            *(uint8_t  *)(out + 18) = dtype;             /* d_type */
+            memcpy(out + 19, name, name_len + 1);        /* d_name */
+
+            out += reclen;
+            bytes_written += reclen;
+            (*index)++;
+        }
+        virtual_idx++;
+    }
+
+    kfree(seen);
+    return bytes_written;
 }
 
 status_t x1fs_ioctl(device_major_t major, device_minor_t minor, const char * path, uint64_t request, void * arg) {
@@ -263,6 +367,7 @@ void x1fs_init(void) {
     x1fs_ops->detect = x1fs_detect;
     x1fs_ops->fstat = x1fs_fstat;
     x1fs_ops->ioctl = x1fs_ioctl;
+    x1fs_ops->readdir = x1fs_readdir;
     x1fs_ops->next = NULL;
 
     status_t result = vfs_register_fs(x1fs_ops);

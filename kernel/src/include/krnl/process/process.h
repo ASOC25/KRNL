@@ -11,7 +11,7 @@
 #include <krnl/mem/allocator.h>
 #include <krnl/process/sigstructs.h>
 
-#define NEW_PROCESS_STACK_SIZE 0x4000000 //64MB
+#define NEW_PROCESS_STACK_SIZE 0x800000 //8MB
 #define MAX_THREADS_PER_PROCESS 16
 #define MAX_OPEN_FILES 32
 #define INIT_PROCESS_PARENT_CODE (process_t *)0xFFFFFFFFFFFFFFFF
@@ -56,6 +56,14 @@ typedef struct thread_t {
     pid_t tid;
 } thread_t;
 
+typedef struct proc_symtab {
+    Elf64_Sym * syms;
+    char      * strtab;
+    uint64_t    count;
+    uint64_t    load_base;   /* 0 for ET_EXEC, actual load addr for PIE/SO */
+    struct proc_symtab * next;
+} proc_symtab_t;
+
 typedef struct process_t {
     vmm_root_t * vmm;
     vm_area_t *vm_areas;
@@ -73,6 +81,7 @@ typedef struct process_t {
     pid_t ppid;
     gid_t uid;
     gid_t gid;
+    sigset_t sig_mask;  /* blocked signal mask */
     int exit_code;
     int state;
     long nice;
@@ -87,6 +96,10 @@ typedef struct process_t {
     char ** envp;
     struct auxv* auxv;
     uint64_t auxv_size;
+
+    struct proc_symtab * symtab_list;  /* linked list: main exe + shared libs */
+    uint64_t r_debug_va;               /* VA of _r_debug in process (set by loader) */
+    uint8_t  shlib_syms_loaded;        /* lazy-load flag */
 } process_t;
 
 vfs_file_descriptor_t * process_get_fd(process_t *proc, int fd);
@@ -110,4 +123,6 @@ status_t process_kill(process_t * process, int code);
 void process_sigret(thread_t * thread);
 status_t process_sigaction(process_t * process, int signum, const struct sigaction * act, struct sigaction * oldact);
 status_t process_destroy_thread(process_t * process, thread_t * thread);
+void process_load_shlib_symtabs(process_t * proc);
+const char * process_resolve_symbol(process_t * proc, uint64_t addr);
 #endif

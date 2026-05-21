@@ -58,6 +58,7 @@ void cpu_context_init() {
     core_context_t * ctx = (core_context_t *)kmalloc(sizeof(core_context_t));
     ctx->core_id = getApicId();
     ctx->cinfo = (context_info_t *)kmalloc(sizeof(context_info_t));
+    memset(ctx->cinfo, 0, sizeof(context_info_t));  /* BUG-58: initialize cinfo */
     reload_gs_fs();
     set_cpu_gs_base((uint64_t)ctx);
     cpu_tss_init(ctx);

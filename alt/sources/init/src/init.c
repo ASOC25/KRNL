@@ -27,6 +27,8 @@ void print_banner() {
 
 int main(int argc, char* argv[]){
     print_banner();
-    while(1);
+    char *bash_args[] = {"/usr/bin/bash", NULL};
+    execv("/usr/bin/bash", bash_args);
+    perror("execv /usr/bin/bash");
     return EXIT_FAILURE;
 }

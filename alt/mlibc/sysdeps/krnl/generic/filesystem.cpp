@@ -131,15 +131,26 @@ namespace mlibc{
         return 0;
     }
 
+#ifndef MLIBC_BUILDING_RTLD
     // In contrast to the isatty() library function, the sysdep function uses return value
     // zero (and not one) to indicate that the file is a terminal.
     int sys_isatty(int fd){
-        // TODO
         struct winsize ws;
         auto result = do_syscall(SYS_FILE_IOCTL, fd, TIOCGWINSZ, &ws);
         if (result == TTY_CHECK_VAL) return 0;
         return ENOTTY;
     }
+
+    int sys_ttyname(int fd, char *buf, size_t size) {
+        if (sys_isatty(fd) != 0)
+            return ENOTTY;
+        const char *name = "/dev/tty0";
+        if (size <= strlen(name))
+            return ERANGE;
+        strcpy(buf, name);
+        return 0;
+    }
+#endif
 
     int sys_rmdir(const char *path){
         auto result = do_syscall(SYS_RMDIR, path, strlen(path));
@@ -262,7 +273,7 @@ namespace mlibc{
         return 0;
     }
 
-#ifndef MLIBC_BUILDING_RTDL
+#ifndef MLIBC_BUILDING_RTLD
     int sys_chdir(const char *path){
         auto result = do_syscall(SYS_CHDIR, path, strlen(path));
 

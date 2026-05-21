@@ -52,8 +52,8 @@
 #define SIG_UNBLOCK  1
 #define SIG_SETMASK  2
 
-#define SIG_IGN     0
-#define SIG_DFL     1
+#define SIG_DFL     0
+#define SIG_IGN     1
 #define SIG_ERR     2
 #define SIG_HOLD    3
 

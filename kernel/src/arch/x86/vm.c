@@ -240,11 +240,8 @@ status_t vm_get_page_info(vm_dir * root, uint64_t virtual_address, struct page_i
     pml4entry = GET_ENTRY(root, indices.PML4_index);
     if (!IS_PRESENT(pml4entry)) {
         panic("vm_get_page_info: PML4 entry not present");
-    }
-
-    if (!IS_PRESENT(pml4entry)) {
-        panic("vm_get_page_info: PML4 entry not present");
     } else if (pml4entry->huge.PS) {
+        /* BUG-43: removed duplicate IS_PRESENT check; kept only the PS check */
         panic("vm_get_page_info: Huge pages not supported at PML4 level");
     }
 
@@ -343,7 +340,11 @@ uint8_t vm_check_and_clean_dirty(vm_dir * root, uint64_t virtual_address) {
     if (!IS_PRESENT(pdptentry)) {
         panic("vm_is_dirty: PDPT entry not present");
     } else if (pdptentry->huge.PS) {
-        return pdptentry->huge.D ? SUCCESS : FAILURE;
+        /* BUG-44 fix: return raw dirty-bit (1=dirty) and clear it, consistent with 4KB path */
+        uint8_t was_dirty = pdptentry->huge.D;
+        pdptentry->huge.D = 0;
+        vm_flush_tlb_entry(virtual_address);
+        return was_dirty;
     }
 
     pdtable = (vm_dir *)(get_pdpp(pdptentry, VM_PAGE_SIZE_DIR));
@@ -351,7 +352,11 @@ uint8_t vm_check_and_clean_dirty(vm_dir * root, uint64_t virtual_address) {
     if (!IS_PRESENT(pdentry)) {
         panic("vm_is_dirty: PD entry not present");
     } else if (pdentry->big.PS) {
-        return pdentry->big.D ? SUCCESS : FAILURE;
+        /* BUG-44 fix: return raw dirty-bit (1=dirty) and clear it, consistent with 4KB path */
+        uint8_t was_dirty = pdentry->big.D;
+        pdentry->big.D = 0;
+        vm_flush_tlb_entry(virtual_address);
+        return was_dirty;
     }
 
     pttable = (vm_dir *)(get_pdpp(pdentry, VM_PAGE_SIZE_DIR));
@@ -561,8 +566,37 @@ status_t vm_mprotect_address(vm_dir * root, uint64_t virtual_address, uint8_t ne
 }
 
 status_t vm_deallocate_vspace(vm_dir * root) {
-    (void)root;
-    //panic("vm_deallocate_vspace: Not yet implemented");
+    /* BUG-42 fix: walk user-space PML4 entries (indices 0-255) and free
+     * all intermediate page-table pages (PDPT, PD, PT).
+     * Data frames must have been freed by vmarea_remove_all() before this call. */
+    for (int pml4_i = 0; pml4_i < 256; pml4_i++) {
+        vm_entry *pml4e = GET_ENTRY(root, pml4_i);
+        if (!IS_PRESENT(pml4e)) continue;
+
+        vm_dir *pdpt = (vm_dir *)get_pdpp(pml4e, VM_PAGE_SIZE_DIR);
+
+        for (int pdp_i = 0; pdp_i < 512; pdp_i++) {
+            vm_entry *pdpe = GET_ENTRY(pdpt, pdp_i);
+            if (!IS_PRESENT(pdpe)) continue;
+            if (pdpe->huge.PS) continue; /* 1 GB huge page — not a page table entry */
+
+            vm_dir *pd = (vm_dir *)get_pdpp(pdpe, VM_PAGE_SIZE_DIR);
+
+            for (int pd_i = 0; pd_i < 512; pd_i++) {
+                vm_entry *pde = GET_ENTRY(pd, pd_i);
+                if (!IS_PRESENT(pde)) continue;
+                if (pde->big.PS) continue; /* 2 MB huge page — not a page table entry */
+
+                vm_dir *pt = (vm_dir *)get_pdpp(pde, VM_PAGE_SIZE_DIR);
+                pmm_free_pages((void *)FROM_IDENTITY_MAP((uint64_t)pt), 1);
+            }
+
+            pmm_free_pages((void *)FROM_IDENTITY_MAP((uint64_t)pd), 1);
+        }
+
+        pmm_free_pages((void *)FROM_IDENTITY_MAP((uint64_t)pdpt), 1);
+        pml4e->directory.P = 0;
+    }
+
     return SUCCESS;
-    //Remove all mappings and free all page tables
 }

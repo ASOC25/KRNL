@@ -4,7 +4,9 @@ target remote :1234
 set mem inaccessible-by-default off
 set disassembly-flavor intel
 set remotetimeout 999
-add-symbol-file /home/tretorn/KRNL/sysroot/usr/lib/ld.so.sym 0x40000548
+
+source env/scripts/autoload_syms.py
+
 define hook-stop
   x/10ig $rip
 end

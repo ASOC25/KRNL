@@ -9,6 +9,25 @@
 
 #define SIGNAL_TRAMPOLINE_ADDRESS ((void*)0x80000000)
 #define DYNAMIC_LINKER_BASE_ADDRESS ((void*)0x40000000)
+#define VDSO_USER_ADDRESS ((void*)0xB0000000)
+
+/* VDSO entry IDs — must match mlibc sysdep vdso.h */
+#define VDSO_ENTRY_ID_NONE          0x0
+#define VDSO_ENTRY_SIGNAL_TRAMP     0x3
+
+typedef struct vdso_entry {
+    uint8_t id;
+    void* info;
+    int64_t size;
+    struct vdso_entry* next;
+} vdso_entry_t;
+
+typedef struct vdso {
+    void* pd;
+    uint64_t base_addresss;
+    uint64_t size;
+    struct vdso_entry* entry;
+} __attribute__((packed)) vdso_t;
 
 #define AT_NULL   0	/* end of vector */
 #define AT_IGNORE 1	/* entry should be ignored */
@@ -63,6 +82,8 @@ typedef struct loaded_elf {
 
 
 loaded_elf_t* elf_load_elf(process_t * process, const char * filename, thread_t* thread);
-void * loader_create_args(void * stack, uint64_t max_size, char ** argv, char ** envp, struct auxv* auxv);
+void * loader_create_args(void * stack, void * user_stack_top, uint64_t max_size, char ** argv, char ** envp, struct auxv* auxv);
 status_t allocate_signal_trampoline(process_t* process);
+status_t allocate_vdso(process_t* process);
+proc_symtab_t * extract_elf_symtab(uint8_t * elf_data, size_t file_size, uint64_t load_base);
 #endif

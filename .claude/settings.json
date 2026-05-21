@@ -1,0 +1,49 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(xargs cat)",
+      "Bash(xargs ls -la)",
+      "Bash(readelf -l /home/tretorn/KRNL/pkg-builds/mlibc/ld.so)",
+      "Bash(readelf -h /home/tretorn/KRNL/pkg-builds/mlibc/ld.so)",
+      "Bash(readelf -l /home/tretorn/KRNL/pkg-builds/mlibc/libc.so)",
+      "Bash(readelf -l /home/tretorn/KRNL/pkg-builds/bash/bash)",
+      "Bash(readelf -d /home/tretorn/KRNL/pkg-builds/bash/bash)",
+      "Bash(readelf -l /home/tretorn/KRNL/pkg-builds/mlibc/libm.so)",
+      "Bash(readelf -l /home/tretorn/KRNL/pkg-builds/mlibc/libdl.so)",
+      "Bash(objdump -d /home/tretorn/KRNL/pkg-builds/mlibc/ld.so)",
+      "Bash(awk '/^0+1c[0-9a-f]+:/{found=1} found{print} /^$/{if\\(found\\) exit}')",
+      "Bash(awk '/^[0-9a-f]+ </{found=\\($1 >= \"1b00\" && $1 <= \"1d00\"\\)} found{print}')",
+      "Bash(objdump -d --start-address=0x1b00 --stop-address=0x1d50 /home/tretorn/KRNL/pkg-builds/mlibc/ld.so)",
+      "Bash(objdump -d --start-address=0x1c50 --stop-address=0x1d50 /home/tretorn/KRNL/pkg-builds/mlibc/ld.so)",
+      "Bash(objdump -d --start-address=0x1d610 --stop-address=0x1d700 /home/tretorn/KRNL/pkg-builds/mlibc/ld.so)",
+      "Bash(objdump -d --start-address=0x2710 --stop-address=0x2800 /home/tretorn/KRNL/pkg-builds/mlibc/ld.so)",
+      "Bash(objdump -d --start-address=0x4490 --stop-address=0x44c0 /home/tretorn/KRNL/pkg-builds/mlibc/ld.so)",
+      "Bash(objdump -R /home/tretorn/KRNL/pkg-builds/mlibc/ld.so)",
+      "Bash(readelf -S /home/tretorn/KRNL/pkg-builds/mlibc/ld.so)",
+      "Bash(objdump -d --start-address=0x1fb40 --stop-address=0x1fc50 /home/tretorn/KRNL/pkg-builds/mlibc/ld.so)",
+      "Bash(readelf -r /home/tretorn/KRNL/pkg-builds/mlibc/ld.so)",
+      "Bash(objdump -d --start-address=0x7768 --stop-address=0x7850 /home/tretorn/KRNL/pkg-builds/mlibc/ld.so)",
+      "Bash(objdump -d --start-address=0x784e --stop-address=0x7920 /home/tretorn/KRNL/pkg-builds/mlibc/ld.so)",
+      "Bash(objdump -d --start-address=0x7744 --stop-address=0x7770 /home/tretorn/KRNL/pkg-builds/mlibc/ld.so)",
+      "Bash(objdump -d --start-address=0x791a --stop-address=0x7a00 /home/tretorn/KRNL/pkg-builds/mlibc/ld.so)",
+      "Bash(objdump -d --start-address=0x1f909 --stop-address=0x1f960 /home/tretorn/KRNL/pkg-builds/mlibc/ld.so)",
+      "Bash(objdump -d --start-address=0x405d00 --stop-address=0x405dc0 /home/tretorn/KRNL/pkg-builds/bash/bash)",
+      "Bash(objdump -d --start-address=0x403d20 --stop-address=0x403d50 /home/tretorn/KRNL/pkg-builds/bash/bash)",
+      "Bash(readelf -S /home/tretorn/KRNL/pkg-builds/bash/bash)",
+      "Bash(objdump -d --start-address=0x40001c69 --stop-address=0x40001c70 /home/tretorn/KRNL/pkg-builds/mlibc/ld.so)",
+      "Bash(objdump -d --start-address=0x1e7b9 --stop-address=0x1e800 /home/tretorn/KRNL/pkg-builds/mlibc/ld.so)",
+      "Bash(objdump -d /home/tretorn/KRNL/pkg-builds/mlibc/libc.so)",
+      "Bash(objdump -d --start-address=0x802c --stop-address=0x8100 /home/tretorn/KRNL/pkg-builds/mlibc/ld.so)",
+      "Bash(readelf -S /home/tretorn/KRNL/sysroot/usr/lib/ld.so)",
+      "Bash(readelf -l /home/tretorn/KRNL/sysroot/usr/lib/ld.so)",
+      "Bash(readelf -s /home/tretorn/KRNL/sysroot/usr/lib/ld.so)",
+      "Bash(readelf -d /home/tretorn/KRNL/sysroot/usr/bin/bash)",
+      "Bash(chmod +x /home/tretorn/KRNL/env/scripts/create-ext2.sh)",
+      "Bash(dd if=./build/ramdisk.img bs=1 skip=1080 count=2)",
+      "Bash(xxd)"
+    ],
+    "additionalDirectories": [
+      "/home/tretorn/.claude/projects/-home-tretorn-KRNL"
+    ]
+  }
+}

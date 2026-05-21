@@ -1,5 +1,6 @@
 #include <krnl/process/process.h>
 #include <krnl/debug/debug.h>
+#include <krnl/debug/perf.h>
 #include <krnl/mem/vmm.h>
 #include <krnl/mem/allocator.h>
 #include <krnl/process/scheduler.h>
@@ -155,7 +156,7 @@ process_t * process_create(process_t * parent, const char * filename, const char
         panic("process_init: Failed to load /init.elf");
     }
 
-    create_args(new_process, (char**)argv, (char**)envp, &elf->auxv, &elf->auxv_size);
+    duplicate_args(new_process, (char**)argv, (char**)envp, &elf->auxv, &elf->auxv_size);
     memset(new_process->threads, 0, MAX_THREADS_PER_PROCESS * sizeof(thread_t *));
     new_process->binary_entry = (void *)elf->entry;
     new_process->thread_count = 0;
@@ -205,12 +206,14 @@ status_t process_init_thread_context(context_t * ctx, vmm_root_t* root, void * p
     }
     ctx->cpu_ctx.rflags = RFLAGS_INTERRUPT_ENABLE | RFLAGS_ONE;
     if (args != NULL) {
-        ctx->cpu_ctx.rdi = (uint64_t)args[0]; // argv
-        ctx->cpu_ctx.rsi = (uint64_t)args[1];
-        ctx->cpu_ctx.rdx = (uint64_t)args[2];
-        ctx->cpu_ctx.rcx = (uint64_t)args[3];
-        ctx->cpu_ctx.r8 = (uint64_t)args[4];
-        ctx->cpu_ctx.r9 = (uint64_t)args[5];
+        int nargs = 0;
+        while (args[nargs]) nargs++;
+        ctx->cpu_ctx.rdi = (nargs > 0) ? (uint64_t)args[0] : 0;
+        ctx->cpu_ctx.rsi = (nargs > 1) ? (uint64_t)args[1] : 0;
+        ctx->cpu_ctx.rdx = (nargs > 2) ? (uint64_t)args[2] : 0;
+        ctx->cpu_ctx.rcx = (nargs > 3) ? (uint64_t)args[3] : 0;
+        ctx->cpu_ctx.r8  = (nargs > 4) ? (uint64_t)args[4] : 0;
+        ctx->cpu_ctx.r9  = (nargs > 5) ? (uint64_t)args[5] : 0;
     }
 
     ctx->cpu_ctx.cs = GDT_USER_CODE * sizeof(gdt_entry_t) | 0x3;
@@ -271,22 +274,77 @@ void context_restore(context_t* ctx, cpu_context_t* cpu_ctx){
 }
 
 status_t process_handle_default_signal(thread_t * thread, signal_t * signal) {
-    if (!thread || !signal) {
+    if (!thread || !signal)
         panic("process_handle_default_signal: thread or signal is NULL");
-        return FAILURE;
-    }
 
-    //kprintf("process_handle_default_signal: Handling default signal %d for process %d\n", signal->signo, ((process_t *)thread->process)->pid);
-    switch (signal->signo) {
+    process_t *proc = GET_PROC(thread);
+    int signo = signal->signo;
+
+    switch (signo) {
+        /* Term: abnormal termination */
+        case SIGHUP:
+        case SIGINT:
         case SIGKILL:
+        case SIGUSR1:
+        case SIGPIPE:
+        case SIGUSR2:
+        case SIGALRM:
         case SIGTERM:
-            //Terminate the process
-            //kprintf("process_handle_default_signal: Terminating process %d due to signal %d\n", ((process_t *)thread->process)->pid, signal->signo);
-            process_exit((process_t *)thread->process, 128 + signal->signo);
+        case SIGSTKFLT:
+        case SIGVTALRM:
+        case SIGPROF:
+        case SIGIO:     /* == SIGPOLL */
+        case SIGPWR:
+        /* Core: terminate (no core dump facility) */
+        case SIGQUIT:
+        case SIGILL:
+        case SIGTRAP:
+        case SIGABRT:   /* == SIGIOT */
+        case SIGBUS:
+        case SIGFPE:
+        case SIGSEGV:
+        case SIGXCPU:
+        case SIGXFSZ:
+        case SIGSYS:    /* == SIGUNUSED */
+            process_exit(proc, 128 + signo);
             return SUCCESS;
+
+        /* Stop: suspend all threads in the process */
+        case SIGSTOP:
+        case SIGTSTP:
+        case SIGTTIN:
+        case SIGTTOU:
+            for (int i = 0; i < MAX_THREADS_PER_PROCESS; i++) {
+                if (proc->threads[i])
+                    proc->threads[i]->state = SCHEDULER_STATUS_STOPPED;
+            }
+            proc->state = SCHEDULER_STATUS_STOPPED;
+            wakeup(SIGNAL_WAITPID);
+            return SUCCESS;
+
+        /* Continue: clear pending stop signals and resume stopped threads */
+        case SIGCONT: {
+            for (int s = SIGSTOP; s <= SIGTTOU; s++) {
+                signal_t *sq = proc->signal_queue[s];
+                while (sq) {
+                    signal_t *next = sq->next;
+                    kfree(sq);
+                    sq = next;
+                }
+                proc->signal_queue[s] = NULL;
+            }
+            for (int i = 0; i < MAX_THREADS_PER_PROCESS; i++) {
+                if (proc->threads[i] && proc->threads[i]->state == SCHEDULER_STATUS_STOPPED)
+                    proc->threads[i]->state = SCHEDULER_STATUS_RUNABLE;
+            }
+            proc->state = SCHEDULER_STATUS_CONTINUED;
+            wakeup(SIGNAL_WAITPID);
+            return SUCCESS;
+        }
+
+        /* Ignore: SIGCHLD, SIGURG, SIGWINCH, and unhandled RT signals */
         default:
-            //kprintf("process_handle_default_signal: Unhandled default signal %d for process %d\n", signal->signo, ((process_t *)thread->process)->pid);
-            return FAILURE;
+            return SUCCESS;
     }
 }
 
@@ -304,8 +362,10 @@ status_t process_create_scontext(thread_t * thread, signal_t * signal) {
 
     //If the process does not have a signal handler for this signal, call the default handler right away
     sigaction_t * action = process->signal_actions[signal->signo];
-    if (action == NULL)
+    if (action == NULL || (uintptr_t)action->sa_handler == (uintptr_t)SIG_DFL)
         return process_handle_default_signal(thread, signal);
+    if ((uintptr_t)action->sa_handler == (uintptr_t)SIG_IGN)
+        return SUCCESS;
 
     context_t * sig_ctx = kmalloc(sizeof(context_t));
     //kprintf("process_create_scontext: Created SIGNAL context_t for process %d thread %p at %p\n", ((process_t *)thread->process)->pid, thread, sig_ctx);
@@ -493,12 +553,15 @@ signal_t * process_get_signal(process_t * process) {
     }
 
     for (int sig = 1; sig < NSIG; sig++) {
-        if (process->signal_queue[sig] != NULL) {
-            signal_t * ret = process->signal_queue[sig];
-            process->signal_queue[sig] = ret->next;
-            ret->next = NULL;
-            return ret;
+        if (process->signal_queue[sig] == NULL) continue;
+        /* Skip signals blocked by sig_mask (SIGKILL/SIGSTOP always delivered) */
+        if (sig != SIGKILL && sig != SIGSTOP) {
+            if (process->sig_mask & (1UL << (sig - 1))) continue;
         }
+        signal_t * ret = process->signal_queue[sig];
+        process->signal_queue[sig] = ret->next;
+        ret->next = NULL;
+        return ret;
     }
 
     return NULL;
@@ -510,29 +573,33 @@ thread_t * duplicate_thread(process_t * parent, thread_t * og) {
     }
 
     thread_t * new_thread = kmalloc(sizeof(thread_t));
-    //kprintf("duplicate_thread: Duplicating thread %p for process %d into new thread at %p\n", og, parent->pid, new_thread);
     if (!new_thread) {
         panic("duplicate_thread: Failed to allocate memory for new thread");
         return NULL;
     }
     memset(new_thread, 0, sizeof(thread_t));
     new_thread->stack_size = og->stack_size;
+
+    PERF_BEGIN(t_kstack);
     new_thread->kstack = kstackalloc(parent->vmm, KERNEL_STACK_SIZE);
-    new_thread->tid = -1; // Will be set by scheduler
     if (!new_thread->kstack) {
         panic("duplicate_thread: Failed to allocate memory for new kstack");
     }
     memcpy((void*)((uint64_t)new_thread->kstack->base), og->kstack->base, KERNEL_STACK_SIZE);
+    new_thread->tid = -1; // Will be set by scheduler
+    PERF_END(t_kstack, "    duplicate_thread/kstackalloc+copy");
 
-    new_thread->ustack = copy_stack(parent->vmm, og->ustack);
+    PERF_BEGIN(t_ustack);
+    new_thread->ustack = copy_stack(parent->vmm, og->ustack, og->context->cpu_ctx.rsp);
+    PERF_END(t_ustack, "    duplicate_thread/copy_stack (ustack)");
     if (!new_thread->kstack || !new_thread->ustack) {
         panic("duplicate_thread: Failed to copy stacks for new thread");
         kfree(new_thread);
         return NULL;
     }
 
+    PERF_BEGIN(t_ctx);
     context_info_t * new_ctx_info = kmalloc(sizeof(context_info_t));
-    //kprintf("duplicate_thread: Created new context_info_t at %p\n", new_ctx_info);
     if (!new_ctx_info) {
         panic("duplicate_thread: Failed to allocate memory for context_info_t");
         kfree(new_thread);
@@ -644,6 +711,7 @@ thread_t * duplicate_thread(process_t * parent, thread_t * og) {
         return NULL;
     }
     memset(new_thread->kcontext->cpu_ctx.ctx_info, 0, sizeof(context_info_t));
+    PERF_END(t_ctx, "    duplicate_thread/ctx-alloc");
 
     new_thread->context = new_ctx;
     new_thread->entry = og->entry;
@@ -722,49 +790,50 @@ process_t * process_fork(process_t * parent, thread_t * forking_thread) {
     //kprintf("Process %d is forking thread %p\n", parent->pid, forking_thread);
 
     process_t * child = kmalloc(sizeof(process_t));
-    //kprintf("process_fork: Allocated child process at %p\n", child);
     if (!child) {
         panic("process_fork: Failed to allocate memory for child process");
-
         return NULL;
     }
     memset(child, 0, sizeof(process_t));
+
+    PERF_BEGIN(t_vmm_sync);
     vmarea_sync(parent);
+    PERF_END(t_vmm_sync, "  process_fork/vmarea_sync");
 
     if (!parent->vmm) {
         panic("process_fork: Parent process has no VMM");
         kfree(child);
-
         return NULL;
-    } else {
-        child->vmm = vmm_duplicate_fullspace(parent->vmm);
-        if (!child->vmm) {
-            panic("process_fork: Failed to duplicate VMM for child process");
-            kfree(child);
-
-            return NULL;
-        }
-        //kprintf("process_fork: Duplicated VMM for child process at %p (parent was: %p | pid: %d\n", child->vmm, parent->vmm, parent->pid);
     }
 
+    PERF_BEGIN(t_vmm_dup);
+    child->vmm = vmm_duplicate_fullspace(parent->vmm);
+    PERF_END(t_vmm_dup, "  process_fork/vmm_duplicate_fullspace");
+    if (!child->vmm) {
+        panic("process_fork: Failed to duplicate VMM for child process");
+        kfree(child);
+        return NULL;
+    }
+
+    PERF_BEGIN(t_vmarea);
     status_t st = vmarea_fork(child, parent);
+    PERF_END(t_vmarea, "  process_fork/vmarea_fork");
     if (st != SUCCESS) {
         panic("process_fork: Failed to duplicate VM areas for child process");
         vmm_free_root(child->vmm);
         kfree(child);
-
         return NULL;
     }
 
-    //duplicate only forking_thread
+    PERF_BEGIN(t_thread);
     memset(child->threads, 0, MAX_THREADS_PER_PROCESS * sizeof(thread_t *));
     child->threads[0] = duplicate_thread(child, forking_thread);
+    PERF_END(t_thread, "  process_fork/duplicate_thread");
     if (!child->threads[0]) {
         panic("process_fork: Failed to duplicate thread for child process");
         vmarea_remove_all(child);
         vmm_free_root(child->vmm);
         kfree(child);
-
         return NULL;
     }
 
@@ -785,11 +854,24 @@ process_t * process_fork(process_t * parent, thread_t * forking_thread) {
     child->binary_entry = parent->binary_entry;
     child->exit_code = 0;
     child->state = SCHEDULER_STATUS_RUNABLE;
-    for (int i = 0; i < parent->open_file_count; i++) {
+
+    PERF_BEGIN(t_fds);
+    /* BUG-23: iterate all MAX_OPEN_FILES slots, not just open_file_count,
+     * because open files may occupy non-contiguous indices. */
+    for (int i = 0; i < MAX_OPEN_FILES; i++) {
         child->open_files[i] = parent->open_files[i];
+        /* Duplicate native_path to avoid double-free when parent/child close independently */
+        if (parent->open_files[i].native_path) {
+            size_t plen = strlen(parent->open_files[i].native_path);
+            char * dup_path = kmalloc(plen + 1);
+            strncpy(dup_path, parent->open_files[i].native_path, plen + 1);
+            child->open_files[i].native_path = dup_path;
+        }
     }
     child->open_file_count = parent->open_file_count;
-    //Duplicate signal actions
+    PERF_END(t_fds, "  process_fork/dup-fds");
+
+    PERF_BEGIN(t_sigs);
     for (int i = 0; i < NSIG; i++) {
         if (parent->signal_actions[i]) {
             sigaction_t * new_action = kmalloc(sizeof(sigaction_t));
@@ -802,12 +884,16 @@ process_t * process_fork(process_t * parent, thread_t * forking_thread) {
             child->signal_actions[i] = NULL;
         }
     }
-    //Initialize signal queue to NULL
     for (int i = 0; i < NSIG; i++) {
         child->signal_queue[i] = NULL;
     }
+    child->sig_mask = parent->sig_mask;
+    PERF_END(t_sigs, "  process_fork/dup-signals");
 
+    PERF_BEGIN(t_args);
     duplicate_args(child, (char **)parent->argv, (char **)parent->envp, &parent->auxv, &parent->auxv_size);
+    PERF_END(t_args, "  process_fork/duplicate_args");
+
     child->threads[0]->context->cpu_ctx.rax = 0; // Child process gets 0 return value from fork
 
     return child;
@@ -992,10 +1078,11 @@ thread_t * process_create_thread(process_t * process, void * entry_point) {
 
     void * identity_base = to_kident(process->vmm, (void*)new_thread->ustack->base);
     void * identity_top = identity_base + new_thread->stack_size;
-    void * altered_identity_top = loader_create_args(identity_top, new_thread->stack_size, process->argv, process->envp, process->auxv);
+    void * user_stack_virtual = (void *)((uint64_t)new_thread->ustack->base + new_thread->stack_size);
+    void * altered_identity_top = loader_create_args(identity_top, user_stack_virtual, new_thread->stack_size, process->argv, process->envp, process->auxv);
     uint64_t stack_offset = (uint64_t)identity_top - (uint64_t)altered_identity_top;
 
-    new_thread->ustack->top -= stack_offset;
+    new_thread->ustack->top = (void *)((uint64_t)user_stack_virtual - stack_offset);
 
     if (process->thread_count == 0) {
         process->main_thread = new_thread;
@@ -1019,11 +1106,14 @@ status_t process_execve(thread_t * thread, cpu_context_t * ctx, char * filename,
         return FAILURE;
     }
 
+    PERF_BEGIN(t_elf);
     loaded_elf_t * elf = elf_load_elf(process, filename, thread);
+    PERF_END(t_elf, "  process_execve/elf_load_elf");
     if (!elf) {
         return FAILURE;
     }
 
+    PERF_BEGIN(t_cleanup);
     //Empty signal queue
     for (int i = 0; i < NSIG; i++) {
         signal_t * sig = process->signal_queue[i];;
@@ -1054,6 +1144,32 @@ status_t process_execve(thread_t * thread, cpu_context_t * ctx, char * filename,
     }
     kfree(process->auxv);
     duplicate_args(process, argv, envp, &elf->auxv, &elf->auxv_size);
+    PERF_END(t_cleanup, "  process_execve/signal-cleanup+dup-args");
+
+    PERF_BEGIN(t_stack);
+    // The old user stack pages are still mapped (stackalloc tracks them outside vmareas).
+    // Properly unmap+free physical pages, then free the descriptor.
+    stackfree(process->vmm, thread->ustack);
+    kfree(thread->ustack);
+    thread->stack_size = NEW_PROCESS_STACK_SIZE;
+    thread->ustack = stackalloc(process->vmm, thread->stack_size,
+                                VMM_REGION_U_STACK - thread->stack_size,
+                                VMM_WRITE_BIT | VMM_USER_BIT, 1);
+    if (!thread->ustack) {
+        panic("process_execve: Failed to allocate new user stack");
+        return FAILURE;
+    }
+    PERF_END(t_stack, "  process_execve/stack-alloc");
+
+    PERF_BEGIN(t_args);
+    void * exec_identity_base = to_kident(process->vmm, (void*)thread->ustack->base);
+    void * exec_identity_top  = exec_identity_base + thread->stack_size;
+    void * exec_user_top      = (void *)((uint64_t)thread->ustack->base + thread->stack_size);
+    void * exec_new_top = loader_create_args(exec_identity_top, exec_user_top, thread->stack_size,
+                                             process->argv, process->envp, process->auxv);
+    uint64_t exec_stack_offset = (uint64_t)exec_identity_top - (uint64_t)exec_new_top;
+    thread->ustack->top = (void *)((uint64_t)exec_user_top - exec_stack_offset);
+    PERF_END(t_args, "  process_execve/loader_create_args");
 
     process->binary_entry = elf->entry;
     process->main_thread = thread;
@@ -1093,6 +1209,113 @@ void process_set_exit_code(process_t * process, int code) {
     process->exit_code = code;
 }
 
+// r_debug struct offsets (x86-64 ABI): version(4) + pad(4) + r_map ptr(8)
+#define R_DEBUG_RMAP_OFFSET  8
+// link_map struct offsets: l_addr(8) + l_name ptr(8) + l_ld ptr(8) + l_next ptr(8)
+#define LMAP_L_ADDR  0
+#define LMAP_L_NAME  8
+#define LMAP_L_NEXT  24
+
+static uint64_t kident_read_u64(vmm_root_t * vmm, uint64_t va) {
+    uint8_t * p = (uint8_t *)to_kident(vmm, (void *)va);
+    if (!p) return 0;
+    uint64_t v;
+    memcpy(&v, p, 8);
+    return v;
+}
+
+static void kident_read_cstr(vmm_root_t * vmm, uint64_t va, char * out, size_t maxlen) {
+    out[0] = '\0';
+    if (!va) return;
+    size_t page_avail = 0x1000 - (va & 0xfff);
+    char * src = (char *)to_kident(vmm, (void *)va);
+    if (!src) return;
+    size_t n = maxlen < page_avail ? maxlen : page_avail;
+    size_t i = 0;
+    for (; i < n - 1 && src[i]; i++) out[i] = src[i];
+    out[i] = '\0';
+}
+
+void process_load_shlib_symtabs(process_t * proc) {
+    if (!proc || proc->shlib_syms_loaded || !proc->r_debug_va) return;
+    proc->shlib_syms_loaded = 1;
+
+    /* r_debug_va is the VA of DT_DEBUG's d_ptr field in the executable's
+     * .dynamic section.  ld.so writes the actual _r_debug address there at
+     * startup, so we must dereference it before reading the link map. */
+    uint64_t rdebug_actual_va = kident_read_u64(proc->vmm, proc->r_debug_va);
+    if (!rdebug_actual_va) return;
+
+    uint64_t r_map_va = kident_read_u64(proc->vmm, rdebug_actual_va + R_DEBUG_RMAP_OFFSET);
+    uint64_t visited[64];
+    int visited_count = 0;
+
+    while (r_map_va) {
+        // Cycle guard
+        int already = 0;
+        for (int i = 0; i < visited_count; i++) {
+            if (visited[i] == r_map_va) { already = 1; break; }
+        }
+        if (already || visited_count >= 64) break;
+        visited[visited_count++] = r_map_va;
+
+        uint64_t l_addr    = kident_read_u64(proc->vmm, r_map_va + LMAP_L_ADDR);
+        uint64_t l_name_va = kident_read_u64(proc->vmm, r_map_va + LMAP_L_NAME);
+        uint64_t l_next_va = kident_read_u64(proc->vmm, r_map_va + LMAP_L_NEXT);
+
+        char path[256];
+        kident_read_cstr(proc->vmm, l_name_va, path, sizeof(path));
+
+        if (path[0] != '\0' && l_addr != 0) {
+            // Check whether we already have symbols for this load base
+            int have = 0;
+            for (proc_symtab_t * s = proc->symtab_list; s; s = s->next) {
+                if (s->load_base == l_addr) { have = 1; break; }
+            }
+            if (!have) {
+                vfs_file_descriptor_t fd;
+                if (vfs_open(path, 0, &fd) == SUCCESS && fd.valid) {
+                    vfs_stat_t stat;
+                    if (vfs_fstat(&fd, &stat) == SUCCESS) {
+                        size_t fsz = (size_t)stat.st_size;
+                        uint8_t * data = kmalloc(fsz);
+                        if (data) {
+                            ssize_t rd = vfs_read(&fd, data, fsz);
+                            if ((size_t)rd == fsz) {
+                                proc_symtab_t * st = extract_elf_symtab(data, fsz, l_addr);
+                                if (st) {
+                                    st->next = proc->symtab_list;
+                                    proc->symtab_list = st;
+                                }
+                            }
+                            kfree(data);
+                        }
+                    }
+                    vfs_close(&fd);
+                }
+            }
+        }
+        r_map_va = l_next_va;
+    }
+}
+
+const char * process_resolve_symbol(process_t * proc, uint64_t addr) {
+    if (!proc) return NULL;
+    const char * best = NULL;
+    uint64_t best_start = 0;
+    for (proc_symtab_t * st = proc->symtab_list; st; st = st->next) {
+        for (uint64_t i = 0; i < st->count; i++) {
+            Elf64_Sym * s = &st->syms[i];
+            uint64_t va = st->load_base + s->st_value;
+            if (addr >= va && addr < va + s->st_size && va >= best_start) {
+                best_start = va;
+                best = st->strtab + s->st_name;
+            }
+        }
+    }
+    return best;
+}
+
 status_t process_destroy(process_t * process) {
     if (!process) {
         panic("process_destroy: process is NULL");
@@ -1110,6 +1333,16 @@ status_t process_destroy(process_t * process) {
     //kprintf("process_destroy: Removing all VM areas for process %d\n", process->pid);
     vmarea_remove_all(process);
     vmm_free_root(process->vmm);
+
+    proc_symtab_t * st = process->symtab_list;
+    while (st) {
+        proc_symtab_t * next = st->next;
+        kfree(st->syms);
+        kfree(st->strtab);
+        kfree(st);
+        st = next;
+    }
+
     kfree(process);
 
     return SUCCESS;
@@ -1164,8 +1397,7 @@ int process_dup(process_t * process, int old_fd, int new_fd) {
     }
 
     if (old_fd < 0 || old_fd >= MAX_OPEN_FILES) {
-        panic("process_dup: old_fd is out of bounds");
-        return -1;
+        return -EBADF;
     }
 
     if (new_fd == -1) {
@@ -1177,13 +1409,11 @@ int process_dup(process_t * process, int old_fd, int new_fd) {
             }
         }
         if (new_fd == -1) {
-            panic("process_dup: No available file descriptor slots");
-            return -1;
+            return -EMFILE;
         }
     } else {
         if (new_fd < 0 || new_fd >= MAX_OPEN_FILES) {
-            panic("process_dup: new_fd is out of bounds");
-            return -1;
+            return -EBADF;
         }
     }
 
@@ -1200,5 +1430,13 @@ int process_dup(process_t * process, int old_fd, int new_fd) {
     }
 
     process->open_files[new_fd] = process->open_files[old_fd];
+    /* BUG-46: duplicate native_path so that closing either fd independently
+     * does not cause a double-free of the shared pointer. */
+    if (process->open_files[old_fd].native_path) {
+        size_t plen = strlen(process->open_files[old_fd].native_path);
+        char * dup_path = kmalloc(plen + 1);
+        strncpy(dup_path, process->open_files[old_fd].native_path, plen + 1);
+        process->open_files[new_fd].native_path = dup_path;
+    }
     return new_fd;
 }

@@ -197,8 +197,8 @@ status_t serial_init(void) {
 
 void serial_int_callback(cpu_context_t* ctx, uint8_t cpu_id) {
     (void)ctx;
-    (void)cpu_id;
     wakeup(SERIAL_WAIT_LINE);
+    apic_arm_lapic_timer(cpu_id, 1);
 }
 
 status_t serial_init_pnp(void) {

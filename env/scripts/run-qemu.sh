@@ -7,7 +7,7 @@ OVMF_DIR="$ROOT_DIR/env"
 IMG="$BUILD_DIR/disk.img"
 
 : "${QEMU:=qemu-system-x86_64}"
-: "${RAM:=512}"                # RAM in MB
+: "${RAM:=2048}"               # RAM in MB
 : "${SMP:=1}"                  # vCPUs
 : "${MACHINE:=q35}"            # Machine type
 : "${ACCEL:=}"                 # e.g. kvm (auto-detected if empty)

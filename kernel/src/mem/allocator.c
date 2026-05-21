@@ -142,12 +142,16 @@ void dump_deallocation(void * adddr) {
                 if (dealloc->allocation_stacktrace[j] == NULL) {
                     break;
                 }
+                /* BUG-02: add missing kprintf inside inner loop */
+                kprintf("  [%d] %p\n", j, dealloc->allocation_stacktrace[j]);
             }
             kprintf(" Deallocation stacktrace:\n");
             for (int j = 0; j < STACKTRACE_SIZE; j++) {
                 if (dealloc->deallocation_stacktrace[j] == NULL) {
                     break;
                 }
+                /* BUG-02: add missing kprintf inside inner loop */
+                kprintf("  [%d] %p\n", j, dealloc->deallocation_stacktrace[j]);
             }
         }
     }
@@ -160,7 +164,9 @@ void allocmatch() {
 //Detect double free attempts and panic
 void detect_double_lok(void * ptr) {
     struct deallocation * current = deallocations;
-    for (uint64_t i = 0; i < DEALLOCATION_BUFFER_SIZE; i++) {
+    /* BUG-01 fix: scan only the valid deallocation entries (0..deallocation_count-1),
+     * not the full DEALLOCATION_BUFFER_SIZE which may contain stale/uninitialised slots. */
+    for (uint64_t i = 0; i < deallocation_count; i++) {
         if (current->address == (uint64_t)ptr) {
             dump_deallocations();
             panic("Double free detected for pointer %p\n", ptr);
@@ -413,14 +419,24 @@ void stackfree(vmm_root_t * cr3, stack_t * stack) {
     panic("stackfree: Allocation not found for pointer %p\n", stack->base);
 }
 
-stack_t * copy_stack(vmm_root_t * dest_root, stack_t * source) {
+stack_t * copy_stack(vmm_root_t * dest_root, stack_t * source, uint64_t current_rsp) {
     uint64_t stack_size = ((uint64_t)source->top - (uint64_t)source->base);
     uint64_t pages = (stack_size + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE;
+    uint64_t total_bytes = pages * PMM_PAGE_SIZE;
     void * phys_addr = pmm_alloc_pages(pages);
     if (phys_addr == NULL) {
         panic("copy_stack: Failed to allocate physical memory");
     }
-    memcpy((void*)vmm_to_identity_map((uint64_t)phys_addr), source->base, pages * PMM_PAGE_SIZE);
+    void * dest_kident = (void*)vmm_to_identity_map((uint64_t)phys_addr);
+
+    /* Only copy the live (used) portion of the stack; zero the rest. */
+    uint64_t rsp_page = current_rsp & ~(uint64_t)(PMM_PAGE_SIZE - 1);
+    if (rsp_page < (uint64_t)source->base) rsp_page = (uint64_t)source->base;
+    if (rsp_page >= (uint64_t)source->top)  rsp_page = (uint64_t)source->top;
+    uint64_t unused_size = rsp_page - (uint64_t)source->base;
+    uint64_t used_size   = total_bytes - unused_size;
+    memset(dest_kident, 0, unused_size);
+    memcpy((uint8_t*)dest_kident + unused_size, (void*)rsp_page, used_size);
     //Unmap the old stack if it exists and map it again to the new physical address
     status_t st = vmm_unmap_pages(
         dest_root,
@@ -446,7 +462,13 @@ stack_t * copy_stack(vmm_root_t * dest_root, stack_t * source) {
 
     //add allocation
     add_allocation(dest_root, phys_addr, (void*)source->base, stack_size, source->flags);
-    return source;
+    /* BUG-03 fix: allocate a new stack_t for the destination process; returning
+     * source would share the struct between parent and child. */
+    stack_t * new_stk = kmalloc(sizeof(stack_t));
+    new_stk->base = source->base;
+    new_stk->top  = source->top;
+    new_stk->flags = source->flags;
+    return new_stk;
 }
 
 void * to_kident(vmm_root_t * cr3, void * vaddr) {

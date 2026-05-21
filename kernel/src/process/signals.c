@@ -1,4 +1,5 @@
 #include <krnl/process/signals.h>
+#include <krnl/libraries/std/errno.h>
 #include <krnl/mem/allocator.h>
 #include <krnl/process/process.h>
 #include <krnl/debug/debug.h>
@@ -7,7 +8,7 @@
 #include <krnl/process/scheduler.h>
 
 typedef struct snode {
-    int id;
+    int64_t id;
     thread_t * thread;
     struct timespec duration;
     struct timespec rem;
@@ -22,7 +23,7 @@ typedef struct snode {
 sleeping_thread_t * sleeping_threads_head = NULL; //Sleeping for time
 sleeping_thread_t * waiting_threads_head = NULL; //Sleeping indefinitely
 
-void new(int id, thread_t * thread, struct timespec *duration, struct timespec *rem) {
+void new(int64_t id, thread_t * thread, struct timespec *duration, struct timespec *rem) {
     sleeping_thread_t * new_node = kmalloc(sizeof(sleeping_thread_t));
     if (!new_node) {
         panic("Failed to allocate memory for sleeping_thread_t");
@@ -122,7 +123,7 @@ void update_counters() {
     //kprintf("CUAK\n");
 }
 
-void sleep(thread_t * thread, int condition) {
+void sleep(thread_t * thread, int64_t condition) {
     new(condition, thread, NULL, NULL);
     thread->state = SCHEDULER_STATUS_INTERRUPTIBLE_SLEEP;
     while (thread->state == SCHEDULER_STATUS_INTERRUPTIBLE_SLEEP) {
@@ -133,9 +134,9 @@ void sleep(thread_t * thread, int condition) {
     //kprintf("Sleep finished for thread %d on condition %d\n", GET_PROC(thread)->pid, condition);
 }
 
-int generate_id(thread_t* thread) {
-    int current_id = (int)(uintptr_t)thread;
-    int start_id = current_id;
+int64_t generate_id(thread_t* thread) {
+    int64_t current_id = (int64_t)(uintptr_t)thread;
+    int64_t start_id = current_id;
     int collision;
     do {
         collision = 0;
@@ -161,15 +162,12 @@ status_t nanosleep(thread_t * thread, struct timespec *duration, struct timespec
     new(generate_id(thread), thread, duration, rem);
     thread->state = SCHEDULER_STATUS_INTERRUPTIBLE_SLEEP;
     while (thread->state == SCHEDULER_STATUS_INTERRUPTIBLE_SLEEP) {
-        kprintf("Nanosleeping thread %d for %lld sec %lld nsec\n", GET_PROC(thread)->pid, duration->tv_sec, duration->tv_nsec);
         __asm__ volatile("int $0x81");
-        kprintf("Woke up thread %d from nanosleep\n", GET_PROC(thread)->pid);
     }
-    kprintf("Nanosleep finished for thread %d\n", GET_PROC(thread)->pid);
     return SUCCESS;
 }
 
-int check_sleep_condition(int condition) {
+int check_sleep_condition(int64_t condition) {
     //Check if there is any thread sleeping on the given condition
     sleeping_thread_t * current = waiting_threads_head;
     while (current) {
@@ -181,7 +179,7 @@ int check_sleep_condition(int condition) {
     return 0;
 }
 
-void wakeup(int condition) {
+void wakeup(int64_t condition) {
     //Wake up all threads waiting on the given condition
     sleeping_thread_t * current = waiting_threads_head;
     while (current) {
@@ -190,9 +188,24 @@ void wakeup(int condition) {
             sleeping_thread_t * to_remove = current;
             current = current->next;
             remove(to_remove);
-            //kprintf("Woke up thread %d from condition %d\n", to_remove->id, condition);
         } else {
             current = current->next;
         }
     }
+}
+
+status_t sigprocmask(sigset_t * current_mask, int how, const sigset_t * set, sigset_t * oldset) {
+    if (oldset) {
+        *oldset = *current_mask;
+    }
+    if (!set) return SUCCESS;
+    switch (how) {
+        case SIG_BLOCK:   *current_mask |= *set;          break;
+        case SIG_UNBLOCK: *current_mask &= ~(*set);       break;
+        case SIG_SETMASK: *current_mask = *set;           break;
+        default: return (status_t)-EINVAL;
+    }
+    /* SIGKILL and SIGSTOP cannot be blocked */
+    *current_mask &= ~((1UL << (SIGKILL - 1)) | (1UL << (SIGSTOP - 1)));
+    return SUCCESS;
 }

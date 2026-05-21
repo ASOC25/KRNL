@@ -39,36 +39,33 @@ namespace mlibc{
     }
 
     uid_t sys_getuid() {
-        mlibc::infoLogger() << "mlibc: " << __func__ << " is a stub!" << frg::endlog;
-        return 0;
+        return (uid_t)do_syscall(SYS_GETUID);
     }
 
     uid_t sys_geteuid() {
-        mlibc::infoLogger() << "mlibc: " << __func__ << " is a stub!" << frg::endlog;
-        return 0;
+        return (uid_t)do_syscall(SYS_GETEUID);
     }
 
     gid_t sys_getgid() {
-        mlibc::infoLogger() << "mlibc: " << __func__ << " is a stub!" << frg::endlog;
-        return 0;
+        return (gid_t)do_syscall(SYS_GETGID);
     }
 
     gid_t sys_getegid() {
-        mlibc::infoLogger() << "mlibc: " << __func__ << " is a stub!" << frg::endlog;
-        return 0;
+        return (gid_t)do_syscall(SYS_GETEGID);
     }
 
     int sys_setpgid(pid_t pid, pid_t pgid) {
         (void)pid;
         (void)pgid;
-        mlibc::infoLogger() << "mlibc: " << __func__ << " is a stub!" << frg::endlog;
+        // Process groups not implemented; silently succeed so shells don't abort.
         return 0;
     }
 
-    //getpgid
     int sys_getpgid(pid_t pid, pid_t *pgid) {
-        //We always return 0 as pgid, since we don't support process groups.
-        mlibc::infoLogger() << "mlibc: " << __func__ << " is a stub!" << frg::endlog;
+        (void)pid;
+        // Without kernel pgrp tracking, report pgrp=0. tcgetpgrp() also returns
+        // 0 (tty_foreground_pgrp initial value), so bash sees getpgrp()==tcgetpgrp()
+        // and correctly concludes it is the foreground process group.
         *pgid = 0;
         return 0;
     }

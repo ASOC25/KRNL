@@ -1,15 +1,20 @@
 #include <krnl/process/scheduler.h>
+extern void kcontext_restore_trampoline(cpu_context_t *kctx);
 #include <krnl/mem/allocator.h>
 #include <krnl/debug/debug.h>
 #include <krnl/arch/x86/cpu.h>
 #include <krnl/arch/x86/idt.h>
+#include <krnl/arch/x86/gdt.h>
 #include <krnl/libraries/std/stddef.h>
+#include <krnl/libraries/std/limits.h>
 #include <krnl/process/process.h>
 #include <krnl/arch/x86/apic.h>
 #include <krnl/process/signals.h>
 #include <krnl/libraries/assert/assert.h>
 #include <krnl/libraries/std/errno.h>
 #include <krnl/libraries/std/wait.h>
+#include <krnl/mem/vmm.h>
+#include <krnl/libraries/std/string.h>
 
 typedef struct scheduler_queue {
     thread_t * thread;
@@ -208,52 +213,128 @@ int scheduler_waitpid(thread_t * caller, int pid, int * status, int options) {
     return changed_pid;
 }
 
+static void __attribute__((noreturn)) idle_thread_fn(void) {
+    while (1) {
+        __asm__ volatile("sti; hlt");
+    }
+}
+
+void scheduler_create_idle_thread(void) {
+    process_t * idle_proc = kmalloc(sizeof(process_t));
+    if (!idle_proc) panic("idle: Failed to allocate idle process");
+    memset(idle_proc, 0, sizeof(process_t));
+
+    idle_proc->vmm = vmm_duplicate_kspace();
+    if (!idle_proc->vmm) panic("idle: Failed to duplicate kspace for idle process");
+
+    idle_proc->pid = 0;
+    idle_proc->ppid = 0;
+    idle_proc->nice = LONG_MAX - 1;
+    idle_proc->state = SCHEDULER_STATUS_RUNABLE;
+
+    thread_t * idle_thread = kmalloc(sizeof(thread_t));
+    if (!idle_thread) panic("idle: Failed to allocate idle thread");
+    memset(idle_thread, 0, sizeof(thread_t));
+
+    idle_thread->context = kmalloc(sizeof(context_t));
+    if (!idle_thread->context) panic("idle: Failed to allocate idle context");
+    memset(idle_thread->context, 0, sizeof(context_t));
+
+    idle_thread->kcontext = kmalloc(sizeof(context_t));
+    if (!idle_thread->kcontext) panic("idle: Failed to allocate idle kcontext");
+    memset(idle_thread->kcontext, 0, sizeof(context_t));
+
+    idle_thread->context->simd_ctx = kmalloc(512);
+    if (!idle_thread->context->simd_ctx) panic("idle: Failed to allocate idle SIMD context");
+    memset(idle_thread->context->simd_ctx, 0, 512);
+
+    idle_thread->kcontext->simd_ctx = kmalloc(512);
+    if (!idle_thread->kcontext->simd_ctx) panic("idle: Failed to allocate idle kernel SIMD context");
+    memset(idle_thread->kcontext->simd_ctx, 0, 512);
+
+    idle_thread->kstack = kstackalloc(idle_proc->vmm, KERNEL_STACK_SIZE);
+    if (!idle_thread->kstack) panic("idle: Failed to allocate kernel stack");
+
+    context_info_t * ctx_info = kmalloc(sizeof(context_info_t));
+    if (!ctx_info) panic("idle: Failed to allocate idle context_info");
+    memset(ctx_info, 0, sizeof(context_info_t));
+    ctx_info->thread = idle_thread;
+    ctx_info->cs = GDT_KERNEL_CODE * sizeof(gdt_entry_t);
+    ctx_info->ss = GDT_KERNEL_DATA * sizeof(gdt_entry_t);
+    ctx_info->kernel_stack = idle_thread->kstack->top;
+
+    context_info_t * kctx_info = kmalloc(sizeof(context_info_t));
+    if (!kctx_info) panic("idle: Failed to allocate idle kernel context_info");
+    memset(kctx_info, 0, sizeof(context_info_t));
+    kctx_info->thread = idle_thread;
+    kctx_info->cs = GDT_KERNEL_CODE * sizeof(gdt_entry_t);
+    kctx_info->ss = GDT_KERNEL_DATA * sizeof(gdt_entry_t);
+    kctx_info->kernel_stack = idle_thread->kstack->top;
+
+    idle_thread->context->cpu_ctx.rip    = (uint64_t)idle_thread_fn;
+    idle_thread->context->cpu_ctx.cs     = GDT_KERNEL_CODE * sizeof(gdt_entry_t);
+    idle_thread->context->cpu_ctx.ss     = GDT_KERNEL_DATA * sizeof(gdt_entry_t);
+    idle_thread->context->cpu_ctx.rflags = RFLAGS_INTERRUPT_ENABLE | RFLAGS_ONE;
+    idle_thread->context->cpu_ctx.rsp    = (uint64_t)idle_thread->kstack->top;
+    idle_thread->context->cpu_ctx.cr3    = (uint64_t)vmm_from_identity_map((uint64_t)idle_proc->vmm);
+    idle_thread->context->cpu_ctx.ctx_info = ctx_info;
+
+    idle_thread->kcontext->cpu_ctx.ctx_info = kctx_info;
+
+    idle_thread->process = idle_proc;
+    idle_thread->entry   = (void *)idle_thread_fn;
+    idle_thread->state   = SCHEDULER_STATUS_RUNABLE;
+    idle_thread->prio    = idle_proc->nice;
+    idle_thread->tid     = 0;
+    idle_thread->kcontext_pending = 0;
+
+    idle_proc->threads[0]      = idle_thread;
+    idle_proc->thread_count    = 1;
+    idle_proc->main_thread     = idle_thread;
+    idle_proc->current_thread  = idle_thread;
+
+    scheduler_add(idle_thread);
+}
+
 thread_t * scheduler_get_next_thread() {
-    //Iterate over the runable queue and return the thread with
-    //the highest priority (lowest numerical value of thread->prio)
-    //The thread will have its prio reset to its thread->process->nice
-    //All other threads in the queue will have their prio decreased by 1
-    long highest_priority = 0x7FFFFFFF;
-    long lowest_priority = -0x7FFFFFFF;
-    scheduler_queue_t * current = sched_queue;
     thread_t * chosen_thread = NULL;
-    while (current != NULL) {
-        if (current->thread->prio < highest_priority) {
-            signal_t * sig = process_get_signal(current->thread->process);
-            if (sig && current->thread->scontext == NULL) { //Do not create multiple signal contexts
-                status_t st = process_create_scontext(current->thread, sig);
-                if (st != SUCCESS) {
-                    panic("scheduler_handler: Failed to create signal context");
-                }
+    long highest_priority = LONG_MAX;
 
-                if (current->thread->state == SCHEDULER_STATUS_INTERRUPTIBLE_SLEEP && current->thread->scontext)
-                    current->thread->state = SCHEDULER_STATUS_RUNABLE;
-                //else: maybe we have processed the default signal handler instead of creating a signal context...
-            }
+    /* Single pass: deliver pending signals and find the highest-priority
+       runnable thread. */
+    for (scheduler_queue_t *n = sched_queue; n != NULL; n = n->next) {
+        thread_t *t = n->thread;
 
-            if (current->thread->state == SCHEDULER_STATUS_RUNABLE) {
-                highest_priority = current->thread->prio;
-                chosen_thread = current->thread;
-            }
+        if (t->prio >= highest_priority)
+            continue;
+
+        signal_t *sig = process_get_signal(t->process);
+        if (sig && t->scontext == NULL) {
+            status_t st = process_create_scontext(t, sig);
+            if (st != SUCCESS)
+                panic("scheduler_handler: Failed to create signal context");
+            if (t->state == SCHEDULER_STATUS_INTERRUPTIBLE_SLEEP)
+                t->state = SCHEDULER_STATUS_RUNABLE;
         }
-        current = current->next;
-    }
-    if (chosen_thread) {
-        current = sched_queue;
-        while (current != NULL) {
-            if (current->thread == chosen_thread) {
-                current->thread->prio = GET_PROC(current->thread)->nice;
-            } else {
-                if (current->thread->prio > lowest_priority) {
-                    current->thread->prio--;
-                }
-            }
-            current = current->next;
+
+        if (t->state == SCHEDULER_STATUS_RUNABLE) {
+            highest_priority = t->prio;
+            chosen_thread = t;
         }
-    } else {
-        panic("scheduler_get_next_thread: No runable threads found");
-        return NULL;
     }
+
+    if (!chosen_thread)
+        panic("scheduler_get_next_thread: No runnable thread found (idle process missing?)");
+
+    /* Second pass: reset winner's priority, age all others. */
+    for (scheduler_queue_t *n = sched_queue; n != NULL; n = n->next) {
+        thread_t *t = n->thread;
+        if (t == chosen_thread)
+            t->prio = GET_PROC(t)->nice;
+        else if (t->prio > LONG_MIN)
+            t->prio--;
+    }
+
     current_thread = chosen_thread;
     return chosen_thread;
 }
@@ -389,6 +470,11 @@ void scheduler_handler(cpu_context_t* ctx, uint8_t cpu_id, uint8_t is_kernel_ctx
                 if (save_current) {
                     //kprintf("scheduler_handler: Saving KERNEL context for thread %p\n", ending_thread);
                     context_save(ending_thread->kcontext, ctx);
+                    /* Kernel-mode interrupts don't push RSP onto the frame.
+                       Store the pre-interrupt RSP explicitly so the trampoline
+                       can switch to the correct kstack on restore. */
+                    ending_thread->kcontext->cpu_ctx.rsp =
+                        (uint64_t)ctx + sizeof(cpu_context_t) - 2 * sizeof(uint64_t);
                 } else {
                     //kprintf("scheduler_handler: Not saving KERNEL context for thread %p\n", ending_thread);
                 }
@@ -427,7 +513,9 @@ void scheduler_handler(cpu_context_t* ctx, uint8_t cpu_id, uint8_t is_kernel_ctx
         if (next_thread->kcontext_pending) {
             //kprintf("scheduler_handler: Restoring KERNEL context for thread %p\n", next_thread);
             next_thread->kcontext_pending = 0;
-            context_restore(next_thread->kcontext, ctx);
+            apic_arm_lapic_timer(cpu_id, SCHEDULER_TIMESLICE_MS);
+            kcontext_restore_trampoline(&next_thread->kcontext->cpu_ctx);
+            __builtin_unreachable();
         } else {
             //kprintf("scheduler_handler: Restoring USER context for thread %p\n", next_thread);
             context_restore(next_thread->context, ctx);

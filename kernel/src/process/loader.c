@@ -7,6 +7,7 @@
 #include <krnl/mem/mmap.h>
 #include <krnl/vfs/vfs.h>
 #include <krnl/process/process.h>
+#include <krnl/debug/perf.h>
 
 const char * elf_class[] = {
     "Invalid class",
@@ -158,7 +159,7 @@ const char * elf_version[] = {
     "Current version"
 };
 
-void * loader_create_args(void * stack, uint64_t max_size, char ** argv, char ** envp, struct auxv* auxv) {
+void * loader_create_args(void * stack, void * user_stack_top, uint64_t max_size, char ** argv, char ** envp, struct auxv* auxv) {
     // Create the stack with the following layout:
     // HIGHEST ADDRESS (stack)
     // +------------------+
@@ -188,7 +189,6 @@ void * loader_create_args(void * stack, uint64_t max_size, char ** argv, char **
     }
     uint64_t * ptr = ptr_buffer;
     uint64_t original_addr = (uint64_t)ptr;
-    kprintf("Argc at address: %p, value: %d\n", (void *)ptr, argc);
     *ptr++ = argc;
     for (int i = 0; i < argc; i++) {argv_pointers[i] = (uint64_t) ptr; *ptr = 0x1234; ptr++;}
     *ptr++ = 0x0;
@@ -207,28 +207,24 @@ void * loader_create_args(void * stack, uint64_t max_size, char ** argv, char **
         total_size_ascii += strlen(envp[i]) + 1; // +1 for null terminator
     }
 
-    // Make sure the the end of the stack (ptr+total_size_ascii) will be aligned to 16 bytes by increasing ptr
-    uint64_t stack_bottom = (uint64_t)ptr + (uint64_t)total_size_ascii;
     char * ascii_ptr = (char *)ptr;
-    while (stack_bottom % 16 != 0) {
-        ascii_ptr++;
-        stack_bottom++;
-    }
-    ascii_ptr += 8; 
 
     for (int i = 0; i < argc; i++) {
         memcpy(ascii_ptr, argv[i], strlen(argv[i]) + 1);
         *(uint64_t*)argv_pointers[i] = (uint64_t)(ascii_ptr - original_addr);
         ascii_ptr += (strlen(argv[i]) + 1);
     }
-    
+
     for (int i = 0; i < envc; i++) {
         memcpy(ascii_ptr, envp[i], strlen(envp[i]) + 1);
         *(uint64_t*)envp_pointers[i] = (uint64_t)(ascii_ptr - original_addr);
         ascii_ptr += (strlen(envp[i]) + 1);
     }
 
+    /* Round size up to 16-byte boundary so that (stack - size) is 16-byte
+     * aligned at process entry, as required by the SysV AMD64 ABI. */
     uint64_t size = (uint64_t)ascii_ptr - original_addr;
+    size = (size + 15) & ~15ULL;
     //Copy ptr to the stack at the end of the stack
     if (size > max_size) {
         panic("Stack size exceeds maximum allowed size");
@@ -246,7 +242,7 @@ void * loader_create_args(void * stack, uint64_t max_size, char ** argv, char **
     char  ** argv_ptr = (char **)(stack_ptr + sizeof(uint64_t));
     for (int i = 0; i < argc; i++) {
         if (argv_ptr[i] != NULL) {
-            argv_ptr[i] += ((uint64_t)(stack - size));
+            argv_ptr[i] += ((uint64_t)((uint8_t*)user_stack_top - size));
         } else {
             argv_ptr[i] = NULL;
         }
@@ -254,7 +250,7 @@ void * loader_create_args(void * stack, uint64_t max_size, char ** argv, char **
     char  ** envp_ptr = (char **)(stack_ptr + sizeof(uint64_t) + (argc + 1) * sizeof(uint64_t));
     for (int i = 0; i < envc; i++) {
         if (envp_ptr[i] != NULL) {
-            envp_ptr[i] += ((uint64_t)(stack - size));
+            envp_ptr[i] += ((uint64_t)((uint8_t*)user_stack_top - size));
         } else {
             envp_ptr[i] = NULL;
         }
@@ -296,8 +292,41 @@ status_t allocate_signal_trampoline(process_t* process) {
     return SUCCESS;
 }
 
+status_t allocate_vdso(process_t* process) {
+    void * addr = vmarea_mmap(process, VDSO_USER_ADDRESS, 0x1000, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0, 1);
+    if (addr == NULL || addr != VDSO_USER_ADDRESS) {
+        panic("allocate_vdso: Failed to allocate VDSO page");
+        return FAILURE;
+    }
+
+    void * identity = to_kident((vmm_root_t *)process->vmm, addr);
+    if (identity == NULL) {
+        panic("allocate_vdso: Failed to get identity mapped address for VDSO");
+        return FAILURE;
+    }
+    memset(identity, 0, 0x1000);
+
+    /* vdso_t lives at the start of the page */
+    vdso_t * hdr = (vdso_t *)identity;
+    /* vdso_entry_t for the signal trampoline follows immediately */
+    vdso_entry_t * tramp = (vdso_entry_t *)((uint8_t *)identity + sizeof(vdso_t));
+
+    tramp->id   = VDSO_ENTRY_SIGNAL_TRAMP;
+    tramp->info = SIGNAL_TRAMPOLINE_ADDRESS;
+    tramp->size = 0x1000;
+    tramp->next = NULL;
+
+    hdr->pd            = NULL;
+    hdr->base_addresss = (uint64_t)VDSO_USER_ADDRESS;
+    hdr->size          = 0x1000;
+    /* entry pointer must be the user-space address of the entry */
+    hdr->entry = (vdso_entry_t *)((uint8_t *)VDSO_USER_ADDRESS + sizeof(vdso_t));
+
+    return SUCCESS;
+}
+
 status_t allocate_segment(process_t* process, uint8_t * elf_datab, Elf64_Phdr * program_header, void* base) {
-    kprintf("Starting ALLOCATE SEGMENT\n");
+    //kprintf("Starting ALLOCATE SEGMENT\n");
     if (program_header->p_type != PT_LOAD) return SUCCESS; //Not all program headers need to be loaded, only PT_LOAD
 
     uint64_t vaddr_offset = program_header->p_vaddr & 0xfff;
@@ -319,21 +348,87 @@ status_t allocate_segment(process_t* process, uint8_t * elf_datab, Elf64_Phdr * 
         return FAILURE;
     }
 
-    kprintf("allocate_segment: Mapped segment at vaddr: %p, size: %llu bytes (%llu pages), perms: 0x%x\n", (void *)vaddr, total_pages * 0x1000, total_pages, perms);
+    //kprintf("allocate_segment: Mapped segment at vaddr: %p, size: %llu bytes (%llu pages), perms: 0x%x\n", (void *)vaddr, total_pages * 0x1000, total_pages, perms);
 
     void * identity = to_kident((vmm_root_t *)process->vmm, ptr);
     if (identity == NULL) {
         panic("allocate_segment: Failed to get identity mapped address");
         return FAILURE;
     }
-    kprintf("Identity mapped address: %p\n", identity);
+    //kprintf("Identity mapped address: %p\n", identity);
     //Zero the buffer
     memset((uint8_t *)identity, 0, total_pages * 0x1000);
     //Copy file data
     memcpy((uint8_t *)identity + vaddr_offset, elf_datab + program_header->p_offset, program_header->p_filesz);
-    kprintf("Copied %llu bytes to segment at offset %llu\n", program_header->p_filesz, vaddr_offset);
-    kprintf("Finished ALLOCATE SEGMENT\n");
+    //kprintf("Copied %llu bytes to segment at offset %llu\n", program_header->p_filesz, vaddr_offset);
+    //kprintf("Finished ALLOCATE SEGMENT\n");
     return SUCCESS;
+}
+
+// Extract STT_FUNC symbols from an in-memory ELF, returning a heap-allocated
+// proc_symtab_t or NULL. Prefers SHT_SYMTAB over SHT_DYNSYM.
+// load_base is added at resolution time (0 for ET_EXEC, actual base for SO).
+proc_symtab_t * extract_elf_symtab(uint8_t * elf_data, size_t file_size, uint64_t load_base) {
+    if (!elf_data || file_size < sizeof(Elf64_Ehdr)) return NULL;
+    Elf64_Ehdr * eh = (Elf64_Ehdr *)elf_data;
+    if (!eh->e_shoff || !eh->e_shnum) return NULL;
+    if (eh->e_shoff + (uint64_t)eh->e_shnum * sizeof(Elf64_Shdr) > file_size) return NULL;
+
+    Elf64_Shdr * shdrs = (Elf64_Shdr *)(elf_data + eh->e_shoff);
+
+    // Prefer full .symtab; fall back to .dynsym
+    Elf64_Shdr * sym_sh = NULL;
+    Elf64_Shdr * str_sh = NULL;
+    for (int pass = 0; pass < 2 && !sym_sh; pass++) {
+        uint32_t want = pass == 0 ? SHT_SYMTAB : SHT_DYNSYM;
+        for (int i = 0; i < eh->e_shnum; i++) {
+            if (shdrs[i].sh_type != want) continue;
+            uint32_t li = shdrs[i].sh_link;
+            if (li >= eh->e_shnum) continue;
+            if (shdrs[i].sh_offset + shdrs[i].sh_size > file_size) continue;
+            if (shdrs[li].sh_offset + shdrs[li].sh_size > file_size) continue;
+            sym_sh = &shdrs[i];
+            str_sh = &shdrs[li];
+            break;
+        }
+    }
+    if (!sym_sh) return NULL;
+
+    uint64_t raw_count = sym_sh->sh_size / sizeof(Elf64_Sym);
+    Elf64_Sym * raw = (Elf64_Sym *)(elf_data + sym_sh->sh_offset);
+
+    uint64_t func_count = 0;
+    for (uint64_t k = 0; k < raw_count; k++) {
+        if (ELF64_ST_TYPE(raw[k].st_info) == STT_FUNC &&
+            raw[k].st_value != 0 && raw[k].st_size != 0)
+            func_count++;
+    }
+    if (func_count == 0) return NULL;
+
+    Elf64_Sym * syms    = kmalloc(func_count * sizeof(Elf64_Sym));
+    char      * strtab  = kmalloc(str_sh->sh_size);
+    proc_symtab_t * st  = kmalloc(sizeof(proc_symtab_t));
+    if (!syms || !strtab || !st) {
+        if (syms)   kfree(syms);
+        if (strtab) kfree(strtab);
+        if (st)     kfree(st);
+        return NULL;
+    }
+
+    uint64_t j = 0;
+    for (uint64_t k = 0; k < raw_count; k++) {
+        if (ELF64_ST_TYPE(raw[k].st_info) == STT_FUNC &&
+            raw[k].st_value != 0 && raw[k].st_size != 0)
+            syms[j++] = raw[k];
+    }
+    memcpy(strtab, elf_data + str_sh->sh_offset, str_sh->sh_size);
+
+    st->syms      = syms;
+    st->strtab    = strtab;
+    st->count     = func_count;
+    st->load_base = load_base;
+    st->next      = NULL;
+    return st;
 }
 
 //Load dynamic linker at DYNAMIC_LINKER_BASE
@@ -388,12 +483,22 @@ uint64_t load_dynamic_linker(process_t* process, char* dynamic_linker_path) {
             return 0;
         }
     }
-    uint64_t entry_point = (uint64_t)elf_header->e_entry+DYNAMIC_LINKER_BASE_ADDRESS;
+    uint64_t entry_point = (uint64_t)elf_header->e_entry + DYNAMIC_LINKER_BASE_ADDRESS;
+
+    // Extract ld.so symbols and locate _r_debug for lazy shlib loading
+    proc_symtab_t * ld_st = extract_elf_symtab(elf_datab, file_size,
+                                                (uint64_t)DYNAMIC_LINKER_BASE_ADDRESS);
+    if (ld_st) {
+        ld_st->next = process->symtab_list;
+        process->symtab_list = ld_st;
+    }
+
     kfree(elf_datab);
     return entry_point;
 }
 
 loaded_elf_t* elf_load_elf(process_t * process, const char * filename, thread_t* thread) {
+    PERF_BEGIN(t_open);
     vfs_file_descriptor_t fd;
     status_t st = vfs_open(filename, 0, &fd);
     if(st != SUCCESS || !fd.valid) {
@@ -402,10 +507,10 @@ loaded_elf_t* elf_load_elf(process_t * process, const char * filename, thread_t*
 
     vfs_stat_t stat_buf;
     if (vfs_fstat(&fd, &stat_buf) != SUCCESS) {
-        //panic("elf_load_elf: Failed to stat ELF file %s\n", filename);
         vfs_close(&fd);
         return NULL;
     }
+    PERF_END(t_open, "    elf_load/vfs-open+stat");
 
     size_t file_size = stat_buf.st_size;
     uint8_t * elf_datab = (uint8_t *)kmalloc(file_size);
@@ -415,9 +520,10 @@ loaded_elf_t* elf_load_elf(process_t * process, const char * filename, thread_t*
         return NULL;
     }
 
+    PERF_BEGIN(t_read);
     ssize_t bytes_read = vfs_read(&fd, elf_datab, file_size);
+    PERF_END(t_read, "    elf_load/vfs-read");
     if ((size_t)bytes_read != file_size) {
-        //panic("elf_load_elf: Failed to read complete ELF file %s\n", filename);
         kfree(elf_datab);
         vfs_close(&fd);
         return NULL;
@@ -469,8 +575,9 @@ loaded_elf_t* elf_load_elf(process_t * process, const char * filename, thread_t*
         return NULL;
     }
 
+    PERF_BEGIN(t_teardown);
     vmarea_remove_all(process);
-    
+
     //Iterate all threads and remove them
     for (int i = 0; i < MAX_THREADS_PER_PROCESS; i++) {
         thread_t * t = process->threads[i];
@@ -479,12 +586,16 @@ loaded_elf_t* elf_load_elf(process_t * process, const char * filename, thread_t*
             process->threads[i] = NULL;
         }
     }
+    PERF_END(t_teardown, "    elf_load/vmarea-remove-all");
 
     Elf64_Phdr * program_header = (Elf64_Phdr *) (elf_datab + elf_header->e_phoff);
     struct proc_ld pld = {0};
+    Elf64_Phdr * first_load = NULL;
 
+    PERF_BEGIN(t_segs);
     for (int i = 0; i < elf_header->e_phnum; i++) {
         if (program_header[i].p_type == PT_LOAD) {
+            if (!first_load) first_load = &program_header[i];
             if (allocate_segment(process, elf_datab, &program_header[i], 0) != SUCCESS) {
                 panic("elf_load_elf: Failed to allocate segment\n");
                 kfree(elf_datab);
@@ -507,13 +618,25 @@ loaded_elf_t* elf_load_elf(process_t * process, const char * filename, thread_t*
             memcpy(pld.ld_path, elf_datab + program_header[i].p_offset, program_header[i].p_filesz);
         }
     }
+    PERF_END(t_segs, "    elf_load/load-segments");
 
-    //Load signal trampoline
+    if (!pld.at_phdr && first_load) {
+        pld.at_phdr = (void *)(first_load->p_vaddr + elf_header->e_phoff - first_load->p_offset);
+    }
+
+    PERF_BEGIN(t_tramp);
     if (allocate_signal_trampoline(process) != SUCCESS) {
         panic("elf_load_elf: Failed to allocate signal trampoline\n");
         kfree(elf_datab);
         return NULL;
     }
+
+    if (allocate_vdso(process) != SUCCESS) {
+        panic("elf_load_elf: Failed to allocate VDSO\n");
+        kfree(elf_datab);
+        return NULL;
+    }
+    PERF_END(t_tramp, "    elf_load/trampoline+vdso");
 
     struct auxv * vectors = kmalloc(sizeof(struct auxv) * 8);
     if (!vectors) {
@@ -533,7 +656,9 @@ loaded_elf_t* elf_load_elf(process_t * process, const char * filename, thread_t*
     memset(ld, 0, sizeof(loaded_elf_t));
 
     if (pld.ld_path) {
+        PERF_BEGIN(t_dynld);
         ld->entry = load_dynamic_linker(process, pld.ld_path);
+        PERF_END(t_dynld, "    elf_load/load-dynamic-linker");
         if (ld->entry == 0) {
             panic("elf_load_elf: Failed to load dynamic linker\n");
             kfree(elf_datab);
@@ -545,7 +670,7 @@ loaded_elf_t* elf_load_elf(process_t * process, const char * filename, thread_t*
         ld->entry = (void*)elf_header->e_entry;
     }
 
-    memset(vectors, 0, sizeof(struct auxv) * 7);
+    memset(vectors, 0, sizeof(struct auxv) * 8);
     vectors[0].a_type = AT_ENTRY;
     vectors[0].a_val = (void*)elf_header->e_entry;
     vectors[1].a_type = AT_PHDR;
@@ -559,14 +684,57 @@ loaded_elf_t* elf_load_elf(process_t * process, const char * filename, thread_t*
     vectors[5].a_type = AT_PAGESZ;
     vectors[5].a_val = (void*)(uint64_t)0x1000;
     vectors[6].a_type = AT_SYSINFO_EHDR;
-    vectors[6].a_val = (void*)(uint64_t)VDSO_BASE_ADDRESS;
+    vectors[6].a_val = VDSO_USER_ADDRESS;
     vectors[7].a_type = AT_NULL;
     vectors[7].a_val = 0;
 
-    ld->ehdr = elf_header;
+    if (pld.ld_path) kfree(pld.ld_path);
+
+    // Free old symtab list (execve replacing binary) and shlib state
+    proc_symtab_t * old = process->symtab_list;
+    while (old) {
+        proc_symtab_t * next = old->next;
+        kfree(old->syms);
+        kfree(old->strtab);
+        kfree(old);
+        old = next;
+    }
+    process->symtab_list = NULL;
+    process->r_debug_va = 0;
+    process->shlib_syms_loaded = 0;
+
+    PERF_BEGIN(t_syms);
+    proc_symtab_t * exe_st = extract_elf_symtab(elf_datab, file_size, 0);
+    if (exe_st) {
+        exe_st->next = process->symtab_list;
+        process->symtab_list = exe_st;
+    }
+    PERF_END(t_syms, "    elf_load/extract-symtab");
+
+    // Record the VA of DT_DEBUG's d_ptr field so we can read the r_debug
+    // pointer at exception time (ld.so fills it in during startup).
+    Elf64_Phdr * phdrs = (Elf64_Phdr *)(elf_datab + elf_header->e_phoff);
+    for (int i = 0; i < elf_header->e_phnum; i++) {
+        if (phdrs[i].p_type != PT_DYNAMIC) continue;
+        size_t dyn_count = phdrs[i].p_filesz / sizeof(Elf64_Dyn);
+        Elf64_Dyn * dyns = (Elf64_Dyn *)(elf_datab + phdrs[i].p_offset);
+        for (size_t j = 0; j < dyn_count; j++) {
+            if (dyns[j].d_tag == DT_DEBUG) {
+                // d_un.d_ptr is 8 bytes after d_tag within each Elf64_Dyn entry
+                process->r_debug_va = phdrs[i].p_vaddr
+                                    + (uint64_t)j * sizeof(Elf64_Dyn)
+                                    + sizeof(Elf64_Sxword);
+                break;
+            }
+        }
+        break;
+    }
+
+    ld->ehdr = NULL;
+    kfree(elf_datab);
     ld->auxv = vectors;
-    ld->auxv_size = sizeof(struct auxv) * 8;
-    ld->ld = &pld;
-    ld->ld_size = sizeof(struct proc_ld);
+    ld->auxv_size = 8;
+    ld->ld = NULL;
+    ld->ld_size = 0;
     return ld;
 }

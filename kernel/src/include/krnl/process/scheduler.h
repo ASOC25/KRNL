@@ -5,7 +5,7 @@
 #include <krnl/libraries/std/stddef.h>
 #include <krnl/process/process.h>
 
-#define SCHEDULER_TIMESLICE_MS 100
+#define SCHEDULER_TIMESLICE_MS 5
 
 #define SCHEDULER_SOURCE_TIMER_INTERRUPT 0
 #define SCHEDULER_SOURCE_YIELD_SYSCALL 1
@@ -59,4 +59,5 @@ int scheduler_waitpid(thread_t * caller, int pid, int * status, int options);
 void dump_scheduler_status();
 process_t * scheduler_get_process_by_pid(pid_t pid);
 void scheduler_sigreturn(cpu_context_t* ctx, thread_t * thread);
+void scheduler_create_idle_thread(void);
 #endif

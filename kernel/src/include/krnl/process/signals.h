@@ -7,9 +7,9 @@
 #include <krnl/libraries/std/time.h>
 #include <krnl/process/sigstructs.h>
 
-void sleep(thread_t * process, int condition);
-void wakeup(int condition);
-int check_sleep_condition(int condition);
+void sleep(thread_t * process, int64_t condition);
+void wakeup(int64_t condition);
+int check_sleep_condition(int64_t condition);
 status_t nanosleep(thread_t * thread, struct timespec *duration, struct timespec *rem);
 
 void update_counters();

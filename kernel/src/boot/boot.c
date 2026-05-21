@@ -15,6 +15,7 @@
 #include <krnl/mem/mem.h>
 #include <krnl/process/process.h>
 #include <krnl/fs/x1fs/x1fs.h>
+#include <krnl/fs/ext2/ext2.h>
 #include <krnl/fs/tty/tty.h>
 #include <krnl/vfs/vfs.h>
 #include <krnl/arch/x86/apic.h>
@@ -54,6 +55,7 @@ void boot_startup() {
     //Probe filesystems on disks
 
     //Start the core subsystem (manages processes, scheduling, uspace, etc)
+    ext2_init();
     x1fs_init();
     tty_init();
     vfs_mount_t * root_mount = vfs_new_mount(4, 0, "/");
@@ -69,6 +71,7 @@ void boot_startup() {
     //run_all_tests();
 
     process_init("/init.elf", "/dev/tty0", cwd_path, root_path);
+    scheduler_create_idle_thread();
     __asm__("sti");
     while (1);
 }

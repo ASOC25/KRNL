@@ -129,3 +129,55 @@ __interrupt_vector:
         CREATE_INTERRUPT_NAME i
     %assign i i+1
     %endrep
+
+; kcontext_restore_trampoline(cpu_context_t *kctx)
+; Restores a kernel-mode thread whose context was saved by interrupt_entry.
+; Switches RSP to the target's pre-interrupt RSP (stored in kctx->rsp by the
+; scheduler), builds an iretq frame at that RSP, restores all registers, and
+; executes iretq.  Never returns.
+;
+; cpu_context_t offsets (packed, all uint64_t):
+;   +0   cr3          +8   ctx_info*
+;   +16  rax          +24  rbx   +32  rcx   +40  rdx
+;   +48  rsi          +56  rdi   +64  rbp
+;   +72  r8  +80  r9  +88  r10  +96  r11  +104 r12  +112 r13  +120 r14  +128 r15
+;   +152 rip         +160 cs           +168 rflags
+;   +176 rsp (pre-interrupt RSP, set explicitly by scheduler)
+global kcontext_restore_trampoline
+kcontext_restore_trampoline:
+    ; rdi = &next_thread->kcontext->cpu_ctx
+
+    ; Switch to target thread's pre-interrupt RSP
+    mov rsp, [rdi + 176]
+
+    ; Build iretq frame below that RSP (kernel→kernel: only RIP/CS/RFLAGS needed)
+    push qword [rdi + 168]  ; RFLAGS
+    push qword [rdi + 160]  ; CS
+    push qword [rdi + 152]  ; RIP
+
+    ; Restore CR3
+    mov rax, [rdi + 0]
+    mov cr3, rax
+
+    ; Restore ctx_info into [gs:0x8]
+    mov rax, [rdi + 8]
+    mov [gs:0x8], rax
+
+    ; Restore general-purpose registers (rax and rdi last)
+    mov rax, [rdi + 16]
+    mov rbx, [rdi + 24]
+    mov rcx, [rdi + 32]
+    mov rdx, [rdi + 40]
+    mov rsi, [rdi + 48]
+    mov rbp, [rdi + 64]
+    mov r8,  [rdi + 72]
+    mov r9,  [rdi + 80]
+    mov r10, [rdi + 88]
+    mov r11, [rdi + 96]
+    mov r12, [rdi + 104]
+    mov r13, [rdi + 112]
+    mov r14, [rdi + 120]
+    mov r15, [rdi + 128]
+    mov rdi, [rdi + 56]
+
+    iretq

@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Configurable parameters via environment variables
 : "${IMG:=build/disk.img}"
-: "${IMG_SIZE_MB:=128}"
+: "${IMG_SIZE_MB:=768}"
 : "${MTOOLS_RC:=.mtoolsrc}"
 
 ROOT_DIR=$(cd "$(dirname "$0")/../.." && pwd)

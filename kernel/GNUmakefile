@@ -91,8 +91,10 @@ $(OBJDIR)/%_s.o: $(SRCDIR)/%.S
 	@ mkdir -p $(@D)
 	@ $(CC) $(CFLAGS) -c $^ -o $@
 
-link: 
-#	@ echo !==== LINKING $^
+link:
+	@ $(LD) $(LDFLAGS) -o $(BUILDDIR)/$(KERNEL) $(OBJS) $(RAMDISK_OBJ)
+	@ nm --defined-only -n $(BUILDDIR)/$(KERNEL) | python3 $(HOME)/scripts/gen_ksyms.py > $(SRCDIR)/debug/kernel_syms.c
+	@ $(CC) $(CFLAGS) -c $(SRCDIR)/debug/kernel_syms.c -o $(OBJDIR)/debug/kernel_syms.o
 	@ $(LD) $(LDFLAGS) -o $(BUILDDIR)/$(KERNEL) $(OBJS) $(RAMDISK_OBJ)
 
 clean:
