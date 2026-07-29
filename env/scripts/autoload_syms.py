@@ -1,17 +1,22 @@
 """
 autoload_syms.py — GDB Python script for KRNL debugging.
 
-Automatically computes and issues add-symbol-file commands for user-space
-binaries by reading .text section VMAs from the on-disk ELF files and
-combining them with the runtime load bases known from the OS design:
+Loads symbols for bash and mlibc at their actual runtime addresses.
 
-  - ld.so  → always mapped at DYNAMIC_LINKER_BASE_ADDRESS (0x40000000)
-  - bash   → ET_EXEC, non-PIE: text VMA in ELF == load address
-  - others → discovered by walking the ld.so r_debug link map
+Kernel load layout (from loader.c):
+  - ET_EXEC (bash, init, ...): base=0, so ELF VMAs are absolute load addresses
+  - ld.so:  always mapped at DYNAMIC_LINKER_BASE_ADDRESS (0x40000000)
+  - libc.so and other shared libs: loaded by ld.so; base discovered via
+    the r_debug link map that ld.so fills in before calling main()
+
+Section relocation strategy:
+  - ET_EXEC:  add-symbol-file FILE -o 0
+              (ELF VMAs already are absolute addresses, no adjustment needed)
+  - ET_DYN:   add-symbol-file FILE -o LOAD_BASE
+              (-o offsets every section, so .data/.bss land correctly)
 
 Usage: sourced automatically from debug.gdb. Symbols are loaded the first
-time GDB stops at a frame named 'main'. You can also run 'autoload-syms'
-manually at any time after the process has started.
+time GDB stops at a frame named 'main'. Also available as 'autoload-syms'.
 """
 
 import gdb
@@ -19,63 +24,60 @@ import os
 import struct
 import subprocess
 
-SCRIPT_DIR   = os.path.dirname(os.path.abspath(__file__))
-KRNL_ROOT    = os.path.normpath(os.path.join(SCRIPT_DIR, '..', '..'))
-SYSROOT      = os.path.join(KRNL_ROOT, 'sysroot')
-LD_BASE      = 0x40000000  # DYNAMIC_LINKER_BASE_ADDRESS from loader.h
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+KRNL_ROOT  = os.path.normpath(os.path.join(SCRIPT_DIR, '..', '..'))
+SYSROOT    = os.path.join(KRNL_ROOT, 'sysroot')
+LD_BASE    = 0x40000000  # DYNAMIC_LINKER_BASE_ADDRESS from loader.h
 
-_loaded = False  # prevent duplicate loading
+_loaded = False
 
 
-def _readelf_text_vma(binary_path):
-    """Return the .text section VMA from the on-disk binary, or None."""
-    try:
-        out = subprocess.check_output(
-            ['readelf', '-S', '--wide', binary_path],
-            stderr=subprocess.DEVNULL
-        ).decode(errors='replace')
-        for line in out.splitlines():
-            parts = line.split()
-            for i, p in enumerate(parts):
-                if p == '.text' and i + 2 < len(parts):
-                    try:
-                        return int(parts[i + 2], 16)
-                    except ValueError:
-                        pass
-    except Exception:
-        pass
-    return None
-
+# ── ELF introspection helpers ────────────────────────────────────────────────
 
 def _elf_type(binary_path):
     """Return 'EXEC', 'DYN', or None."""
     try:
         out = subprocess.check_output(
-            ['readelf', '-h', binary_path],
-            stderr=subprocess.DEVNULL
+            ['readelf', '-h', binary_path], stderr=subprocess.DEVNULL
         ).decode(errors='replace')
         for line in out.splitlines():
             if 'Type:' in line:
-                if 'EXEC' in line:
-                    return 'EXEC'
-                if 'DYN' in line:
-                    return 'DYN'
+                if 'EXEC' in line: return 'EXEC'
+                if 'DYN'  in line: return 'DYN'
     except Exception:
         pass
     return None
 
 
-def _add_sym(sym_path, text_addr):
+# ── GDB add-symbol-file wrappers ─────────────────────────────────────────────
+
+def _add_sym_exec(sym_path):
+    """ET_EXEC: ELF VMAs are absolute — no offset needed."""
     if not os.path.exists(sym_path):
         print(f'[autoload-syms] Missing: {sym_path}')
         return
-    cmd = f'add-symbol-file {sym_path} 0x{text_addr:x}'
+    cmd = f'add-symbol-file {sym_path} -o 0'
     print(f'[autoload-syms] {cmd}')
     try:
         gdb.execute(cmd, to_string=True)
     except Exception as e:
         print(f'[autoload-syms] Warning: {e}')
 
+
+def _add_sym_pie(sym_path, load_base):
+    """ET_DYN / shared lib: offset every section by load_base."""
+    if not os.path.exists(sym_path):
+        print(f'[autoload-syms] Missing: {sym_path}')
+        return
+    cmd = f'add-symbol-file {sym_path} -o 0x{load_base:x}'
+    print(f'[autoload-syms] {cmd}')
+    try:
+        gdb.execute(cmd, to_string=True)
+    except Exception as e:
+        print(f'[autoload-syms] Warning: {e}')
+
+
+# ── Memory reading helpers ───────────────────────────────────────────────────
 
 def _read_u64(addr):
     try:
@@ -94,107 +96,107 @@ def _read_cstr(addr, max_len=512):
         return ''
 
 
+# ── Link-map walker (for shared libs loaded by ld.so) ────────────────────────
+
 def _walk_link_map():
-    """Walk ld.so's r_debug link map and load symbols for each shared lib."""
+    """Walk ld.so's r_debug link map; use load_base from each entry as -o offset."""
+    def _process_entry(l_addr, l_name_ptr):
+        if not l_name_ptr or not l_addr:
+            return
+        name = _read_cstr(l_name_ptr)
+        if not name:
+            return
+        for candidate in (
+            os.path.join(SYSROOT, name.lstrip('/')),
+            name,
+        ):
+            if os.path.exists(candidate):
+                _add_sym_pie(candidate + '.sym', l_addr)
+                break
+
+    # Primary path: use GDB type info after ld.so symbols are loaded
     try:
-        # After ld.so symbols are loaded, GDB can evaluate _r_debug directly.
         r_debug = gdb.parse_and_eval('_r_debug')
         r_map   = r_debug['r_map']
         visited = set()
         while r_map and int(r_map) not in visited:
             visited.add(int(r_map))
-            l_addr = int(r_map['l_addr'])
+            l_addr     = int(r_map['l_addr'])
             l_name_ptr = int(r_map['l_name'])
             r_map = r_map['l_next']
+            _process_entry(l_addr, l_name_ptr)
+        return
+    except Exception:
+        pass
 
-            if not l_name_ptr or not l_addr:
-                continue
-            name = _read_cstr(l_name_ptr)
-            if not name:
-                continue
-
-            # Resolve path relative to sysroot
-            for candidate in (
-                os.path.join(SYSROOT, name.lstrip('/')),
-                name,
-            ):
-                if os.path.exists(candidate):
-                    text_off = _readelf_text_vma(candidate)
-                    if text_off is not None:
-                        _add_sym(candidate + '.sym', l_addr + text_off)
-                    break
-
+    # Fallback: raw memory walk using known r_debug layout:
+    #   int r_version (4 B) + pad (4 B) + struct link_map *r_map (8 B)
+    try:
+        sym = gdb.lookup_global_symbol('_r_debug')
+        if sym is None:
+            raise RuntimeError('_r_debug not found')
+        r_debug_addr = int(sym.value().address)
+        r_map_addr   = _read_u64(r_debug_addr + 8)
+        visited = set()
+        while r_map_addr and r_map_addr not in visited:
+            visited.add(r_map_addr)
+            l_addr     = _read_u64(r_map_addr)       # l_addr  @ +0
+            l_name_ptr = _read_u64(r_map_addr + 8)   # l_name  @ +8
+            l_next     = _read_u64(r_map_addr + 24)  # l_next  @ +24
+            _process_entry(l_addr, l_name_ptr)
+            r_map_addr = l_next
     except Exception as e:
-        # Fall back to raw memory offsets if type info is unavailable.
-        try:
-            sym = gdb.lookup_global_symbol('_r_debug')
-            if sym is None:
-                raise RuntimeError('_r_debug symbol not found')
-            # r_debug layout: int r_version (4B) + pad (4B) + struct link_map *r_map (8B)
-            r_debug_addr = int(sym.value().address)
-            r_map_addr   = _read_u64(r_debug_addr + 8)
-            visited = set()
-            while r_map_addr and r_map_addr not in visited:
-                visited.add(r_map_addr)
-                l_addr     = _read_u64(r_map_addr)
-                l_name_ptr = _read_u64(r_map_addr + 8)
-                l_next     = _read_u64(r_map_addr + 24)
-                if l_name_ptr and l_addr:
-                    name = _read_cstr(l_name_ptr)
-                    if name:
-                        for candidate in (
-                            os.path.join(SYSROOT, name.lstrip('/')),
-                            name,
-                        ):
-                            if os.path.exists(candidate):
-                                text_off = _readelf_text_vma(candidate)
-                                if text_off is not None:
-                                    _add_sym(candidate + '.sym', l_addr + text_off)
-                                break
-                r_map_addr = l_next
-        except Exception as e2:
-            print(f'[autoload-syms] Could not walk link map: {e2}')
+        print(f'[autoload-syms] Could not walk link map: {e}')
 
+
+# ── Sysroot scan helper ──────────────────────────────────────────────────────
+
+def _find_sym_files(root):
+    for dirpath, _, filenames in os.walk(root):
+        for fname in filenames:
+            if fname.endswith('.sym'):
+                yield os.path.join(dirpath, fname)
+
+
+# ── Main entry point ─────────────────────────────────────────────────────────
 
 def autoload_symbols():
     global _loaded
     _loaded = True
 
-    # ld.so: PIE shared lib always loaded at DYNAMIC_LINKER_BASE_ADDRESS
-    ld_bin = os.path.join(SYSROOT, 'usr/lib/ld.so')
-    if os.path.exists(ld_bin):
-        text_off = _readelf_text_vma(ld_bin)
-        if text_off is not None:
-            _add_sym(ld_bin + '.sym', LD_BASE + text_off)
+    # ld.so: ET_DYN always at DYNAMIC_LINKER_BASE_ADDRESS
+    ld_sym = os.path.join(SYSROOT, 'usr/lib/ld.so.sym')
+    if os.path.exists(ld_sym):
+        _add_sym_pie(ld_sym, LD_BASE)
 
-    # Main executables: ET_EXEC binaries have fixed text VMAs
-    for rel_path in ('usr/bin/bash', 'usr/bin/init', 'bin/sh'):
-        bin_path = os.path.join(SYSROOT, rel_path)
+    # All ET_EXEC binaries in sysroot: ELF VMAs are absolute (base=0 in loader)
+    for sym_path in sorted(_find_sym_files(SYSROOT)):
+        bin_path = sym_path[:-4]
         if not os.path.exists(bin_path):
             continue
         if _elf_type(bin_path) == 'EXEC':
-            text_vma = _readelf_text_vma(bin_path)
-            if text_vma is not None:
-                _add_sym(bin_path + '.sym', text_vma)
+            _add_sym_exec(sym_path)
 
-    # Shared libraries: walk the ld.so link map
+    # Shared libs (libc.so, etc.): runtime base from ld.so link map
     _walk_link_map()
 
+
+# ── GDB command & event hook ─────────────────────────────────────────────────
 
 class AutoloadSymsCmd(gdb.Command):
     """Load symbol files for user-space binaries.
 
-    Computes .text load addresses from on-disk ELF binaries using readelf,
-    combining them with runtime load bases (fixed for ld.so, from the link
-    map for shared libraries). Safe to run multiple times.
+    Correct -o offsets are applied per binary type:
+      ET_EXEC  → -o 0   (absolute VMAs from kernel loader)
+      ET_DYN   → -o LOAD_BASE  (base from ld.so link map)
+    Safe to run multiple times.
     """
-
     def __init__(self):
         super().__init__('autoload-syms', gdb.COMMAND_SUPPORT)
 
     def invoke(self, arg, from_tty):
         global _loaded
-        _loaded = False  # allow re-run if called manually
+        _loaded = False
         autoload_symbols()
 
 

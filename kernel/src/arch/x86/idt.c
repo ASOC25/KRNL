@@ -193,6 +193,32 @@ static const char * resolve_any_symbol(process_t *proc, uint64_t addr) {
     return process_resolve_symbol(proc, addr);
 }
 
+/* Print 16 words from RSP — lets us trace the caller when RBP=0 breaks the
+   frame chain.  The word at [RSP+0] is the return address pushed by the
+   null-call that caused the fault. */
+static void exception_dump_userstack(cpu_context_t *ctx) {
+    thread_t *thread = ctx->ctx_info ? (thread_t *)ctx->ctx_info->thread : NULL;
+    if (!thread || !thread->ustack) return;
+
+    uint64_t rsp = ctx->rsp;
+    uint64_t base = (uint64_t)thread->ustack->base;
+    uint64_t top  = (uint64_t)thread->ustack->top;
+    if (rsp < base || rsp >= top) return;
+
+    process_t *proc = (process_t *)thread->process;
+    kprintf("--- Raw stack @ RSP=0x%llx ---\n", rsp);
+    for (int i = 0; i < 16; i++) {
+        uint64_t addr = rsp + (uint64_t)(i * 8);
+        if (addr + 8 > top) break;
+        uint64_t val = *(volatile uint64_t *)addr;
+        const char *sym = resolve_any_symbol(proc, val);
+        if (sym)
+            kprintf("  [RSP+%3d] 0x%016llx  <%s>\n", i * 8, val, sym);
+        else
+            kprintf("  [RSP+%3d] 0x%016llx\n", i * 8, val);
+    }
+}
+
 static void exception_stacktrace(cpu_context_t *ctx, unsigned int max_frames) {
     process_t * proc = NULL;
     if (ctx->ctx_info && ctx->ctx_info->thread)
@@ -256,6 +282,8 @@ void exception(cpu_context_t *ctx) {
     kprintf("--- Stack trace ---\n");
     exception_stacktrace(ctx, 16);
 
+    exception_dump_userstack(ctx);
+
     kprintf("======================================\n\n");
 
     panic("CPU EXCEPTION #%llu %s at RIP 0x%llx", vec, name, ctx->rip);
@@ -265,7 +293,6 @@ void exception(cpu_context_t *ctx) {
 void interrupt_handler(cpu_context_t* ctx, uint8_t cpu_id) {
     if (ctx->interrupt_number == 13) {
         //General Protection Fault
-        kprintf("General Protection Fault on CPU %d\n", cpu_id);
         exception(ctx);
     } else if (ctx->interrupt_number == 14) {
         //Page fault

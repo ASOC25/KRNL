@@ -123,15 +123,32 @@ void update_counters() {
     //kprintf("CUAK\n");
 }
 
-void sleep(thread_t * thread, int64_t condition) {
+int sleep(thread_t * thread, int64_t condition) {
     new(condition, thread, NULL, NULL);
     thread->state = SCHEDULER_STATUS_INTERRUPTIBLE_SLEEP;
+    thread->woken_by_signal = 0;
     while (thread->state == SCHEDULER_STATUS_INTERRUPTIBLE_SLEEP) {
         //kprintf("Sleeping thread %d on condition %d\n", GET_PROC(thread)->pid, condition);
         __asm__ volatile("int $0x81");
         //kprintf("Woke up thread %d from condition %d\n", GET_PROC(thread)->pid, condition);
     }
     //kprintf("Sleep finished for thread %d on condition %d\n", GET_PROC(thread)->pid, condition);
+    return !thread->woken_by_signal;
+}
+
+void cancel_sleep(thread_t * thread) {
+    sleeping_thread_t * current = sleeping_threads_head;
+    while (current) {
+        sleeping_thread_t * next = current->next;
+        if (current->thread == thread) remove(current);
+        current = next;
+    }
+    current = waiting_threads_head;
+    while (current) {
+        sleeping_thread_t * next = current->next;
+        if (current->thread == thread) remove(current);
+        current = next;
+    }
 }
 
 int64_t generate_id(thread_t* thread) {
@@ -161,10 +178,15 @@ int64_t generate_id(thread_t* thread) {
 status_t nanosleep(thread_t * thread, struct timespec *duration, struct timespec *rem) {
     new(generate_id(thread), thread, duration, rem);
     thread->state = SCHEDULER_STATUS_INTERRUPTIBLE_SLEEP;
+    thread->woken_by_signal = 0;
     while (thread->state == SCHEDULER_STATUS_INTERRUPTIBLE_SLEEP) {
         __asm__ volatile("int $0x81");
     }
-    return SUCCESS;
+    /* Report interruption the same way sleep() does — see its doc comment —
+       so syscall_nanosleep's "st != SUCCESS -> -EINTR" check actually fires
+       when a signal cut the sleep short instead of always reporting SUCCESS
+       regardless of why we woke up. */
+    return thread->woken_by_signal ? FAILURE : SUCCESS;
 }
 
 int check_sleep_condition(int64_t condition) {

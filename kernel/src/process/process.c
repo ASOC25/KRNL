@@ -13,6 +13,8 @@
 #include <krnl/mem/mmap.h>
 #include <krnl/libraries/std/errno.h>
 #include <krnl/process/signals.h>
+#include <krnl/process/pipe.h>
+#include <krnl/fs/tty/tty.h>
 
 #include <krnl/libraries/assert/assert.h>
 
@@ -104,7 +106,7 @@ void process_open_stdfiles(process_t * process, const char * tty) {
             panic("process_open_stdfiles: Unable to allocate fd slot");
         }
         vfs_file_descriptor_t newfd;
-        status_t st = vfs_open(tty, /*O_RDWR*/ 2, &newfd);
+        status_t st = vfs_open(tty, O_RDWR, &newfd);
         if (st != SUCCESS || !newfd.valid) {
             panic("process_open_stdfiles: Unable to open tty for stdfile");
         }
@@ -255,22 +257,36 @@ void simd_restore_context(void* ctx) {
     __asm__ volatile("fxrstor (%0) "::"r"(ctx));
 }
 
-//Save cpu_ctx in ctx
+/* Save cpu_ctx (the raw, currently-active interrupt frame) into ctx (the
+   thread_t's own persistent context_t). Each thread_t owns a single,
+   never-reassigned context_info_t (allocated once at thread creation); we
+   deliberately keep ctx->cpu_ctx.ctx_info pointing at that same allocation
+   rather than adopting whatever ctx_info pointer happens to be in
+   cpu_ctx->ctx_info (that's just whichever thread's context_info_t was
+   active in [gs:0x8] right before this interrupt — usually this thread's
+   own, but not guaranteed). A previous version of this function copied
+   cpu_ctx->ctx_info's *contents* into this thread's own ctx_info allocation
+   in place; when the two didn't refer to the same thread, that silently
+   overwrote a live, unrelated thread's context_info_t with this thread's
+   identity, corrupting the other thread's saved cs/ss/kernel_stack/thread
+   fields for good — see git history for the (extensively debugged) crash
+   this caused. */
 void context_save(context_t* ctx, cpu_context_t* cpu_ctx){
-    context_info_t * old_info = ctx->cpu_ctx.ctx_info;
-    memcpy(old_info, cpu_ctx->ctx_info, sizeof(context_info_t));
+    context_info_t * own_ctx_info = ctx->cpu_ctx.ctx_info;
     simd_save_context(ctx->simd_ctx);
     memcpy(&ctx->cpu_ctx, cpu_ctx, sizeof(cpu_context_t));
-    ctx->cpu_ctx.ctx_info = old_info;
+    ctx->cpu_ctx.ctx_info = own_ctx_info;
 }
 
+/* Restore ctx (the thread_t's own persistent context_t) into cpu_ctx (the
+   raw interrupt frame that will actually be resumed via iretq/sysret).
+   cpu_ctx->ctx_info is set to ctx's own context_info_t (see context_save's
+   comment above for why this must be the thread's own allocation, not
+   whatever used to be active). */
 void context_restore(context_t* ctx, cpu_context_t* cpu_ctx){
-    context_info_t * old_info = cpu_ctx->ctx_info;
-    memcpy(old_info, ctx->cpu_ctx.ctx_info, sizeof(context_info_t));
     simd_restore_context(ctx->simd_ctx);
     set_cpu_fs_base(ctx->fs_base);
     memcpy(cpu_ctx, &ctx->cpu_ctx, sizeof(cpu_context_t));
-    cpu_ctx->ctx_info = old_info;
 }
 
 status_t process_handle_default_signal(thread_t * thread, signal_t * signal) {
@@ -319,6 +335,7 @@ status_t process_handle_default_signal(thread_t * thread, signal_t * signal) {
                     proc->threads[i]->state = SCHEDULER_STATUS_STOPPED;
             }
             proc->state = SCHEDULER_STATUS_STOPPED;
+            if (proc->parent) process_kill(proc->parent, SIGCHLD);
             wakeup(SIGNAL_WAITPID);
             return SUCCESS;
 
@@ -338,6 +355,7 @@ status_t process_handle_default_signal(thread_t * thread, signal_t * signal) {
                     proc->threads[i]->state = SCHEDULER_STATUS_RUNABLE;
             }
             proc->state = SCHEDULER_STATUS_CONTINUED;
+            if (proc->parent) process_kill(proc->parent, SIGCHLD);
             wakeup(SIGNAL_WAITPID);
             return SUCCESS;
         }
@@ -348,140 +366,107 @@ status_t process_handle_default_signal(thread_t * thread, signal_t * signal) {
     }
 }
 
-status_t process_create_scontext(thread_t * thread, signal_t * signal) {
-    if (!thread) {
-        panic("process_create_scontext: thread is NULL");
-        return FAILURE;
-    }
+status_t signal_deliver(thread_t *thread, signal_t *signal, cpu_context_t *ctx) {
+    process_t *proc = GET_PROC(thread);
+    int signo = signal->signo;
+    sigaction_t *action = proc->signal_actions[signo];
 
-    process_t * process = (process_t *)thread->process;
-    if (!process) {
-        panic("process_create_scontext: thread's process is NULL");
-        return FAILURE;
+    if (!action || (uintptr_t)action->sa_handler == (uintptr_t)SIG_DFL) {
+        status_t st = process_handle_default_signal(thread, signal);
+        kfree(signal);
+        return st;
     }
-
-    //If the process does not have a signal handler for this signal, call the default handler right away
-    sigaction_t * action = process->signal_actions[signal->signo];
-    if (action == NULL || (uintptr_t)action->sa_handler == (uintptr_t)SIG_DFL)
-        return process_handle_default_signal(thread, signal);
-    if ((uintptr_t)action->sa_handler == (uintptr_t)SIG_IGN)
+    if ((uintptr_t)action->sa_handler == (uintptr_t)SIG_IGN) {
+        kfree(signal);
         return SUCCESS;
-
-    context_t * sig_ctx = kmalloc(sizeof(context_t));
-    //kprintf("process_create_scontext: Created SIGNAL context_t for process %d thread %p at %p\n", ((process_t *)thread->process)->pid, thread, sig_ctx);
-    if (!sig_ctx) {
-        panic("process_create_scontext: Failed to allocate memory for signal context");
-        return FAILURE;
-    }
-    memset(sig_ctx, 0, sizeof(context_t));
-    sig_ctx->simd_ctx = simd_create_context();
-    if (!sig_ctx->simd_ctx) {
-        panic("process_create_scontext: Failed to allocate memory for signal SIMD context");
-        kfree(sig_ctx);
-        return FAILURE;
     }
 
-    sig_ctx->cpu_ctx.ctx_info = (context_info_t *)kmalloc(sizeof(context_info_t));
-    if (!sig_ctx->cpu_ctx.ctx_info) {
-        panic("process_create_scontext: Failed to allocate memory for signal context_info_t");
-        simd_free_context(sig_ctx->simd_ctx);
-        kfree(sig_ctx);
-        return FAILURE;
-    }
-    memset(sig_ctx->cpu_ctx.ctx_info, 0, sizeof(context_info_t));
-    sigctx_t * new_scontext = kmalloc(sizeof(sigctx_t));
-        if (!new_scontext) {
-        panic("process_create_scontext: Failed to allocate memory for thread's sigctx_t");
-        kfree(sig_ctx->cpu_ctx.ctx_info);
-        simd_free_context(sig_ctx->simd_ctx);
-        kfree(sig_ctx);
+    /* Build rt_sigframe on user stack.
+       The x86-64 SysV ABI reserves a 128-byte "red zone" below RSP that
+       leaf functions may use without adjusting RSP. ctx->rsp here is
+       wherever the thread happened to be asynchronously preempted (any
+       instruction boundary, not just a syscall/function-call boundary),
+       so that redzone can be live with real data (spilled locals,
+       in-flight pointers, ...). Placing the frame right below the raw
+       RSP -- without skipping the redzone first -- clobbers that data,
+       corrupting whatever the thread was in the middle of computing. This
+       was silently corrupting memory on every signal delivery (surfacing
+       as sporadic, differently-shaped crashes soon after job-control-heavy
+       startup code like bash's, which calls sigaction/sigprocmask
+       repeatedly and is therefore the most likely place to have a signal
+       actually land mid-instruction).
+       frame_addr is 16-aligned; rsp_for_handler = frame_addr - 8 satisfies
+       the ABI requirement of RSP%16==8 at handler entry. */
+    uint64_t frame_sz   = sizeof(struct rt_sigframe);
+    uint64_t frame_addr = (ctx->rsp - 128 - frame_sz) & ~0xFULL;
+    uint64_t rsp_for_handler = frame_addr - 8;
+
+    struct rt_sigframe *kframe = to_kident(proc->vmm, (void *)frame_addr);
+    if (!kframe) {
+        kfree(signal);
         return FAILURE;
     }
 
-    new_scontext->signal = signal;
-    new_scontext->context = sig_ctx;
-    new_scontext->stack = stackalloc(process->vmm, thread->stack_size, VMM_REGION_S_STACK_INI, VMM_WRITE_BIT | VMM_USER_BIT, 0);
-    new_scontext->kstack = kstackalloc(process->vmm, KERNEL_STACK_SIZE);
-    if (!new_scontext->stack || !new_scontext->kstack) {
-        panic("process_create_scontext: Failed to allocate signal stack");
-        kfree(new_scontext);
-        kfree(sig_ctx->cpu_ctx.ctx_info);
-        simd_free_context(sig_ctx->simd_ctx);
-        kfree(sig_ctx);
+    /* siginfo */
+    memset(&kframe->info, 0, sizeof(siginfo_t));
+    kframe->info.si_signo = signo;
+    kframe->info.si_errno = signal->info.si_errno;
+    kframe->info.si_code  = signal->info.si_code;
+
+    /* ucontext */
+    memset(&kframe->uc, 0, sizeof(k_ucontext_t));
+    kframe->uc.uc_sigmask = proc->sig_mask; /* save old mask */
+
+    k_mcontext_t *mc = &kframe->uc.uc_mcontext;
+    mc->gregs[MC_R8]     = ctx->r8;
+    mc->gregs[MC_R9]     = ctx->r9;
+    mc->gregs[MC_R10]    = ctx->r10;
+    mc->gregs[MC_R11]    = ctx->r11;
+    mc->gregs[MC_R12]    = ctx->r12;
+    mc->gregs[MC_R13]    = ctx->r13;
+    mc->gregs[MC_R14]    = ctx->r14;
+    mc->gregs[MC_R15]    = ctx->r15;
+    mc->gregs[MC_RDI]    = ctx->rdi;
+    mc->gregs[MC_RSI]    = ctx->rsi;
+    mc->gregs[MC_RBP]    = ctx->rbp;
+    mc->gregs[MC_RBX]    = ctx->rbx;
+    mc->gregs[MC_RDX]    = ctx->rdx;
+    mc->gregs[MC_RAX]    = ctx->rax;
+    mc->gregs[MC_RCX]    = ctx->rcx;
+    mc->gregs[MC_RSP]    = ctx->rsp;
+    mc->gregs[MC_RIP]    = ctx->rip;
+    mc->gregs[MC_EFL]    = ctx->rflags;
+    mc->gregs[MC_CSGSFS] = ctx->cs;
+    mc->gregs[MC_ERR]    = ctx->error_code;
+    mc->gregs[MC_TRAPNO] = ctx->interrupt_number;
+
+    /* Write restorer address at [rsp_for_handler] (acts as return address) */
+    uint64_t *kret = to_kident(proc->vmm, (void *)rsp_for_handler);
+    if (!kret) {
+        kfree(signal);
         return FAILURE;
     }
-    new_scontext->in_progress = 0;
-    new_scontext->next = NULL;
-    stack_t* old_kstack = thread->kstack;
-    thread->kstack = new_scontext->kstack;
-    status_t st = process_init_thread_context(
-        new_scontext->context,
-        process->vmm,
-        process->stramp_address,
-        new_scontext->stack->top,
-        0,
-        thread
-    );
-    thread->kstack = old_kstack;
-    if (st != SUCCESS) {
-        panic("process_create_scontext: Failed to initialize signal thread context");
-        kfree(new_scontext);
-        kfree(sig_ctx->cpu_ctx.ctx_info);
-        simd_free_context(sig_ctx->simd_ctx);
-        kfree(sig_ctx);
-        return FAILURE;
-    }
+    void *restorer = (action->sa_flags & SA_RESTORER) ? (void *)action->sa_restorer
+                                                      : proc->stramp_address;
+    *kret = (uint64_t)restorer;
 
-    //Hardcode the parameters for the signal trampoline
-    new_scontext->context->cpu_ctx.rdi = signal->signo; // signo
-    new_scontext->context->cpu_ctx.rsi = (uint64_t)action; // sigaction_t *sigact
-    new_scontext->context->cpu_ctx.rdx = (uint64_t)&new_scontext->context->cpu_ctx; // cpu_context_t *ctx
-    new_scontext->context->cpu_ctx.rcx = (uint64_t)new_scontext->stack->top; // stack pointer (hidden arg)
-    new_scontext->context->cpu_ctx.r8 = (uint64_t)action->sa_handler; // handler address (hidden arg)
-   
-    //Iterate the thread's scontext list and add it in the correct place
-    //Remember that lower signal number have priority
-    sigctx_t * current = thread->scontext;
-    sigctx_t * prev = NULL;
-    while (current != NULL && current->signal->signo < signal->signo) {
-        prev = current;
-        current = current->next;;
-    }
-    if (prev == NULL) {
-        //Insert at head
-        new_scontext->next = thread->scontext;
-        thread->scontext = new_scontext;
-    } else {
-        //Insert in middle or end
-        new_scontext->next = prev->next;
-        prev->next = new_scontext;
-    }
+    /* Update signal mask: block sa_mask[0] + this signal (unless SA_NODEFER) */
+    proc->sig_mask |= action->sa_mask[0];
+    if (!(action->sa_flags & SA_NODEFER))
+        proc->sig_mask |= (1UL << (signo - 1));
+    proc->sig_mask &= ~((1UL << (SIGKILL - 1)) | (1UL << (SIGSTOP - 1)));
 
+    /* Redirect ctx to handler */
+    void *handler = (action->sa_flags & SA_SIGINFO) ? (void *)action->sa_sigaction
+                                                    : (void *)action->sa_handler;
+    ctx->rip = (uint64_t)handler;
+    ctx->rsp = rsp_for_handler;
+    ctx->rdi = (uint64_t)signo;
+    ctx->rsi = frame_addr + __builtin_offsetof(struct rt_sigframe, info);
+    ctx->rdx = frame_addr + __builtin_offsetof(struct rt_sigframe, uc);
+
+    kfree(signal);
     return SUCCESS;
-}
-
-void process_sigret(thread_t * thread) {
-    if (!thread) {
-        panic("process_sigret: thread is NULL");
-        return;
-    }
-
-    //Remove the currently running signal context if any, remember to handle the linked list
-    if (thread->scontext && thread->scontext->in_progress) {
-        sigctx_t * finished_ctx = thread->scontext;
-        thread->scontext = finished_ctx->next;
-        //kprintf("process_sigret: Freeing finished signal context %p for process %d thread %p\n", finished_ctx, ((process_t *)thread->process)->pid, thread);
-        simd_free_context(finished_ctx->context->simd_ctx);
-        kfree(finished_ctx->context->cpu_ctx.ctx_info);
-        kfree(finished_ctx->context);
-        stackfree(((process_t *)thread->process)->vmm, finished_ctx->stack);
-        kstackfree(finished_ctx->kstack);
-        kfree(finished_ctx);
-    }
-}
-
-sigctx_t * process_get_scontext(thread_t * thread) {
-    return thread->scontext;
 }
 
 status_t process_sigaction(process_t * process, int signum, const struct sigaction * act, struct sigaction * oldact) {
@@ -711,6 +696,25 @@ thread_t * duplicate_thread(process_t * parent, thread_t * og) {
         return NULL;
     }
     memset(new_thread->kcontext->cpu_ctx.ctx_info, 0, sizeof(context_info_t));
+    /* BUG-59: kcontext's ctx_info->thread was never set for any thread but
+       idle (see scheduler_create_idle_thread's kctx_info), so as soon as a
+       thread's kernel-context sleep resumed through kcontext_restore_
+       trampoline (installing this struct into [gs:0x8]), any interrupt
+       that fired before the thread's syscall returned to userspace (and
+       [gs:0x8] got restored to the real, correctly-populated user ctx_info
+       via the syscall epilogue's `pop [gs:0x8]`) saw ctx_info->thread ==
+       NULL. syscall_pselect's retry loop is the first call site that sleeps
+       more than once per syscall, so it's the first to have a *second*
+       nested interrupt land inside that window -- scheduler_handler's
+       "ending_thread" then resolves to NULL, kcontext_pending never gets
+       re-armed, and the next scheduling round wrongly resumes the thread's
+       stale saved *user* context instead of its in-flight kernel context,
+       silently rewinding it back to wherever it was last preempted in
+       userspace. */
+    new_thread->kcontext->cpu_ctx.ctx_info->thread = new_thread;
+    new_thread->kcontext->cpu_ctx.ctx_info->kernel_stack = new_thread->kstack->top;
+    new_thread->kcontext->cpu_ctx.ctx_info->cs = GDT_KERNEL_CODE * sizeof(gdt_entry_t);
+    new_thread->kcontext->cpu_ctx.ctx_info->ss = GDT_KERNEL_DATA * sizeof(gdt_entry_t);
     PERF_END(t_ctx, "    duplicate_thread/ctx-alloc");
 
     new_thread->context = new_ctx;
@@ -843,6 +847,8 @@ process_t * process_fork(process_t * parent, thread_t * forking_thread) {
     child->current_thread = child->threads[0];
     child->pid = -1; // Will be set by scheduler
     child->ppid = parent->pid;
+    child->pgid = parent->pgid;
+    child->sid = parent->sid;
     child->uid = parent->uid;
     child->gid = parent->gid;
     child->stramp_address = parent->stramp_address;
@@ -866,6 +872,10 @@ process_t * process_fork(process_t * parent, thread_t * forking_thread) {
             char * dup_path = kmalloc(plen + 1);
             strncpy(dup_path, parent->open_files[i].native_path, plen + 1);
             child->open_files[i].native_path = dup_path;
+        }
+        /* Child now holds an additional reference to the shared pipe */
+        if (parent->open_files[i].pipe) {
+            pipe_dup(&child->open_files[i]);
         }
     }
     child->open_file_count = parent->open_file_count;
@@ -1050,6 +1060,14 @@ thread_t * process_create_thread(process_t * process, void * entry_point) {
         return NULL;
     }
     memset(new_thread->kcontext->cpu_ctx.ctx_info, 0, sizeof(context_info_t));
+    /* BUG-59: see duplicate_thread's identical fix for the full explanation
+       -- this struct's ->thread must never be left NULL, or a kernel-context
+       resume through it silently breaks any second nested interrupt taken
+       before this thread's next real return to userspace. kernel_stack is
+       set below once new_thread->kstack exists. */
+    new_thread->kcontext->cpu_ctx.ctx_info->thread = new_thread;
+    new_thread->kcontext->cpu_ctx.ctx_info->cs = GDT_KERNEL_CODE * sizeof(gdt_entry_t);
+    new_thread->kcontext->cpu_ctx.ctx_info->ss = GDT_KERNEL_DATA * sizeof(gdt_entry_t);
     new_thread->kcontext->simd_ctx = simd_create_context();
     //kprintf("process_create_thread: Created KERNEL SIMD context for process %d thread at %p\n", process->pid, new_thread->kcontext->simd_ctx);
     if (!new_thread->kcontext->simd_ctx) {
@@ -1069,6 +1087,7 @@ thread_t * process_create_thread(process_t * process, void * entry_point) {
         panic("context_init: Failed to allocate kernel stack for process");
         return NULL;
     }
+    new_thread->kcontext->cpu_ctx.ctx_info->kernel_stack = new_thread->kstack->top;
 
     new_thread->ustack = stackalloc(process->vmm, new_thread->stack_size, VMM_REGION_U_STACK - new_thread->stack_size, VMM_WRITE_BIT | VMM_USER_BIT, 1);
     if (new_thread->ustack == NULL) {
@@ -1197,7 +1216,6 @@ status_t process_execve(thread_t * thread, cpu_context_t * ctx, char * filename,
 
     context_restore(thread->context, ctx);
     cpu_set_context_info(thread->context->cpu_ctx.ctx_info);
-    //kprintf("process_execve: Restored context for main thread %p\n", thread);
     return SUCCESS;
 }
 
@@ -1330,6 +1348,15 @@ status_t process_destroy(process_t * process) {
         }
     }
 
+    /* Close all open fds so pipe refcounts (and any other fd-owned
+     * resources) are released — otherwise a reader blocked on a pipe
+     * whose writer just exited would never see EOF. */
+    for (int i = 0; i < MAX_OPEN_FILES; i++) {
+        if (process->open_files[i].valid) {
+            vfs_close(&process->open_files[i]);
+        }
+    }
+
     //kprintf("process_destroy: Removing all VM areas for process %d\n", process->pid);
     vmarea_remove_all(process);
     vmm_free_root(process->vmm);
@@ -1353,7 +1380,6 @@ status_t process_exit(process_t * process, int code) {
         panic("process_exit: process is NULL");
         return FAILURE;
     }
-
     process_set_exit_code(process, code);
     //Change all threads to ZOMBIE
     for (int i = 0; i < MAX_THREADS_PER_PROCESS; i++) {
@@ -1361,6 +1387,7 @@ status_t process_exit(process_t * process, int code) {
             process->threads[i]->state = SCHEDULER_STATUS_ZOMBIE;
     }
     process->state = SCHEDULER_STATUS_ZOMBIE;
+    if (process->parent) process_kill(process->parent, SIGCHLD);
     wakeup(SIGNAL_WAITPID);
     return SUCCESS;
 }
@@ -1386,6 +1413,14 @@ void process_init(const char * INIT_PROCESS, const char * INIT_TTY, vfs_path_t I
         panic("process_init: Failed to add init process to scheduler");
     }
 
+    /* Init is its own session/process-group leader. Since there is no
+       getty/login to hand the controlling terminal's foreground group to
+       whoever opens it, seed the tty's foreground pgrp here — otherwise
+       bash's job-control startup (which expects tcgetpgrp(tty) == getpgrp())
+       sends itself SIGTTIN and immediately stops. */
+    init_process->pgid = init_process->pid;
+    init_process->sid = init_process->pid;
+    tty_set_foreground_pgrp(init_process->pgid);
 }
 
 int process_dup(process_t * process, int old_fd, int new_fd) {
@@ -1421,15 +1456,20 @@ int process_dup(process_t * process, int old_fd, int new_fd) {
         return new_fd;
 
     if (process->open_files[new_fd].valid) {
-        vfs_close(&process->open_files[new_fd]);
+        vfs_close(&process->open_files[new_fd]); /* pipe-aware: releases pipe refcount if applicable */
         process->open_files[new_fd].mount = NULL;
         process->open_files[new_fd].native_path = NULL;
+        process->open_files[new_fd].pipe = NULL;
         process->open_files[new_fd].flags = 0;
         process->open_files[new_fd].position = 0;
         if (process->open_file_count > 0) process->open_file_count--;
     }
 
     process->open_files[new_fd] = process->open_files[old_fd];
+    /* New fd holds an additional reference to the shared pipe */
+    if (process->open_files[old_fd].pipe) {
+        pipe_dup(&process->open_files[new_fd]);
+    }
     /* BUG-46: duplicate native_path so that closing either fd independently
      * does not cause a double-free of the shared pointer. */
     if (process->open_files[old_fd].native_path) {

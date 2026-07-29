@@ -8,7 +8,7 @@
 using sc_word_t = long;
 
 /* list */
-#define SYS_COUNT               58
+#define SYS_COUNT               65
 
 #define SYS_FILE_READ           0
 #define SYS_FILE_WRITE          1
@@ -80,6 +80,15 @@ using sc_word_t = long;
 #define SYS_GETGID              55
 #define SYS_GETEUID             56
 #define SYS_GETEGID             57
+
+#define SYS_PIPE                58
+
+#define SYS_SETPGID             59
+#define SYS_GETPGID             60
+#define SYS_SETSID              61
+#define SYS_GETSID              62
+#define SYS_FCHDIR              63
+#define SYS_OPENAT              64
 
 
 /* extern functions */

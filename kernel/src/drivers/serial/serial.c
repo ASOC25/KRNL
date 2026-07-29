@@ -4,11 +4,10 @@
 #include <krnl/libraries/std/stddef.h>
 #include <krnl/debug/debug.h>
 #include <krnl/arch/x86/io.h>
-#include <krnl/process/process.h>
-#include <krnl/process/signals.h>
 #include <krnl/arch/x86/apic.h>
 #include <krnl/arch/x86/idt.h>
 #include <krnl/arch/x86/cpu.h>
+#include <krnl/fs/tty/tty.h>
 struct serial_device {
     device_addr_t port_base;
     //Configuration parameters below:
@@ -42,17 +41,19 @@ status_t test_serial_port(int port) {
 int serial_received(int port) {
     return inb(port + 5) & 1;
 }
- 
-char read_serial(int port) {
-    thread_t * current_thread = process_get_current_thread();
-    if (!current_thread) {
-        panic("read_serial called without a current thread");
-    }
-    while (serial_received(port) == 0) {
-        sleep(current_thread, SERIAL_WAIT_LINE);
-    }
- 
-    return inb(port);
+
+/* Non-blocking: consumes and returns one byte into *out if the UART FIFO
+   has one waiting, otherwise returns 0 without touching *out. Called from
+   the IRQ handler to drain input into the tty line discipline; input is no
+   longer pulled by having a reader thread block and inb() the port itself,
+   since that would race with the ISR now doing exactly that. */
+int serial_try_read_byte(device_addr_t id, uint8_t *out) {
+    if (id < 0 || id >= MAX_SERIAL_DEVICES) return 0;
+    struct serial_device *dev = &serial_devices[id];
+    if (dev->port_base == 0) return 0;
+    if (!serial_received(dev->port_base)) return 0;
+    *out = (uint8_t)inb(dev->port_base);
+    return 1;
 }
 
 int is_transmit_empty(int port) {
@@ -64,24 +65,6 @@ void write_serial(int port, char a) {
     outb(port,a);
 }
 
-
-static int64_t read(device_addr_t id, uint64_t offset, uint64_t size, uint8_t* buffer) {
-    (void)offset; //Serial ports do not support offset reading
-    if (id < 0 || id >= MAX_SERIAL_DEVICES) {
-        silent_panic();
-    }
-    if (buffer == 0) {
-        silent_panic();
-    }
-
-    struct serial_device* dev = &(serial_devices[id]);
-
-    for (uint64_t i = 0; i < size; i++) {
-        buffer[i] = read_serial(dev->port_base);
-    }
-
-    return size;
-}
 
 static int64_t write(device_addr_t id, uint64_t offset, uint64_t size, const uint8_t* buffer) {
     (void)offset; //Serial ports do not support offset writing
@@ -185,7 +168,6 @@ static int64_t shutdown(device_addr_t id) {
 
 status_t serial_init(void) {
     struct device_driver serial_driver = {
-        .read = read,
         .write = write,
         .ioctl = ioctl,
         .initialize = initialize,
@@ -195,9 +177,18 @@ status_t serial_init(void) {
     return devices_new_driver(SERIAL_DRIVER_MAJOR, serial_driver);
 }
 
+/* Drains every byte the UART currently has buffered into the tty line
+   discipline. Device 0 is the console (see /dev/tty0's mount at
+   major=SERIAL_DRIVER_MAJOR minor=0 in boot.c) — the only port this kernel
+   treats as an actual tty. apic_arm_lapic_timer(...,1) re-arms the
+   scheduler tick for 1ms out, the same trick used elsewhere in this file to
+   get newly-runnable/signalled threads scheduled promptly after an IRQ. */
 void serial_int_callback(cpu_context_t* ctx, uint8_t cpu_id) {
     (void)ctx;
-    wakeup(SERIAL_WAIT_LINE);
+    uint8_t byte;
+    while (serial_try_read_byte(0, &byte)) {
+        tty_input_byte(byte);
+    }
     apic_arm_lapic_timer(cpu_id, 1);
 }
 

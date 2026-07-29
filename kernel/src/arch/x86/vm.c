@@ -153,6 +153,14 @@ void vm_duplicate(vm_dir* root, vm_dir* new_root, uint8_t level, int override, u
 
             if (level == 0 || entry->directory.PS)
             {
+                /* Leaf pages are shared between parent and child here.
+                 * User-space MAP_PRIVATE regions are protected separately by
+                 * vmarea_fork()'s copy-on-write setup (mprotect to read-only +
+                 * vmarea_try_cow() on the first write); the process's ustack
+                 * is given an independent copy by copy_stack(). Deep-copying
+                 * leaf pages here as well would create a second, untracked
+                 * physical copy that add_allocation()/should_deallocate_pmm()
+                 * don't know about, corrupting the allocator's bookkeeping. */
                 new_entry->directory.PDPP = entry->directory.PDPP;
             } else {
                 new_entry->directory.PDPP = ((uint64_t)allocate_phys_page()) >> 12;

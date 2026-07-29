@@ -4,7 +4,6 @@ set -euo pipefail
 # Configurable parameters via environment variables
 : "${IMG:=build/disk.img}"
 : "${IMG_SIZE_MB:=768}"
-: "${MTOOLS_RC:=.mtoolsrc}"
 
 ROOT_DIR=$(cd "$(dirname "$0")/../.." && pwd)
 BUILD_DIR="$ROOT_DIR/build"
@@ -29,11 +28,11 @@ containing:
 
 Environment overrides:
   IMG (default build/disk.img)
-  IMG_SIZE_MB (default 64)
+  IMG_SIZE_MB (default 768)
 
 Options:
-  --img PATH     Output image path (default: $IMG)
-  --size MB      Image size in MB (default: $IMG_SIZE_MB)
+  --img PATH     Output image path (default: \$IMG)
+  --size MB      Image size in MB (default: \$IMG_SIZE_MB)
   --force        Overwrite existing image
   -h, --help     Show this help
 EOF
@@ -54,22 +53,12 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ ! -f "$KERNEL_ELF" ]]; then
-  echo "Kernel not found at $KERNEL_ELF. Build it first." >&2
-  exit 1
-fi
-if [[ ! -f "$STARTUP_NSH" ]]; then
-  echo "startup.nsh not found at $STARTUP_NSH" >&2
-  exit 1
-fi
-if [[ ! -f "$BOOTX64_EFI" ]]; then
-  echo "BOOTX64.EFI not found at $BOOTX64_EFI" >&2
-  exit 1
-fi
-if [[ ! -f "$LIMINE_CFG" ]]; then
-  echo "limine.conf not found at $LIMINE_CFG" >&2
-  exit 1
-fi
+for f in "$KERNEL_ELF" "$STARTUP_NSH" "$BOOTX64_EFI" "$LIMINE_CFG"; do
+  if [[ ! -f "$f" ]]; then
+    echo "Required file not found: $f" >&2
+    exit 1
+  fi
+done
 
 mkdir -p "$(dirname "$IMG")"
 
@@ -78,63 +67,27 @@ if [[ -e "$IMG" && $FORCE -ne 1 ]]; then
   exit 1
 fi
 
-# Remove existing
 rm -f "$IMG"
 
-# Create empty image
+# Create raw image
 truncate -s "${IMG_SIZE_MB}M" "$IMG"
 
-# Create GPT with a single EFI System Partition (type EF00)
-# We'll align at 1MB, size rest of disk
+# Partition: GPT, single ESP starting at 1MiB
 parted -s "$IMG" mklabel gpt
 parted -s "$IMG" mkpart EFI FAT32 1MiB 100%
 parted -s "$IMG" set 1 esp on
 
-# Map the partition using loop device
-LOOPDEV=$(losetup --find --partscan --show "$IMG")
-PARTITION="${LOOPDEV}p1"
+# Compute partition byte offset (parted reports start in sectors; 1 sector = 512 bytes)
+SECTOR=$(parted -s "$IMG" unit s print | awk '/^ 1/{print $2}' | tr -d 's')
+OFFSET=$(( SECTOR * 512 ))
 
-cleanup() {
-  set +e
-  sync
-  if mountpoint -q mnt-esp; then sudo umount mnt-esp; fi
-  if [[ -n "${LOOPDEV:-}" ]]; then sudo losetup -d "$LOOPDEV"; fi
-}
-trap cleanup EXIT
-
-# Wait for partition node
-for _ in {1..10}; do
-  [[ -b "$PARTITION" ]] && break
-  sleep 0.2
-done
-
-if [[ ! -b "$PARTITION" ]]; then
-  echo "Partition device $PARTITION not found" >&2
-  exit 1
-fi
-
-# Format as FAT32
-sudo mkfs.vfat -F32 -n EFI "$PARTITION" > /dev/null
-
-mkdir -p mnt-esp
-sudo mount "$PARTITION" mnt-esp
-
-sudo mkdir -p mnt-esp/EFI/BOOT
-sudo cp "$BOOTX64_EFI" mnt-esp/EFI/BOOT/BOOTX64.EFI
-sudo cp "$STARTUP_NSH" mnt-esp/startup.nsh
-sudo cp "$KERNEL_ELF" mnt-esp/kernel.elf
-sudo cp "$LIMINE_CFG" mnt-esp/limine.conf
-
-sync
-sudo umount mnt-esp
-rmdir mnt-esp
-sudo losetup -d "$LOOPDEV"
-trap - EXIT
+# Format FAT32 and populate using mtools (no loop device / no root needed)
+MIMG="${IMG}@@${OFFSET}"
+mformat -i "$MIMG" -F -v EFI -c 1 ::
+mmd    -i "$MIMG" ::/EFI ::/EFI/BOOT
+mcopy  -i "$MIMG" "$BOOTX64_EFI"  ::/EFI/BOOT/BOOTX64.EFI
+mcopy  -i "$MIMG" "$STARTUP_NSH"  ::/startup.nsh
+mcopy  -i "$MIMG" "$KERNEL_ELF"   ::/kernel.elf
+mcopy  -i "$MIMG" "$LIMINE_CFG"   ::/limine.conf
 
 echo "Created EFI disk image: $IMG"
-
-echo "Run with (example):"
-echo "  qemu-system-x86_64 -machine q35 -m 512 \\
-     -drive if=pflash,format=raw,unit=0,readonly=on,file=$ENV_DIR/OVMF_CODE-pure-efi.fd \\
-     -drive if=pflash,format=raw,unit=1,file=$ENV_DIR/OVMF_VARS-pure-efi.fd \\
-     -drive format=raw,file=$IMG"

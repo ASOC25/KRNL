@@ -15,6 +15,12 @@ KERNEL_ELF="$BUILD_DIR/kernel.elf"
 
 CODE_FD="$OVMF_DIR/OVMF_CODE-pure-efi.fd"
 VARS_FD="$OVMF_DIR/OVMF_VARS-pure-efi.fd"
+AHCI_IMG="$BUILD_DIR/ahci-disk.img"
+
+AHCI_ARGS=()
+if [[ -f "$AHCI_IMG" ]]; then
+  AHCI_ARGS=( -device ahci,id=ahci0 -drive id=ahcidisk,file="$AHCI_IMG",format=raw,if=none -device ide-hd,drive=ahcidisk,bus=ahci0.0 )
+fi
 
 ACCEL_ARG=()
 if [[ -z "$ACCEL" ]]; then
@@ -46,5 +52,6 @@ fi
   -drive if=pflash,format=raw,unit=0,readonly=on,file="$CODE_FD" \
   -drive if=pflash,format=raw,unit=1,file="$VARS_FD" \
   -drive file="$IMG",format=raw,if=virtio \
+  "${AHCI_ARGS[@]}" \
   -serial "stdio" \
-  -s -S \
+  -s -S

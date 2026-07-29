@@ -58,6 +58,6 @@ status_t scheduler_remove(thread_t * thread);
 int scheduler_waitpid(thread_t * caller, int pid, int * status, int options);
 void dump_scheduler_status();
 process_t * scheduler_get_process_by_pid(pid_t pid);
-void scheduler_sigreturn(cpu_context_t* ctx, thread_t * thread);
+void scheduler_signal_pgrp(pid_t pgid, int signo);
 void scheduler_create_idle_thread(void);
 #endif

@@ -1,7 +1,7 @@
 #ifndef _X86_SYSCALL_H
 #define _X86_SYSCALL_H
 
-#define SYS_COUNT 58
+#define SYS_COUNT 65
 
 #include <krnl/arch/x86/cpu.h>
 

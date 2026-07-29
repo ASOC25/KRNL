@@ -9,8 +9,6 @@
 #define SERIAL_IOCTL_SET_CONFIG 0x01
 #define SERIAL_IOCTL_GET_CONFIG 0x02
 
-#define SERIAL_WAIT_LINE 0x537141
-
 struct serial_config {
     device_addr_t port_base;
     uint8_t interrupt_enable;
@@ -22,4 +20,5 @@ struct serial_config {
 
 status_t serial_init(void);
 status_t serial_init_pnp(void);
+int serial_try_read_byte(device_addr_t id, uint8_t *out);
 #endif

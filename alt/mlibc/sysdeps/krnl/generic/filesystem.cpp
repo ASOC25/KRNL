@@ -26,6 +26,17 @@ namespace mlibc{
         return 0;
     }
 
+    int sys_openat(int dirfd, const char *pathname, int flags, mode_t mode, int *fd){
+        auto result = do_syscall(SYS_OPENAT, dirfd, pathname, flags, mode);
+
+        if(result < 0){
+            return -result;
+        }
+
+        *fd = result;
+        return 0;
+    }
+
     int sys_read(int fd, void *buf, size_t count, ssize_t *bytes_read){
         auto result = do_syscall(SYS_FILE_READ, fd, buf, count);
 
@@ -122,6 +133,14 @@ namespace mlibc{
         return 0;
     }
 
+    int sys_pipe(int *fds, int flags){
+        auto result = do_syscall(SYS_PIPE, fds, flags);
+        if(result < 0){
+            return -result;
+        }
+        return 0;
+    }
+
     int sys_mkdir(const char *path, mode_t mode) {
 	    auto result = do_syscall(SYS_MKDIR, path, mode);
         if(result < 0){
@@ -162,12 +181,7 @@ namespace mlibc{
     }
 
     int sys_unlinkat(int dirfd, const char *path, int flags){
-        if(flags != 0){
-            mlibc::infoLogger() << "mlibc warning: sys_unlinkat: flags not supported" << frg::endlog;
-            return EINVAL;
-        }
-
-        auto result = do_syscall(SYS_UNLINKAT, dirfd, path, strlen(path));
+        auto result = do_syscall(SYS_UNLINKAT, dirfd, path, flags);
         if(result < 0){
             return -result;
         }
@@ -176,7 +190,7 @@ namespace mlibc{
     }
 
     int sys_rename(const char *path, const char *new_path){
-        auto result = do_syscall(SYS_RENAMEAT, path, new_path);
+        auto result = do_syscall(SYS_RENAME, path, new_path);
         if(result < 0){
             return -result;
         }
@@ -184,7 +198,7 @@ namespace mlibc{
     }
 
     int sys_renameat(int olddirfd, const char *old_path, int newdirfd, const char *new_path){
-        auto result = do_syscall(SYS_RENAME, old_path, new_path);
+        auto result = do_syscall(SYS_RENAMEAT, olddirfd, old_path, newdirfd, new_path);
         if(result < 0){
             return -result;
         }
@@ -195,11 +209,18 @@ namespace mlibc{
         auto result = 0;
         switch(fsfdt){
             case fsfd_target::path:{
-                result = do_syscall(SYS_PATH_STAT, path, strlen(path), flags, statbuf);
+                /* -100 == AT_FDCWD: relative paths resolve against the cwd. */
+                result = do_syscall(SYS_PATH_STAT, path, strlen(path), flags, statbuf, -100);
                 break;
             }
             case fsfd_target::fd:{
                 result = do_syscall(SYS_FD_STAT, fd, flags, statbuf);
+                break;
+            }
+            case fsfd_target::fd_path:{
+                /* fstatat(fd, path, ...): resolve path relative to the
+                   already-open directory fd instead of the cwd. */
+                result = do_syscall(SYS_PATH_STAT, path, strlen(path), flags, statbuf, fd);
                 break;
             }
             default:{
@@ -276,6 +297,16 @@ namespace mlibc{
 #ifndef MLIBC_BUILDING_RTLD
     int sys_chdir(const char *path){
         auto result = do_syscall(SYS_CHDIR, path, strlen(path));
+
+        if(result < 0){
+            return -result;
+        }
+
+        return 0;
+    }
+
+    int sys_fchdir(int fd){
+        auto result = do_syscall(SYS_FCHDIR, fd);
 
         if(result < 0){
             return -result;

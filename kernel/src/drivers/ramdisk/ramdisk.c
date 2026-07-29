@@ -74,8 +74,11 @@ status_t ramdisk_init_pnp(void) {
 
     //Iterate all physical memory searching for a RAMDISK_SIGNATURE
     uint64_t ramdisk_size = (uint64_t)(RAMDISK_END - RAMDISK_START);
-    if (ramdisk_size == 0) {
-        silent_panic();
+    if (ramdisk_size <= 1) {
+        //Nothing meaningful embedded -- an FS=ext2/AHCI-backed build only embeds a
+        //1-byte placeholder (objcopy -I binary rejects a truly empty input file).
+        //No ramdisk device to register in that case.
+        return SUCCESS;
     }
 
     ramdisk_devices[0].start_address = (uint64_t)RAMDISK_START;

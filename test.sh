@@ -26,7 +26,7 @@ fi
 if [ "$1" = "--build" ]; then
     echo "Build libraries..."
     #Rebuild mlibc (force rebuild since sysdep sources may have changed)
-    xbstrap build --rebuild mlibc
+    xbstrap build --reset mlibc
     if [ -d "packages/mlibc" ]; then
         echo "Installing packages/mlibc to sysroot..."
         cp -r "packages/mlibc/." sysroot/
@@ -64,11 +64,18 @@ if [ "$1" = "--build" ]; then
     # Choose filesystem: FS=ext2 or FS=x1fs (default)
     FS="${FS:-x1fs}"
     if [ "$FS" = "ext2" ]; then
-        echo "Bundling ext2 filesystem..."
-        sh ./env/scripts/create-ext2.sh ./sysroot ./build/ramdisk.img
+        echo "Bundling ext2 filesystem onto a real AHCI-attached drive image..."
+        sh ./env/scripts/create-ext2.sh ./sysroot ./build/ahci-disk.img
+        # No embedded ramdisk needed for this boot mode; keep the Makefile's
+        # mandatory RAMDISK variable satisfied with a 1-byte placeholder
+        # (objcopy -I binary rejects a truly empty input file).
+        printf '\0' > ./build/ramdisk.img
     else
         echo "Bundling x1fs ramdisk..."
         python3 ./env/scripts/create-ramdisk.py ./sysroot ./build/ramdisk.img
+        # Remove any stale AHCI disk image from a previous FS=ext2 build so it
+        # doesn't get attached to QEMU by accident.
+        rm -f ./build/ahci-disk.img
     fi
     #Make sure build/ramdisk.img exists
     if [ ! -f "build/ramdisk.img" ]; then
@@ -80,7 +87,7 @@ if [ "$1" = "--build" ]; then
     #Copy kernel to build/kernel.elf
     cp kernel/build/kernel.elf build/kernel.elf
     echo "Kernel build complete: build/kernel.elf"
-    sudo ./env/scripts/make-efi-img.sh --force
+    ./env/scripts/make-efi-img.sh --force
     echo "Build complete. Image at build/disk.img"
     exit 0
 fi
@@ -97,10 +104,32 @@ if [ "$1" = "--init-x" ]; then
     exit 0
 fi
 if [ "$1" = "--debug" ]; then
+    echo "Rebuilding mlibc..."
+    xbstrap build --reset mlibc || exit 1
+    if [ -d "packages/mlibc" ]; then
+        cp -r "packages/mlibc/." sysroot/
+    fi
+    echo "Generating mlibc symbols..."
+    find sysroot/ -type f \( -name "*.so*" \) -not -name "*.sym" | while read -r file; do
+        objcopy --only-keep-debug "$file" "$file.sym" 2>/dev/null || true
+    done
+    echo "Rebuilding kernel..."
+    xbstrap build kernel || exit 1
+    cp kernel/build/kernel.elf build/kernel.elf
+    echo "Rebuilding ramdisk..."
+    FS="${FS:-x1fs}"
+    if [ "$FS" = "ext2" ]; then
+        sh ./env/scripts/create-ext2.sh ./sysroot ./build/ahci-disk.img
+        printf '\0' > ./build/ramdisk.img
+    else
+        python3 ./env/scripts/create-ramdisk.py ./sysroot ./build/ramdisk.img
+        rm -f ./build/ahci-disk.img
+    fi
+    ./env/scripts/make-efi-img.sh --force
     echo "Running QEMU with debug options..."
-    sudo ./env/scripts/debug-qemu.sh
+    ./env/scripts/debug-qemu.sh
 fi
 if [ "$1" = "--run" ]; then
     echo "Running QEMU..."
-    sudo ./env/scripts/run-qemu.sh
+    ./env/scripts/run-qemu.sh
 fi

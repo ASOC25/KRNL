@@ -1,5 +1,8 @@
 #include <krnl/process/scheduler.h>
 extern void kcontext_restore_trampoline(cpu_context_t *kctx);
+extern void kcontext_simple_launch(cpu_context_t *kctx);
+extern void set_cpu_fs_base(uint64_t base);
+extern void simd_restore_context(void *ctx);
 #include <krnl/mem/allocator.h>
 #include <krnl/debug/debug.h>
 #include <krnl/arch/x86/cpu.h>
@@ -23,6 +26,7 @@ typedef struct scheduler_queue {
 
 scheduler_queue_t * sched_queue = NULL;
 thread_t * current_thread = NULL;
+static thread_t * g_idle_thread = NULL;
 
 static pid_t scheduler_get_free_pid_locked(void) {
     static pid_t last_pid = 100; // Start from 100 to avoid reserved PIDs
@@ -81,8 +85,8 @@ pid_t scheduler_get_free_pid() {
 }
 
 uint8_t comparator_alpha(process_t * caller, process_t * iterated, int pid) {
-    //return if any child process such that  gid = abs(pid) has exited
-    return (iterated->ppid == caller->pid && iterated->gid == (pid_t)(-pid));
+    //return if any child process such that  pgid = abs(pid) has exited
+    return (iterated->ppid == caller->pid && iterated->pgid == (pid_t)(-pid));
 }
     //return if any child process has exited
 uint8_t comparator_beta(process_t * caller, process_t * iterated, int pid) {
@@ -91,8 +95,8 @@ uint8_t comparator_beta(process_t * caller, process_t * iterated, int pid) {
 }
 uint8_t comparator_gamma(process_t * caller, process_t * iterated, int pid) {
     (void)pid;
-    //return if any child gid=gid of caller has exited
-    return (iterated->ppid == caller->pid && iterated->gid == caller->gid);
+    //return if any child pgid=pgid of caller has exited
+    return (iterated->ppid == caller->pid && iterated->pgid == caller->pgid);
 }
 uint8_t comparator_delta(process_t * caller, process_t * iterated, int pid) {
     //return if specific pid has exited
@@ -205,7 +209,18 @@ int scheduler_waitpid(thread_t * caller, int pid, int * status, int options) {
         if (!changed_pid) {
             //WNOHANG: POSIX requires returning 0 when no child has changed state (BUG-24)
             if (options & WNOHANG) return 0;
-            sleep(caller, SIGNAL_WAITPID);
+
+            /* sleep() returns 0 if we were woken early because a signal
+             * became pending rather than because of an actual child state
+             * change. Kernel-context blocking calls like this one only get
+             * their thread flipped back to RUNABLE when woken — the signal
+             * itself isn't delivered until the thread is next scheduled in
+             * *user* context. Looping back around without checking this
+             * would let waitpid silently swallow that wakeup and keep
+             * blocking, so the signal ends up applied arbitrarily far into
+             * whatever the caller runs once this syscall eventually returns,
+             * instead of right at this syscall boundary as expected. */
+            if (!sleep(caller, SIGNAL_WAITPID)) return -EINTR;
         }
         //kprintf("Moving on to next iteration of waitpid loop\n");
     }
@@ -280,18 +295,30 @@ void scheduler_create_idle_thread(void) {
     idle_thread->context->cpu_ctx.ctx_info = ctx_info;
 
     idle_thread->kcontext->cpu_ctx.ctx_info = kctx_info;
+    /* Pre-populate kcontext with idle's initial state so the trampoline
+       path is taken on first scheduling, which correctly switches RSP to
+       idle's own kstack.  Without this, iretq for cs=0x8 would not switch
+       RSP and idle would run on the interrupted thread's kstack. */
+    idle_thread->kcontext->cpu_ctx.rip    = (uint64_t)idle_thread_fn;
+    idle_thread->kcontext->cpu_ctx.cs     = GDT_KERNEL_CODE * sizeof(gdt_entry_t);
+    idle_thread->kcontext->cpu_ctx.rflags = RFLAGS_INTERRUPT_ENABLE | RFLAGS_ONE;
+    idle_thread->kcontext->cpu_ctx.rsp    = (uint64_t)idle_thread->kstack->top;
+    idle_thread->kcontext->cpu_ctx.cr3    = (uint64_t)vmm_from_identity_map((uint64_t)idle_proc->vmm);
 
     idle_thread->process = idle_proc;
     idle_thread->entry   = (void *)idle_thread_fn;
     idle_thread->state   = SCHEDULER_STATUS_RUNABLE;
     idle_thread->prio    = idle_proc->nice;
     idle_thread->tid     = 0;
-    idle_thread->kcontext_pending = 0;
+    idle_thread->kcontext_pending = 1;
+    idle_thread->kcontext_first_run = 1;
 
     idle_proc->threads[0]      = idle_thread;
     idle_proc->thread_count    = 1;
     idle_proc->main_thread     = idle_thread;
     idle_proc->current_thread  = idle_thread;
+
+    g_idle_thread = idle_thread;
 
     scheduler_add(idle_thread);
 }
@@ -300,21 +327,68 @@ thread_t * scheduler_get_next_thread() {
     thread_t * chosen_thread = NULL;
     long highest_priority = LONG_MAX;
 
-    /* Single pass: deliver pending signals and find the highest-priority
-       runnable thread. */
+    /* Single pass: wake sleeping threads with deliverable signals, then pick
+       the highest-priority runnable thread. */
     for (scheduler_queue_t *n = sched_queue; n != NULL; n = n->next) {
         thread_t *t = n->thread;
 
         if (t->prio >= highest_priority)
             continue;
 
-        signal_t *sig = process_get_signal(t->process);
-        if (sig && t->scontext == NULL) {
-            status_t st = process_create_scontext(t, sig);
-            if (st != SUCCESS)
-                panic("scheduler_handler: Failed to create signal context");
-            if (t->state == SCHEDULER_STATUS_INTERRUPTIBLE_SLEEP)
-                t->state = SCHEDULER_STATUS_RUNABLE;
+        /* Wake interruptible sleepers that have a deliverable signal */
+        if (t->state == SCHEDULER_STATUS_INTERRUPTIBLE_SLEEP) {
+            process_t *p = GET_PROC(t);
+            for (int s = 1; s < NSIG; s++) {
+                if (!p->signal_queue[s]) continue;
+                if (s != SIGKILL && s != SIGSTOP &&
+                    (p->sig_mask & (1UL << (s - 1)))) continue;
+
+                sigaction_t *action = p->signal_actions[s];
+                uint8_t has_custom_handler = action &&
+                    (uintptr_t)action->sa_handler != (uintptr_t)SIG_DFL &&
+                    (uintptr_t)action->sa_handler != (uintptr_t)SIG_IGN;
+
+                if (has_custom_handler) {
+                    /* Redirecting into a handler needs a valid *user*
+                       ctx, which this thread doesn't have right now (it's
+                       mid-kernel-context block) — just wake it so the
+                       normal signal_deliver() path in scheduler_handler
+                       applies it once the thread genuinely returns to user
+                       context on its own (see sleep()'s doc comment: the
+                       caller sees this as an interrupted wait and unwinds
+                       back up through its syscall). */
+                    t->state = SCHEDULER_STATUS_RUNABLE;
+                    t->woken_by_signal = 1;
+                    cancel_sleep(t);
+                } else {
+                    /* Default or ignored disposition doesn't need a valid
+                       user ctx to apply: terminate/stop just change
+                       process/thread state directly, and ignore is a
+                       no-op. Apply it right here instead of merely waking
+                       the thread — a thread that immediately re-enters
+                       another kernel-context blocking call (e.g. a plain
+                       read() loop, which never does anything else in
+                       between) would otherwise never actually receive the
+                       signal, since that only ever happens on the
+                       user-context path. */
+                    signal_t *sig = process_get_signal(p);
+                    if (sig) {
+                        uint8_t was_sleeping =
+                            (t->state == SCHEDULER_STATUS_INTERRUPTIBLE_SLEEP);
+                        if (!action || (uintptr_t)action->sa_handler == (uintptr_t)SIG_DFL)
+                            process_handle_default_signal(t, sig);
+                        kfree(sig);
+                        /* Only a signal that actually moved this thread out
+                           of INTERRUPTIBLE_SLEEP (stop/terminate) needs its
+                           sleep-list bookkeeping dropped. A signal whose
+                           default action is "ignore" (SIGCHLD, SIGWINCH,
+                           ...) must leave the thread's original wait alone. */
+                        if (was_sleeping && t->state != SCHEDULER_STATUS_INTERRUPTIBLE_SLEEP)
+                            cancel_sleep(t);
+                    }
+                }
+                break;
+            }
         }
 
         if (t->state == SCHEDULER_STATUS_RUNABLE) {
@@ -431,20 +505,6 @@ void dump_scheduler_status() {
     }
 }
 
-void scheduler_sigreturn(cpu_context_t* ctx, thread_t * thread) {
-    //if (thread->scontext) panic("scheduler_sigreturn: thread still has a signal context");
-    if (thread->kcontext_pending) {
-        //kprintf("scheduler_sigreturn: Restoring KERNEL context for thread %p\n", thread);
-        context_restore(thread->kcontext, ctx);
-        thread->kcontext_pending = 0;
-    } else {
-        //kprintf("scheduler_sigreturn: Restoring USER context for thread %p\n", thread);
-        context_restore(thread->context, ctx);
-    }
-
-    cpu_set_context_info(ctx->ctx_info);
-}
-
 void scheduler_handler(cpu_context_t* ctx, uint8_t cpu_id, uint8_t is_kernel_ctx, uint8_t save_current) {
     //kprintf("scheduler_handler invoked on CPU %d | is_kernel_ctx: %d | save_current: %d\n", cpu_id, is_kernel_ctx, save_current);
     if (ctx == NULL) {
@@ -456,39 +516,26 @@ void scheduler_handler(cpu_context_t* ctx, uint8_t cpu_id, uint8_t is_kernel_ctx
     }
 
     thread_t * ending_thread = ctx->ctx_info->thread;
-    //process_t * ending_process = NULL;
     if (ending_thread) {
-        if (ending_thread->scontext && ending_thread->scontext->in_progress) {
+        if (is_kernel_ctx) {
             if (save_current) {
-                //kprintf("scheduler_handler: Saving SIGNAL context for thread %p\n", ending_thread);
-                context_save(ending_thread->scontext->context, ctx);
-            } else {
-                //kprintf("scheduler_handler: Not saving SIGNAL context for thread %p\n", ending_thread);
-            }
-        } else {
-            if (is_kernel_ctx) {
-                if (save_current) {
-                    //kprintf("scheduler_handler: Saving KERNEL context for thread %p\n", ending_thread);
-                    context_save(ending_thread->kcontext, ctx);
-                    /* Kernel-mode interrupts don't push RSP onto the frame.
-                       Store the pre-interrupt RSP explicitly so the trampoline
-                       can switch to the correct kstack on restore. */
+                context_save(ending_thread->kcontext, ctx);
+                /* Kernel-mode interrupts (CS=0x8) don't push RSP/SS onto
+                   the frame; store the pre-interrupt kstack RSP explicitly
+                   so the trampoline can switch to it on restore.
+                   Syscall-blocked contexts (CS=0x2b) already have the
+                   correct RSP/SS in the frame — don't overwrite. */
+                if (ctx->cs == 0x8) {
                     ending_thread->kcontext->cpu_ctx.rsp =
                         (uint64_t)ctx + sizeof(cpu_context_t) - 2 * sizeof(uint64_t);
-                } else {
-                    //kprintf("scheduler_handler: Not saving KERNEL context for thread %p\n", ending_thread);
-                }
-                ending_thread->kcontext_pending = 1;
-            } else {
-                if (save_current) {
-                    //kprintf("scheduler_handler: Saving USER context for thread %p\n", ending_thread);
-                    context_save(ending_thread->context, ctx);
-                } else {
-                    //kprintf("scheduler_handler: Not saving USER context for thread %p\n", ending_thread);
                 }
             }
+            ending_thread->kcontext_pending = 1;
+        } else {
+            if (save_current) {
+                context_save(ending_thread->context, ctx);
+            }
         }
-       //ending_process = (process_t*)ending_thread->process;
     }
 
     thread_t * next_thread = scheduler_get_next_thread();
@@ -500,25 +547,59 @@ void scheduler_handler(cpu_context_t* ctx, uint8_t cpu_id, uint8_t is_kernel_ctx
         panic("scheduler_handler: No next process found");
     }
 
-    //if (next_process->pid == 103) match();    
+    //if (next_process->pid == 103) match();
     if (next_thread->state != SCHEDULER_STATUS_RUNABLE) {
         panic("scheduler_handler: Next thread is not runable");
     }
 
-    if (next_thread->scontext) {
-        //kprintf("scheduler_handler: Restoring SIGNAL context for thread %p\n", next_thread);
-        next_thread->scontext->in_progress = 1;
-        context_restore(next_thread->scontext->context, ctx);
-    } else {
-        if (next_thread->kcontext_pending) {
-            //kprintf("scheduler_handler: Restoring KERNEL context for thread %p\n", next_thread);
-            next_thread->kcontext_pending = 0;
-            apic_arm_lapic_timer(cpu_id, SCHEDULER_TIMESLICE_MS);
-            kcontext_restore_trampoline(&next_thread->kcontext->cpu_ctx);
+    if (next_thread->kcontext_pending) {
+        next_thread->kcontext_pending = 0;
+        apic_arm_lapic_timer(cpu_id, SCHEDULER_TIMESLICE_MS);
+        simd_restore_context(next_thread->kcontext->simd_ctx);
+        set_cpu_fs_base(next_thread->kcontext->fs_base);
+        if (next_thread->kcontext->cpu_ctx.cs == 0x8) {
+            /* Interrupted from kernel: trampoline rebuilds the 3-item
+               iretq frame (RIP/CS/RFLAGS), switches to the saved kstack, and
+               installs next_thread->kcontext->cpu_ctx.ctx_info into [gs:0x8].
+               That ctx_info is next_thread's own persistent, per-thread
+               record (allocated once in duplicate_thread()/thread creation
+               and never reassigned), so it already matches whatever value
+               next_thread pushed at its own syscall entry — no fixup needed.
+               (A prior version of this code overwrote *that* struct's
+               contents with the *other*, unrelated ending_thread's ctx_info
+               fields, corrupting ending_thread's saved cs/ss for its next
+               syscall and causing #GP on a later iretq — see git history.) */
+            if (next_thread == g_idle_thread) {
+                /* idle_thread_fn is a stateless `while(1) sti;hlt` loop: it
+                   never needs its previously-saved registers or stack
+                   contents back, only to keep running the same loop. Always
+                   relaunching it fresh at its kstack top (instead of trying
+                   to faithfully resume wherever it last got interrupted)
+                   sidesteps a cumulative few-bytes-per-cycle kstack drift
+                   that eventually corrupts its saved context after enough
+                   scheduling rounds. */
+                next_thread->kcontext->cpu_ctx.rip    = (uint64_t)idle_thread_fn;
+                next_thread->kcontext->cpu_ctx.rflags = RFLAGS_INTERRUPT_ENABLE | RFLAGS_ONE;
+                next_thread->kcontext->cpu_ctx.rsp    = (uint64_t)next_thread->kstack->top;
+                kcontext_simple_launch(&next_thread->kcontext->cpu_ctx);
+            } else if (next_thread->kcontext_first_run) {
+                next_thread->kcontext_first_run = 0;
+                kcontext_simple_launch(&next_thread->kcontext->cpu_ctx);
+            } else {
+                kcontext_restore_trampoline(&next_thread->kcontext->cpu_ctx);
+            }
             __builtin_unreachable();
-        } else {
-            //kprintf("scheduler_handler: Restoring USER context for thread %p\n", next_thread);
-            context_restore(next_thread->context, ctx);
+        }
+        /* Syscall-blocked context (CS=0x2b): the saved context already
+           has the full 5-item user frame (RSP/SS present).  Fall through
+           to context_restore so iretq uses that frame normally. */
+        context_restore(next_thread->kcontext, ctx);
+    } else {
+        context_restore(next_thread->context, ctx);
+        /* Deliver a pending signal now that we have the user context in ctx */
+        signal_t *sig = process_get_signal(next_thread->process);
+        if (sig) {
+            signal_deliver(next_thread, sig, ctx);
         }
     }
     cpu_set_context_info(ctx->ctx_info);
@@ -545,4 +626,28 @@ process_t * scheduler_get_process_by_pid(pid_t pid) {
         current = current->next;
     }
     return NULL;
+}
+
+/* Delivers `signo` to every process in process group `pgid`. sched_queue
+   holds one node per thread, so a multi-threaded process would otherwise be
+   signalled once per thread; dedupe on the process pointer instead. */
+void scheduler_signal_pgrp(pid_t pgid, int signo) {
+    if (pgid <= 0) return;
+
+    process_t * signalled[64];
+    int signalled_count = 0;
+
+    for (scheduler_queue_t * current = sched_queue; current != NULL; current = current->next) {
+        process_t * proc = GET_PROC(current->thread);
+        if (proc->pgid != pgid) continue;
+
+        uint8_t already = 0;
+        for (int i = 0; i < signalled_count; i++) {
+            if (signalled[i] == proc) { already = 1; break; }
+        }
+        if (already) continue;
+
+        if (signalled_count < 64) signalled[signalled_count++] = proc;
+        process_kill(proc, signo);
+    }
 }

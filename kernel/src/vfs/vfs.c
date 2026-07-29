@@ -4,6 +4,7 @@
 #include <krnl/libraries/std/string.h>
 #include <krnl/libraries/std/errno.h>
 #include <krnl/libraries/assert/assert.h>
+#include <krnl/process/pipe.h>
 
 vfs_mount_t * vfs_mounts = NULL;
 vfs_fs_t * ops = NULL;
@@ -208,6 +209,7 @@ status_t vfs_open(const char *path, int flags, vfs_file_descriptor_t *fd) {
     fd->mount = mount;
     fd->position = 0;
     fd->flags = flags;
+    fd->pipe = NULL;
     fd->native_path = vfs_get_native_path(path, mount);
     if (!fd->native_path) {
         return FAILURE;
@@ -257,6 +259,8 @@ status_t vfs_open_dir(const char *path, vfs_file_descriptor_t *fd) {
     fd->mount = mount;
     fd->position = 0;
     fd->flags = O_RDONLY;
+    fd->pipe = NULL;
+    fd->synth_index = 0;
     fd->native_path = vfs_get_native_path(path, mount);
     if (!fd->native_path) return FAILURE;
     fd->valid = 1;
@@ -267,6 +271,10 @@ status_t vfs_close(vfs_file_descriptor_t *fd) {
 
     if (fd == NULL) {
         panic("vfs_close: fd is NULL");
+    }
+    if (fd->pipe) {
+        pipe_close(fd);
+        return SUCCESS;
     }
     if (fd->mount == NULL || fd->mount->ops == NULL) {
         panic("vfs_close: Invalid mount or close operation");
@@ -283,6 +291,9 @@ ssize_t vfs_read(vfs_file_descriptor_t *fd, void *buf, size_t count) {
 
     if (fd == NULL || buf == NULL) {
         panic("vfs_read: fd or buf is NULL");
+    }
+    if (fd->pipe) {
+        return pipe_read(fd, buf, count);
     }
     if (fd->mount == NULL || fd->mount->ops == NULL || fd->mount->ops->read == NULL) {
         panic("vfs_read: Invalid mount or read operation");
@@ -301,6 +312,9 @@ ssize_t vfs_write(vfs_file_descriptor_t *fd, const void *buf, size_t count) {
 
     if (fd == NULL || buf == NULL) {
         panic("vfs_write: fd or buf is NULL");
+    }
+    if (fd->pipe) {
+        return pipe_write(fd, buf, count);
     }
     if (fd->mount == NULL || fd->mount->ops == NULL || fd->mount->ops->write == NULL) {
         panic("vfs_write: Invalid mount or write operation");
@@ -321,6 +335,9 @@ status_t vfs_fstat(vfs_file_descriptor_t *fd, vfs_stat_t *buf) {
     if (fd == NULL || buf == NULL) {
         panic("vfs_fstat: fd or buf is NULL");
     }
+    if (fd->pipe) {
+        return pipe_fstat(fd, buf);
+    }
     if (fd->mount == NULL || fd->mount->ops == NULL || fd->mount->ops->fstat == NULL) {
         panic("vfs_fstat: Invalid mount or fstat operation");
     }
@@ -329,18 +346,101 @@ status_t vfs_fstat(vfs_file_descriptor_t *fd, vfs_stat_t *buf) {
     return res;
 }
 
+/* Reconstruct the absolute path a directory fd refers to, from its mount
+   point + native (mount-relative) path -- the inverse of vfs_get_native_path. */
+static char * vfs_reconstruct_abs_path(vfs_file_descriptor_t *fd) {
+    const char *mp = fd->mount->mount_point;
+    if (strcmp(mp, "/") == 0) {
+        char *abs = kmalloc(strlen(fd->native_path) + 1);
+        if (abs) strcpy(abs, fd->native_path);
+        return abs;
+    }
+    char *abs = kmalloc(strlen(mp) + strlen(fd->native_path) + 1);
+    if (abs) {
+        strcpy(abs, mp);
+        strcat(abs, fd->native_path);
+    }
+    return abs;
+}
+
+/* True if mount m sits directly inside directory abs_dir (e.g. abs_dir="/dev",
+   m->mount_point="/dev/null" -- but not "/dev/sub/null"). On match, *name_out
+   points at the child's name within m->mount_point. */
+static int vfs_mount_is_direct_child(const char *abs_dir, vfs_mount_t *m, const char **name_out) {
+    size_t dir_len = strlen(abs_dir);
+    int root = (dir_len == 1 && abs_dir[0] == '/');
+    size_t prefix_len = root ? dir_len : dir_len + 1; /* account for the extra '/' */
+
+    if (strlen(m->mount_point) <= prefix_len) return 0;
+    if (strncmp(m->mount_point, abs_dir, dir_len) != 0) return 0;
+    if (!root && m->mount_point[dir_len] != '/') return 0;
+
+    const char *suffix = m->mount_point + prefix_len;
+    if (*suffix == '\0' || strchr(suffix, '/') != NULL) return 0;
+    *name_out = suffix;
+    return 1;
+}
+
+/* Mounts (e.g. /dev/null, /dev/tty0) intercept opens on their exact path but
+   have no corresponding dirent in the real filesystem underneath them, so
+   they'd otherwise be invisible to `ls`. Once the real directory's entries
+   are exhausted, synthesize one dirent per mount that lives directly inside
+   the directory being listed. */
+static ssize_t vfs_readdir_overlay_mounts(vfs_file_descriptor_t *fd, void *buf, size_t count) {
+    char *abs_dir = vfs_reconstruct_abs_path(fd);
+    if (!abs_dir) return 0;
+
+    uint8_t *out = (uint8_t *)buf;
+    ssize_t written = 0;
+    size_t matched = 0;
+
+    for (vfs_mount_t *m = vfs_mounts; m != NULL; m = m->next) {
+        const char *name;
+        if (!vfs_mount_is_direct_child(abs_dir, m, &name)) continue;
+
+        if (matched >= fd->synth_index) {
+            size_t name_len = strlen(name);
+            size_t reclen = (19 + name_len + 1 + 7) & ~(size_t)7;
+            if ((size_t)written + reclen > count) break;
+
+            memset(out, 0, reclen);
+            *(uint64_t *)(out +  0) = matched + 1; /* d_ino */
+            *(uint64_t *)(out +  8) = matched + 1; /* d_off */
+            *(uint16_t *)(out + 16) = (uint16_t)reclen;
+            *(uint8_t  *)(out + 18) = DT_CHR; /* every current mount overlay is a char device */
+            memcpy(out + 19, name, name_len + 1);
+
+            out += reclen;
+            written += (ssize_t)reclen;
+            fd->synth_index++;
+        }
+        matched++;
+    }
+
+    kfree(abs_dir);
+    return written;
+}
+
 ssize_t vfs_readdir(vfs_file_descriptor_t *fd, void *buf, size_t count) {
     if (fd == NULL || buf == NULL) return -EINVAL;
+    if (fd->pipe) return -ENOTDIR;
     if (fd->mount == NULL || fd->mount->ops == NULL) return -EBADF;
     if (fd->mount->ops->readdir == NULL) return -ENOTDIR;
-    return fd->mount->ops->readdir(fd->mount->major, fd->mount->minor,
+
+    ssize_t real_bytes = fd->mount->ops->readdir(fd->mount->major, fd->mount->minor,
                                    fd->native_path, &fd->position, buf, count);
+    if (real_bytes != 0) return real_bytes;
+
+    return vfs_readdir_overlay_mounts(fd, buf, count);
 }
 
 status_t vfs_ioctl(vfs_file_descriptor_t *fd, uint64_t request, void * arg) {
 
     if (fd == NULL) {
         panic("vfs_ioctl: fd is NULL");
+    }
+    if (fd->pipe) {
+        return FAILURE; /* pipes have no ioctls; lets sys_isatty() see ENOTTY */
     }
     if (fd->mount == NULL || fd->mount->ops == NULL || fd->mount->ops->ioctl == NULL) {
         panic("vfs_ioctl: Invalid mount or ioctl operation");

@@ -9,6 +9,7 @@
 #include <krnl/mem/vmm.h>
 #include <krnl/boot/bootloaders/bootloader.h>
 #include <krnl/debug/debug.h>
+#include <krnl/process/process.h>
 
 #define SIMD_CONTEXT_SIZE 512
 #define CR0_MONITOR_COPROC (1 << 1)

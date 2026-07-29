@@ -23,7 +23,7 @@ packages:
   - name: bash
     architecture: '@OPTION:arch@'
     source:
-      git: 'https://https.git.savannah.gnu.org/git/bash.git'
+      git: 'https://git.savannah.gnu.org/git/bash.git'
       branch: 'master'
       commit: '9439ce094c9aa7557a9d53ac7b412a23aa66e36b'
       version: '5.1.16'
@@ -51,6 +51,121 @@ packages:
       - args: ['cp', '@THIS_COLLECT_DIR@/usr/bin/bash', '@THIS_COLLECT_DIR@/usr/bin/sh']
       - args: ['mkdir', '-p', '@THIS_COLLECT_DIR@/bin']
       - args: ['cp', '@THIS_COLLECT_DIR@/usr/bin/bash', '@THIS_COLLECT_DIR@/bin/sh']
+
+  - name: grep
+    architecture: '@OPTION:arch@'
+    source:
+      subdir: 'bundled'
+      url: 'https://ftp.gnu.org/gnu/grep/grep-3.11.tar.xz'
+      format: 'tar.xz'
+      extract_path: 'grep-3.11'
+      patch-path-strip: 1
+    tools_required:
+      - host-gcc
+    pkgs_required:
+      - mlibc
+    configure:
+      - args: ['sed', '-i', 's/mirbsd\* | netbsd\*/mirbsd* | netbsd* | krnl*/', '@THIS_SOURCE_DIR@/build-aux/config.sub']
+      - args:
+        - '@THIS_SOURCE_DIR@/configure'
+        - '--host=x86_64-krnl'
+        - '--prefix=/usr'
+        - '--disable-nls'
+        environ:
+          ac_cv_func_wcswidth: 'yes'
+          ac_cv_func_getcwd: 'yes'
+    build:
+      - args: ['make', '-j@PARALLELISM@']
+      - args: ['make', 'install']
+        environ:
+          DESTDIR: '@THIS_COLLECT_DIR@'
+
+  - name: sed
+    architecture: '@OPTION:arch@'
+    source:
+      subdir: 'bundled'
+      url: 'https://ftp.gnu.org/gnu/sed/sed-4.9.tar.xz'
+      format: 'tar.xz'
+      extract_path: 'sed-4.9'
+      patch-path-strip: 1
+    tools_required:
+      - host-gcc
+    pkgs_required:
+      - mlibc
+    configure:
+      - args: ['sed', '-i', 's/mirbsd\* | netbsd\*/mirbsd* | netbsd* | krnl*/', '@THIS_SOURCE_DIR@/build-aux/config.sub']
+      - args:
+        - '@THIS_SOURCE_DIR@/configure'
+        - '--host=x86_64-krnl'
+        - '--prefix=/usr'
+        - '--disable-nls'
+        environ:
+          ac_cv_func_wcswidth: 'yes'
+          ac_cv_func_getcwd: 'yes'
+    build:
+      - args: ['make', '-j@PARALLELISM@']
+      - args: ['make', 'install']
+        environ:
+          DESTDIR: '@THIS_COLLECT_DIR@'
+
+  - name: findutils
+    architecture: '@OPTION:arch@'
+    source:
+      subdir: 'bundled'
+      url: 'https://ftp.gnu.org/gnu/findutils/findutils-4.9.0.tar.xz'
+      format: 'tar.xz'
+      extract_path: 'findutils-4.9.0'
+      patch-path-strip: 1
+    tools_required:
+      - host-gcc
+    pkgs_required:
+      - mlibc
+    configure:
+      - args: ['sed', '-i', 's/mirbsd\* | netbsd\*/mirbsd* | netbsd* | krnl*/', '@THIS_SOURCE_DIR@/build-aux/config.sub']
+      - args:
+        - '@THIS_SOURCE_DIR@/configure'
+        - '--host=x86_64-krnl'
+        - '--prefix=/usr'
+        - '--disable-nls'
+        environ:
+          ac_cv_func_wcswidth: 'yes'
+          ac_cv_func_getcwd: 'yes'
+          gl_cv_func_wcwidth_works: 'yes'
+    build:
+      - args: ['make', '-j@PARALLELISM@']
+      - args: ['make', 'install']
+        environ:
+          DESTDIR: '@THIS_COLLECT_DIR@'
+
+  - name: gawk
+    architecture: '@OPTION:arch@'
+    source:
+      subdir: 'bundled'
+      url: 'https://ftp.gnu.org/gnu/gawk/gawk-5.3.0.tar.xz'
+      format: 'tar.xz'
+      extract_path: 'gawk-5.3.0'
+      patch-path-strip: 1
+    tools_required:
+      - host-gcc
+    pkgs_required:
+      - mlibc
+    configure:
+      - args: ['sed', '-i', 's/mirbsd\* | netbsd\*/mirbsd* | netbsd* | krnl*/', '@THIS_SOURCE_DIR@/build-aux/config.sub']
+      - args:
+        - '@THIS_SOURCE_DIR@/configure'
+        - '--host=x86_64-krnl'
+        - '--prefix=/usr'
+        - '--disable-nls'
+        - '--without-libsigsegv'
+        - '--without-libiconv-prefix'
+        environ:
+          ac_cv_func_wcswidth: 'yes'
+          ac_cv_func_getcwd: 'yes'
+    build:
+      - args: ['make', '-j@PARALLELISM@']
+      - args: ['make', 'install']
+        environ:
+          DESTDIR: '@THIS_COLLECT_DIR@'
 
   - name: coreutils
     architecture: '@OPTION:arch@'

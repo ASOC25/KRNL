@@ -67,29 +67,31 @@ override NASMFILES := $(call rwildcard,$(SRCDIR),*.asm)
 override OBJS := $(patsubst $(SRCDIR)/%.c, $(OBJDIR)/%.o, $(CFILES))
 override OBJS += $(patsubst $(SRCDIR)/%.S, $(OBJDIR)/%_s.o, $(ASFILES))
 override OBJS += $(patsubst $(SRCDIR)/%.asm, $(OBJDIR)/%_asm.o, $(NASMFILES))
-override HEADER_DEPS := $(CFILES:.c=.d) $(ASFILES:.S=.d)
+override HEADER_DEPS := $(OBJS:.o=.d)
 
 RAMDISK_OBJ := $(OBJDIR)/ramdisk.o
 
 kernel: $(OBJS) $(RAMDISK_OBJ) link
 
+-include $(HEADER_DEPS)
+
 $(RAMDISK_OBJ): $(RAMDISK)
 	@objcopy -I binary -O elf64-x86-64 --rename-section .data=.ramdisk,alloc,load,contents,readonly $^ $@
 
 $(OBJDIR)/%.o: $(SRCDIR)/%.c
-	@ echo !==== COMPILING $^
+	@ echo !==== COMPILING $<
 	@ mkdir -p $(@D)
-	@ $(CC) $(CFLAGS) -c $^ -o $@
+	@ $(CC) $(CFLAGS) -c $< -o $@
 
 $(OBJDIR)/%_asm.o: $(SRCDIR)/%.asm
-	@ echo !==== ASSEMBLING $^
+	@ echo !==== ASSEMBLING $<
 	@ mkdir -p $(@D)
-	@ nasm $(NASMFLAGS) $^ -o $@
+	@ nasm $(NASMFLAGS) $< -o $@
 
 $(OBJDIR)/%_s.o: $(SRCDIR)/%.S
-	@ echo !==== ASSEMBLING $^
+	@ echo !==== ASSEMBLING $<
 	@ mkdir -p $(@D)
-	@ $(CC) $(CFLAGS) -c $^ -o $@
+	@ $(CC) $(CFLAGS) -c $< -o $@
 
 link:
 	@ $(LD) $(LDFLAGS) -o $(BUILDDIR)/$(KERNEL) $(OBJS) $(RAMDISK_OBJ)

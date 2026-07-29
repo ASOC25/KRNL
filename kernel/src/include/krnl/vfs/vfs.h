@@ -12,21 +12,31 @@
 #include <krnl/libraries/std/time.h>
 #include <krnl/devices/devices.h>
 
-#define O_WRONLY    0x1
-#define O_RDONLY    0x2
-#define O_RDWR      0x4
-#define O_CREAT     0x8
-#define O_EXCL      0x10
-#define O_NOCTTY    0x20
-#define O_TRUNC     0x40
-#define O_APPEND    0x80
-#define O_NONBLOCK  0x100
-#define O_DSYNC     0x200
-#define O_DIRECT    0x400
-#define O_LARGEFILE 0x800
-#define O_DIRECTORY 0x1000
-#define O_NOFOLLOW  0x2000
-#define O_CLOEXEC   0x4000
+/* Values MUST match mlibc's abi-bits/fcntl.h exactly: these flags cross the
+   syscall boundary as raw ints with no translation layer, so the kernel's
+   encoding IS the wire format userspace (mlibc) uses. */
+#define O_PATH      010000000
+#define O_ACCMODE   (03 | O_PATH)
+#define O_RDONLY    00
+#define O_WRONLY    01
+#define O_RDWR      02
+#define O_CREAT     0100
+#define O_EXCL      0200
+#define O_NOCTTY    0400
+#define O_TRUNC     01000
+#define O_APPEND    02000
+#define O_NONBLOCK  04000
+#define O_DSYNC     010000
+#define O_ASYNC     020000
+#define O_DIRECT    040000
+#define O_LARGEFILE 0100000
+#define O_DIRECTORY 0200000
+#define O_NOFOLLOW  0400000
+#define O_CLOEXEC   02000000
+#define O_SYNC      04010000
+#define O_RSYNC     04010000
+#define O_NOATIME   01000000
+#define O_TMPFILE   020000000
 
 typedef struct stat {
 	uint64_t st_dev;
@@ -105,6 +115,11 @@ typedef struct vfs_fs {
     ssize_t (*readdir)(device_major_t major, device_minor_t minor, const char * path, size_t *index, void * buf, size_t count);
     //Detect filesystem
     status_t (*detect)(device_major_t major, device_minor_t minor);
+    /* Readiness check for select/pselect (NULL = always ready, correct for
+       any device whose read()/write() never blocks — regular files,
+       memdev, etc). for_write selects which direction is being asked
+       about; returns 1 if the operation would not block right now. */
+    int (*poll)(device_major_t major, device_minor_t minor, const char *path, int for_write);
     /* Write-capable operations (NULL = unsupported / read-only) */
     status_t (*mkdir)(device_major_t major, device_minor_t minor, const char *path, uint32_t mode);
     status_t (*create)(device_major_t major, device_minor_t minor, const char *path, uint32_t mode);
@@ -128,12 +143,17 @@ typedef struct vfs_path {
     char internal_path[VFS_PATH_MAX];
 } vfs_path_t;
 
+struct pipe; /* opaque; see krnl/process/pipe.h */
+
 typedef struct vfs_file_descriptor {
     uint8_t valid;
     vfs_mount_t *mount;
     size_t position;
     int flags;
     char * native_path; // Path within the mounted filesystem
+    struct pipe *pipe;  // NULL for regular files/dirs; non-NULL => pipe end
+    size_t synth_index; // readdir cursor for mount-point entries synthesized
+                         // into this directory's listing (see vfs_readdir)
 } vfs_file_descriptor_t;
 
 status_t vfs_register_fs(vfs_fs_t *ops);

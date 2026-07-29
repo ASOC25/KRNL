@@ -43,7 +43,14 @@
 #define SIGRTMIN	32
 #define SIGRTMAX	_NSIG
 
-#define SA_RESTORER	0x04000000
+#define SA_NOCLDSTOP  1
+#define SA_NOCLDWAIT  2
+#define SA_SIGINFO    4
+#define SA_ONSTACK    0x08000000
+#define SA_RESTART    0x10000000
+#define SA_NODEFER    0x40000000
+#define SA_RESETHAND  0x80000000
+#define SA_RESTORER   0x04000000
 
 #define MINSIGSTKSZ	2048
 #define SIGSTKSZ	8192
@@ -63,55 +70,89 @@
 
 typedef unsigned long sigset_t;
 
-typedef struct siginfo {
-	int      si_signo;     /* Signal number */
-	int      si_errno;     /* An errno value */
-	int      si_code;      /* Signal code */
-	int      si_trapno;    /* Trap number that caused
-							  hardware-generated signal
-							  (unused on most architectures) */
-	int16_t    si_pid;       /* Sending process ID */
-	int16_t    si_uid;       /* Real user ID of sending process */
-	int      si_status;    /* Exit value or signal */
-	uint64_t  si_utime;     /* User time consumed */
-	uint64_t  si_stime;     /* System time consumed */
-	int si_value;     /* Signal value */
-	int      si_int;       /* POSIX.1b signal */
-	void    *si_ptr;       /* POSIX.1b signal */
-	int      si_overrun;   /* Timer overrun count;
-							  POSIX.1b timers */
-	int      si_timerid;   /* Timer ID; POSIX.1b timers */
-	void    *si_addr;      /* Memory location which caused fault */
-	long     si_band;      /* Band event (was int in
-							  glibc 2.3.2 and earlier) */
-	int      si_fd;        /* File descriptor */
-	short    si_addr_lsb;  /* Least significant bit of address
-							  (since Linux 2.6.32) */
-	void    *si_lower;     /* Lower bound when address violation
-							  occurred (since Linux 3.19) */
-	void    *si_upper;     /* Upper bound when address violation
-							  occurred (since Linux 3.19) */
-	int      si_pkey;      /* Protection key on PTE that caused
-							  fault (since Linux 4.6) */
-	void    *si_call_addr; /* Address of system call instruction
-							  (since Linux 3.5) */
-	int      si_syscall;   /* Number of attempted system call
-							  (since Linux 3.5) */
-	unsigned int si_arch;  /* Architecture of attempted system call
-							  (since Linux 3.5) */
+/* siginfo_t: 128-byte musl/mlibc-compatible layout */
+typedef struct {
+    int si_signo;
+    int si_errno;
+    int si_code;
+    uint8_t __pad[128 - 3 * sizeof(int)];
 } siginfo_t;
 
+/* sigaction_t: layout matches mlibc's struct sigaction for x86-64.
+   sa_handler and sa_sigaction share the same address (anonymous union). */
 typedef struct sigaction {
-    void     (*sa_handler)(int);
-    void     (*sa_sigaction)(int, siginfo_t *, void *);
-    sigset_t   sa_mask;
-    int        sa_flags;
-    void     (*sa_restorer)(void);
+    union {
+        void (*sa_handler)(int);
+        void (*sa_sigaction)(int, siginfo_t *, void *);
+    };
+    unsigned long sa_flags;
+    void (*sa_restorer)(void);
+    unsigned long sa_mask[16]; /* mlibc sigset_t: 128 bytes, sig[0] = signals 1-64 */
 } sigaction_t;
 
 typedef struct signal {
-	int signo;
-	siginfo_t info;
-	struct signal * next;
+    int signo;
+    siginfo_t info;
+    struct signal * next;
 } signal_t;
+
+/* ── Unix signal frame types (x86-64) ─────────────────────────────────── */
+
+/* Alternate-stack descriptor (matches mlibc stack_t) */
+typedef struct {
+    void     *ss_sp;
+    int       ss_flags;
+    uint64_t  ss_size;
+} sigstack_t;
+
+/* mcontext_t register array indices (match mlibc REG_* constants) */
+#define MC_R8      0
+#define MC_R9      1
+#define MC_R10     2
+#define MC_R11     3
+#define MC_R12     4
+#define MC_R13     5
+#define MC_R14     6
+#define MC_R15     7
+#define MC_RDI     8
+#define MC_RSI     9
+#define MC_RBP     10
+#define MC_RBX     11
+#define MC_RDX     12
+#define MC_RAX     13
+#define MC_RCX     14
+#define MC_RSP     15
+#define MC_RIP     16
+#define MC_EFL     17
+#define MC_CSGSFS  18
+#define MC_ERR     19
+#define MC_TRAPNO  20
+#define MC_OLDMASK 21
+#define MC_CR2     22
+#define K_NGREG    23
+
+/* mcontext_t: matches mlibc's mcontext_t for x86-64 */
+typedef struct {
+    uint64_t gregs[K_NGREG];
+    void    *fpregs;
+    uint64_t __reserved1[8];
+} k_mcontext_t;
+
+/* ucontext_t: matches mlibc's ucontext_t for x86-64.
+   uc_sigmask is padded to 128 bytes to match mlibc's sigset_t. */
+typedef struct k_ucontext {
+    uint64_t          uc_flags;
+    struct k_ucontext *uc_link;
+    sigstack_t         uc_stack;
+    k_mcontext_t       uc_mcontext;
+    sigset_t           uc_sigmask;
+    uint64_t           __uc_sigmask_pad[15]; /* pad to 128 bytes total */
+} k_ucontext_t;
+
+/* rt_sigframe: pushed on user stack on signal delivery */
+struct rt_sigframe {
+    siginfo_t    info;  /* 128 bytes, matches mlibc siginfo_t */
+    k_ucontext_t uc;
+};
+
 #endif

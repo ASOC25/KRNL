@@ -2,6 +2,7 @@
 
 extern interrupt_handler
 global __interrupt_vector
+global kcontext_simple_launch
 
 %macro swapgs_if_necessary 1
 	cmp qword [rsp + 0x18], 0x8
@@ -131,53 +132,151 @@ __interrupt_vector:
     %endrep
 
 ; kcontext_restore_trampoline(cpu_context_t *kctx)
-; Restores a kernel-mode thread whose context was saved by interrupt_entry.
-; Switches RSP to the target's pre-interrupt RSP (stored in kctx->rsp by the
-; scheduler), builds an iretq frame at that RSP, restores all registers, and
-; executes iretq.  Never returns.
+; Restores a kernel-mode thread (cs=0x8) saved by interrupt_entry.
+; Switches CR3, updates gs:0x8, switches RSP to the saved kstack position,
+; builds a 3-item iretq frame (RIP/CS/RFLAGS), restores all GP registers,
+; then executes iretq — which atomically restores RIP, CS, and RFLAGS
+; (re-enabling interrupts as part of the instruction).  Never returns.
+;
+; Using iretq instead of popfq+ret is critical: popfq re-enables IF before
+; all registers are restored, opening a window for the APIC timer to fire
+; mid-trampoline and corrupt the thread's saved kcontext.  iretq is atomic.
 ;
 ; cpu_context_t offsets (packed, all uint64_t):
 ;   +0   cr3          +8   ctx_info*
 ;   +16  rax          +24  rbx   +32  rcx   +40  rdx
 ;   +48  rsi          +56  rdi   +64  rbp
 ;   +72  r8  +80  r9  +88  r10  +96  r11  +104 r12  +112 r13  +120 r14  +128 r15
-;   +152 rip         +160 cs           +168 rflags
+;   +152 rip  +160 cs  +168 rflags
 ;   +176 rsp (pre-interrupt RSP, set explicitly by scheduler)
 global kcontext_restore_trampoline
 kcontext_restore_trampoline:
     ; rdi = &next_thread->kcontext->cpu_ctx
+    ;
+    ; Restores a kernel-mode thread (cs=0x8) whose context was saved by
+    ; interrupt_entry. This is always a same-privilege (ring0->ring0) resume,
+    ; so CS/SS never change and RIP/RFLAGS can be restored with a plain
+    ; `ret`+`popfq` instead of `iretq`. This sidesteps a QEMU/TCG bug where
+    ; `iretq` raised a spurious #GP (citing an unrelated GDT selector) even
+    ; though the popped RIP/CS/RFLAGS were all individually verified valid —
+    ; see git history for the (extensively debugged) symptom this replaced.
+    ;
+    ; next_thread->kcontext is kernel memory, but each process's kernel-half
+    ; page tables are built by an independent walk (see vm_duplicate()) that
+    ; allocates its own copies of intermediate page-table pages rather than
+    ; sharing the same physical ones with every other process, so a very
+    ; recently written kernel address is not guaranteed to be visible yet
+    ; through a *different* process's copy of those tables. Every field is
+    ; therefore read out of *rdi below while whichever CR3 is currently
+    ; loaded (guaranteed up to date) is still active; CR3 is only switched to
+    ; next_thread's own once every value has already been staged onto the
+    ; (already-switched-to) target stack, which also leaves every register
+    ; free for the CR3/ctx_info switch itself.
+    mov rax, [rdi + 152]    ; rip
+    mov rbx, [rdi + 168]    ; rflags
+    mov rsp, [rdi + 176]    ; switch to the target kernel stack
+    push rax                ; rip — consumed by `ret` at the very end
+    push rbx                ; rflags — consumed by `popfq` just before the ret
+    push qword [rdi + 16]   ; rax
+    push qword [rdi + 24]   ; rbx
+    push qword [rdi + 32]   ; rcx
+    push qword [rdi + 40]   ; rdx
+    push qword [rdi + 48]   ; rsi
+    push qword [rdi + 64]   ; rbp
+    push qword [rdi + 72]   ; r8
+    push qword [rdi + 80]   ; r9
+    push qword [rdi + 88]   ; r10
+    push qword [rdi + 96]   ; r11
+    push qword [rdi + 104]  ; r12
+    push qword [rdi + 112]  ; r13
+    push qword [rdi + 120]  ; r14
+    push qword [rdi + 128]  ; r15
+    push qword [rdi + 56]   ; rdi's own saved value
 
-    ; Switch to target thread's pre-interrupt RSP
-    mov rsp, [rdi + 176]
+    mov r11, [rdi + 0]      ; target cr3 (rdi itself no longer needed)
+    mov cr3, r11
+    mov r12, [rdi + 8]      ; target ctx_info
+    mov [gs:0x8], r12
 
-    ; Build iretq frame below that RSP (kernel→kernel: only RIP/CS/RFLAGS needed)
-    push qword [rdi + 168]  ; RFLAGS
-    push qword [rdi + 160]  ; CS
-    push qword [rdi + 152]  ; RIP
+    ; Pop everything back off in reverse order; rflags and rip are left on
+    ; top of the stack for popfq/ret to consume.
+    pop rdi
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rbp
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    pop rax
 
-    ; Restore CR3
-    mov rax, [rdi + 0]
-    mov cr3, rax
+    popfq  ; restore RFLAGS (re-enabling IF if saved RFLAGS had it set)
+    ret    ; pop RIP and jump there, correctly leaving RSP at its target value
 
-    ; Restore ctx_info into [gs:0x8]
-    mov rax, [rdi + 8]
-    mov [gs:0x8], rax
+; kcontext_simple_launch(cpu_context_t *kctx)
+; For kernel threads being started for the first time (no prior interrupt frame).
+; Switches CR3 and gs:0x8, sets RSP to the saved kstack top, restores all GP
+; registers, then enables interrupts and jumps directly to the saved RIP.
+; Using sti+jmp instead of iretq avoids building a fake interrupt frame on a
+; stack that has never been touched (which triggers a QEMU TCG iretq bug when
+; RSP is at the very top of a freshly-zeroed kernel stack page).
+kcontext_simple_launch:
+    ; rdi = &next_thread->kcontext->cpu_ctx
+    ;
+    ; See kcontext_restore_trampoline above for why every field is read out
+    ; of *rdi before switching CR3 (kernel-half page tables are not
+    ; guaranteed to be in sync across processes for very recently written
+    ; addresses). r11 is reserved to carry the entry point across the CR3
+    ; switch below — its "real" saved value from cpu_ctx is not restored
+    ; here, matching this launch path's original design (it is only used to
+    ; start brand-new kernel threads, whose initial GP registers are zeroed
+    ; anyway).
+    mov rsp, [rdi + 176]    ; switch to the target kernel stack top
+    push qword [rdi + 152]  ; rip (entry point) — popped into r11 at the end
+    push qword [rdi + 16]   ; rax
+    push qword [rdi + 24]   ; rbx
+    push qword [rdi + 32]   ; rcx
+    push qword [rdi + 40]   ; rdx
+    push qword [rdi + 48]   ; rsi
+    push qword [rdi + 64]   ; rbp
+    push qword [rdi + 72]   ; r8
+    push qword [rdi + 80]   ; r9
+    push qword [rdi + 88]   ; r10
+    push qword [rdi + 104]  ; r12
+    push qword [rdi + 112]  ; r13
+    push qword [rdi + 120]  ; r14
+    push qword [rdi + 128]  ; r15
+    push qword [rdi + 56]   ; rdi's own saved value
 
-    ; Restore general-purpose registers (rax and rdi last)
-    mov rax, [rdi + 16]
-    mov rbx, [rdi + 24]
-    mov rcx, [rdi + 32]
-    mov rdx, [rdi + 40]
-    mov rsi, [rdi + 48]
-    mov rbp, [rdi + 64]
-    mov r8,  [rdi + 72]
-    mov r9,  [rdi + 80]
-    mov r10, [rdi + 88]
-    mov r11, [rdi + 96]
-    mov r12, [rdi + 104]
-    mov r13, [rdi + 112]
-    mov r14, [rdi + 120]
-    mov r15, [rdi + 128]
-    mov rdi, [rdi + 56]
+    mov r11, [rdi + 0]      ; target cr3
+    mov cr3, r11
+    mov r12, [rdi + 8]      ; target ctx_info
+    mov [gs:0x8], r12
 
-    iretq
+    pop rdi
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r10
+    pop r9
+    pop r8
+    pop rbp
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    pop rax
+    pop r11                 ; entry point
+
+    ; Enable interrupts then jump to entry point.
+    ; sti defers interrupt delivery until after the next instruction (jmp),
+    ; so the thread begins executing with interrupts already enabled.
+    sti
+    jmp r11

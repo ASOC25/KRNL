@@ -20,7 +20,8 @@ namespace mlibc{
 
     [[noreturn]] void sys_libc_panic(){
         sys_libc_log("libc panic!");
-        for(;;);
+        do_syscall(SYS_EXIT, -1);
+        __builtin_unreachable();
     }
 
     int sys_tcb_set(void *pointer){
@@ -55,18 +56,45 @@ namespace mlibc{
     }
 
     int sys_setpgid(pid_t pid, pid_t pgid) {
-        (void)pid;
-        (void)pgid;
-        // Process groups not implemented; silently succeed so shells don't abort.
+        auto result = do_syscall(SYS_SETPGID, pid, pgid);
+
+        if(result < 0){
+            return -result;
+        }
+
         return 0;
     }
 
     int sys_getpgid(pid_t pid, pid_t *pgid) {
-        (void)pid;
-        // Without kernel pgrp tracking, report pgrp=0. tcgetpgrp() also returns
-        // 0 (tty_foreground_pgrp initial value), so bash sees getpgrp()==tcgetpgrp()
-        // and correctly concludes it is the foreground process group.
-        *pgid = 0;
+        auto result = do_syscall(SYS_GETPGID, pid);
+
+        if(result < 0){
+            return -result;
+        }
+
+        *pgid = (pid_t)result;
+        return 0;
+    }
+
+    int sys_setsid(pid_t *sid) {
+        auto result = do_syscall(SYS_SETSID);
+
+        if(result < 0){
+            return -result;
+        }
+
+        *sid = (pid_t)result;
+        return 0;
+    }
+
+    int sys_getsid(pid_t pid, pid_t *sid) {
+        auto result = do_syscall(SYS_GETSID, pid);
+
+        if(result < 0){
+            return -result;
+        }
+
+        *sid = (pid_t)result;
         return 0;
     }
 
@@ -220,8 +248,10 @@ namespace mlibc{
         int64_t size;
         vdso_get_data(VDSO_ENTRY_SIGNAL_TRAMP, &trampoline, &size);
 
-        *((int*)&(action->sa_flags)) |= SA_RESTORER;
-        *(void**) &(action->sa_restorer) = trampoline;
+        if (action != nullptr) {
+            *((int*)&(action->sa_flags)) |= SA_RESTORER;
+            *(void**) &(action->sa_restorer) = trampoline;
+        }
         auto result = do_syscall(SYS_SIGACTION, how, action, old_action);
 
         if(result < 0){
@@ -291,7 +321,7 @@ namespace mlibc{
         return do_syscall(SYS_FILE_IOCTL, fd, TCGETS, attr);
     }
 
-    int sys_tcsetattr(int fd, int optional_action, struct termios *attr) {
+    int sys_tcsetattr(int fd, int optional_action, const struct termios *attr) {
         switch (optional_action) {
             case TCSANOW:
                 optional_action = TCSETS; break;

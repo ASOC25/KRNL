@@ -9,8 +9,10 @@
 #include <krnl/mem/allocator.h>
 #include <krnl/libraries/assert/assert.h>
 #include <krnl/process/signals.h>
+#include <krnl/process/pipe.h>
 #include <krnl/libraries/std/time.h>
 #include <krnl/libraries/std/string.h>
+#include <krnl/arch/x86/hpet.h>
 
 #define SYSCALL_NUMBER(context) ((context)->rax)
 #define SYSCALL_ARG0(context)   ((context)->rdi)
@@ -22,6 +24,106 @@
 #define SYSCALL_RET(context)    ((context)->rax)
 
 typedef int64_t (*syscall_handler_t)(thread_t * thread, cpu_context_t * context);
+
+#define AT_FDCWD      (-100)
+#define AT_REMOVEDIR  0x200
+
+/* Collapses "." and ".." components in an absolute path, in place.
+ * "/a/./b/../c" -> "/a/c". Never ascends above root. The backends
+ * (e.g. x1fs) match paths as literal strings, so without this a
+ * trailing "." (as produced for bare `ls`/`opendir(".")`) or a ".."
+ * component never resolves to anything. */
+static void normalize_path(char *path) {
+    char tmp[VFS_PATH_MAX];
+    size_t out_len = 0;
+    size_t seg_starts[256];
+    int nseg = 0;
+
+    const char *p = path;
+    while (*p) {
+        while (*p == '/') p++;
+        if (!*p) break;
+        const char *seg_start = p;
+        while (*p && *p != '/') p++;
+        size_t seg_len = (size_t)(p - seg_start);
+
+        if (seg_len == 1 && seg_start[0] == '.') {
+            continue;
+        }
+        if (seg_len == 2 && seg_start[0] == '.' && seg_start[1] == '.') {
+            if (nseg > 0) {
+                nseg--;
+                out_len = seg_starts[nseg];
+            }
+            continue;
+        }
+        if (nseg < 256 && out_len + 1 + seg_len < VFS_PATH_MAX) {
+            seg_starts[nseg++] = out_len;
+            tmp[out_len++] = '/';
+            memcpy(tmp + out_len, seg_start, seg_len);
+            out_len += seg_len;
+        }
+    }
+    if (out_len == 0) {
+        tmp[out_len++] = '/';
+    }
+    tmp[out_len] = '\0';
+    strcpy(path, tmp);
+}
+
+/* Reconstructs the full VFS path an already-open fd refers to, from its
+ * mount's mount_point plus its native_path within that mount (the inverse of
+ * vfs_get_native_path). Shared by resolve_at (dirfd-relative *at() syscalls)
+ * and fchdir. */
+static int fd_full_path(process_t *proc, int fd, char *out, size_t sz) {
+    vfs_file_descriptor_t *desc = process_get_fd(proc, fd);
+    if (!desc) return -EBADF;
+    if (!desc->mount || !desc->native_path) return -EBADF;
+
+    if (strcmp(desc->mount->mount_point, "/") == 0) {
+        if (strlen(desc->native_path) >= sz) return -ENAMETOOLONG;
+        strcpy(out, desc->native_path);
+    } else {
+        size_t mlen = strlen(desc->mount->mount_point);
+        size_t nlen = strlen(desc->native_path);
+        if (mlen + nlen >= sz) return -ENAMETOOLONG;
+        strcpy(out, desc->mount->mount_point);
+        strcat(out, desc->native_path);
+    }
+    return 0;
+}
+
+/* Resolves `path` against `dirfd` into `out`. Absolute paths are copied
+ * through unchanged (besides normalization); relative paths are resolved
+ * against AT_FDCWD (the caller's cwd) or against an arbitrary already-open
+ * directory fd (via fd_full_path). */
+static int resolve_at(thread_t *thread, int dirfd, const char *path,
+                      char *out, size_t sz) {
+    if (!path || !path[0]) return -ENOENT;
+    if (path[0] == '/') {
+        if (strlen(path) >= sz) return -ENAMETOOLONG;
+        strncpy(out, path, sz);
+        normalize_path(out);
+        return 0;
+    }
+    process_t *proc = (process_t *)thread->process;
+    char base_buf[VFS_PATH_MAX];
+    const char *base;
+    if (dirfd == AT_FDCWD) {
+        base = proc->cwd.internal_path;
+    } else {
+        int rr = fd_full_path(proc, dirfd, base_buf, sizeof(base_buf));
+        if (rr < 0) return rr;
+        base = base_buf;
+    }
+    size_t blen = strlen(base), plen = strlen(path);
+    if (blen + 1 + plen + 1 > sz) return -ENAMETOOLONG;
+    memcpy(out, base, blen);
+    if (blen && base[blen - 1] != '/') out[blen++] = '/';
+    memcpy(out + blen, path, plen + 1);
+    normalize_path(out);
+    return 0;
+}
 
 int64_t syscall_log(thread_t*thread, cpu_context_t* ctx) {
     (void)thread; // Unused
@@ -58,17 +160,51 @@ int64_t syscall_open(thread_t * thread, cpu_context_t * context) {
     const char *path = (const char *)SYSCALL_ARG0(context);
     int flags = (int)SYSCALL_ARG1(context);
     process_t *proc = (process_t *)thread->process;
+
+    char resolved[VFS_PATH_MAX];
+    int rr = resolve_at(thread, AT_FDCWD, path, resolved, sizeof(resolved));
+    if (rr < 0) return rr;
+
     int slot = process_allocate_fd_slot(proc);
     if (slot < 0) {
         return -EMFILE;
     }
     vfs_file_descriptor_t newfd;
-    status_t st = vfs_open(path, flags, &newfd);
+    status_t st = vfs_open(resolved, flags, &newfd);
     if (st == ALREADY_EXISTS) return -EEXIST;
     if (st != SUCCESS || !newfd.valid) {
         return -ENOENT;
     }
     // Copy into process table slot
+    proc->open_files[slot] = newfd;
+    proc->open_file_count++;
+    return slot;
+}
+
+/* openat: like syscall_open, but resolves relative to an arbitrary directory
+ * fd instead of always AT_FDCWD. Needed by any modern *at()-based caller
+ * (e.g. GNU findutils' safe directory traversal) — without this, mlibc's
+ * openat() had no sysdep at all and unconditionally failed. */
+int64_t syscall_openat(thread_t * thread, cpu_context_t * context) {
+    int dirfd = (int)SYSCALL_ARG0(context);
+    const char *path = (const char *)SYSCALL_ARG1(context);
+    int flags = (int)SYSCALL_ARG2(context);
+    process_t *proc = (process_t *)thread->process;
+
+    char resolved[VFS_PATH_MAX];
+    int rr = resolve_at(thread, dirfd, path, resolved, sizeof(resolved));
+    if (rr < 0) return rr;
+
+    int slot = process_allocate_fd_slot(proc);
+    if (slot < 0) {
+        return -EMFILE;
+    }
+    vfs_file_descriptor_t newfd;
+    status_t st = vfs_open(resolved, flags, &newfd);
+    if (st == ALREADY_EXISTS) return -EEXIST;
+    if (st != SUCCESS || !newfd.valid) {
+        return -ENOENT;
+    }
     proc->open_files[slot] = newfd;
     proc->open_file_count++;
     return slot;
@@ -94,13 +230,20 @@ int64_t syscall_close(thread_t * thread, cpu_context_t * context) {
 }
 
 int64_t syscall_stat(thread_t * thread, cpu_context_t * context) {
-    (void)thread;
     const char *path = (const char *)SYSCALL_ARG0(context);
-    /* mlibc calls: SYS_PATH_STAT(path, strlen(path), flags, statbuf) */
+    /* mlibc calls: SYS_PATH_STAT(path, strlen(path), flags, statbuf, dirfd)
+     * — dirfd is AT_FDCWD for plain stat()/lstat(), or a real directory fd
+     * for fstatat(dirfd, path, ...) (mlibc's fsfd_target::fd_path case). */
     vfs_stat_t *buf = (vfs_stat_t *)SYSCALL_ARG3(context);
+    int dirfd = (int)SYSCALL_ARG4(context);
+
+    char resolved[VFS_PATH_MAX];
+    int rr = resolve_at(thread, dirfd, path, resolved, sizeof(resolved));
+    if (rr < 0) return rr;
+
     // Open read-only, then fstat and close
     vfs_file_descriptor_t tmp;
-    status_t st = vfs_open(path, /*O_RDONLY*/ 0, &tmp);
+    status_t st = vfs_open(resolved, O_RDONLY, &tmp);
     if (st != SUCCESS || !tmp.valid) {
         return -ENOENT;
     }
@@ -129,6 +272,9 @@ int64_t syscall_seek(thread_t * thread, cpu_context_t * context) {
     vfs_file_descriptor_t *desc = process_get_fd((process_t *)thread->process, fd);
     if (!desc) {
         return -EBADF;
+    }
+    if (desc->pipe) {
+        return -ESPIPE;
     }
     // Determine new position
     int64_t newpos = 0;
@@ -195,6 +341,9 @@ int64_t syscall_mmap(thread_t * thread, cpu_context_t * context) {
         desc = process_get_fd((process_t *)thread->process, fd);
         if (!desc) {
             return -EBADF;
+        }
+        if (desc->pipe) {
+            return -ENODEV;
         }
     }
 
@@ -276,6 +425,9 @@ int64_t syscall_pread(thread_t * thread, cpu_context_t * context) {
     vfs_file_descriptor_t *desc = process_get_fd((process_t *)thread->process, fd);
     if (!desc) {
         return -EBADF;
+    }
+    if (desc->pipe) {
+        return -ESPIPE;
     }
     size_t original_position = desc->position;
     desc->position = offset;
@@ -361,12 +513,16 @@ int64_t syscall_execve(thread_t * thread, cpu_context_t * context) {
     const char ** argv = (const char **)SYSCALL_ARG1(context);
     const char ** envp = (const char **)SYSCALL_ARG2(context);
 
+    char resolved_filename[VFS_PATH_MAX];
+    int rr = resolve_at(thread, AT_FDCWD, filename, resolved_filename, sizeof(resolved_filename));
+    if (rr < 0) return rr;
+
     PERF_BEGIN(t_total);
 
     PERF_BEGIN(t_copy);
-    size_t fname_len = strlen(filename);
+    size_t fname_len = strlen(resolved_filename);
     char * kfilename = kmalloc(fname_len + 1);
-    strncpy(kfilename, filename, fname_len + 1);
+    strncpy(kfilename, resolved_filename, fname_len + 1);
     char ** kargv = duplicate_argv((char **)argv);
     char ** kenvp = duplicate_envp((char **)envp);
     PERF_END(t_copy, "execve/copy-args");
@@ -474,12 +630,48 @@ int64_t syscall_dup2(thread_t * thread, cpu_context_t * context) {
 int64_t syscall_chdir(thread_t * thread, cpu_context_t * context) {
     const char * path = (const char *)SYSCALL_ARG0(context);
     process_t * proc = (process_t *)thread->process;
-    memset(proc->cwd.internal_path, 0, VFS_PATH_MAX);
-    int len = strlen(path);
-    if (len >= VFS_PATH_MAX) {
-        return -ENAMETOOLONG;
+
+    char resolved[VFS_PATH_MAX];
+    int rr = resolve_at(thread, AT_FDCWD, path, resolved, sizeof(resolved));
+    if (rr < 0) return rr;
+
+    /* Verify the target actually exists before committing to it */
+    vfs_file_descriptor_t tmp;
+    if (vfs_open_dir(resolved, &tmp) != SUCCESS) {
+        return -ENOENT;
     }
-    strncpy(proc->cwd.internal_path, path, len);
+    vfs_close(&tmp);
+
+    size_t len = strlen(resolved);
+    memset(proc->cwd.internal_path, 0, VFS_PATH_MAX);
+    strncpy(proc->cwd.internal_path, resolved, len);
+    return 0;
+}
+
+/* fchdir: reconstruct the full VFS path an already-open fd refers to (its
+ * mount's mount_point + its native_path within that mount — see
+ * vfs_get_native_path for the inverse operation) and chdir to that. Needed
+ * for mlibc's openat()/fdopendir() family, which emulate directory-relative
+ * opens via fchdir() since this kernel has no real *at() syscalls — without
+ * this, any dirfd-relative traversal (e.g. GNU findutils' safe directory
+ * walk) fails outright. */
+int64_t syscall_fchdir(thread_t * thread, cpu_context_t * context) {
+    int fd = (int)SYSCALL_ARG0(context);
+    process_t * proc = (process_t *)thread->process;
+
+    char full_path[VFS_PATH_MAX];
+    int rr = fd_full_path(proc, fd, full_path, sizeof(full_path));
+    if (rr < 0) return rr;
+
+    /* Verify it's still a valid directory before committing to it */
+    vfs_file_descriptor_t tmp;
+    if (vfs_open_dir(full_path, &tmp) != SUCCESS) {
+        return -ENOTDIR;
+    }
+    vfs_close(&tmp);
+
+    memset(proc->cwd.internal_path, 0, VFS_PATH_MAX);
+    strncpy(proc->cwd.internal_path, full_path, strlen(full_path));
     return 0;
 }
 
@@ -528,7 +720,7 @@ int64_t syscall_futex_wait(thread_t * thread, cpu_context_t * context) {
     if (*pointer != expected) return -EAGAIN;
 
     /* Sleep until a futex_wake on the same address */
-    sleep(thread, (int64_t)(uintptr_t)pointer);
+    if (!sleep(thread, (int64_t)(uintptr_t)pointer)) return -EINTR;
     return 0;
 }
 
@@ -582,11 +774,16 @@ int64_t syscall_clock_settime(thread_t * thread, cpu_context_t * context) {
 int64_t syscall_dir_open(thread_t * thread, cpu_context_t * context) {
     const char *path = (const char *)SYSCALL_ARG0(context);
     process_t *proc = (process_t *)thread->process;
+
+    char resolved[VFS_PATH_MAX];
+    int rr = resolve_at(thread, AT_FDCWD, path, resolved, sizeof(resolved));
+    if (rr < 0) return rr;
+
     int slot = process_allocate_fd_slot(proc);
     if (slot < 0) return -EMFILE;
 
     vfs_file_descriptor_t newfd;
-    status_t st = vfs_open_dir(path, &newfd);
+    status_t st = vfs_open_dir(resolved, &newfd);
     if (st != SUCCESS) return -ENOENT;
 
     proc->open_files[slot] = newfd;
@@ -657,33 +854,17 @@ int64_t syscall_fcntl(thread_t * thread, cpu_context_t * context) {
     }
 }
 
-#define AT_FDCWD      (-100)
-#define AT_REMOVEDIR  0x200
-
-static int resolve_at(thread_t *thread, int dirfd, const char *path,
-                      char *out, size_t sz) {
-    if (!path || !path[0]) return -ENOENT;
-    if (path[0] == '/') {
-        if (strlen(path) >= sz) return -ENAMETOOLONG;
-        strncpy(out, path, sz);
-        return 0;
-    }
-    process_t *proc = (process_t *)thread->process;
-    const char *base = (dirfd == AT_FDCWD) ? proc->cwd.internal_path : NULL;
-    if (!base) return -ENOSYS; /* non-CWD relative paths not yet implemented */
-    size_t blen = strlen(base), plen = strlen(path);
-    if (blen + 1 + plen + 1 > sz) return -ENAMETOOLONG;
-    memcpy(out, base, blen);
-    if (blen && base[blen - 1] != '/') out[blen++] = '/';
-    memcpy(out + blen, path, plen + 1);
-    return 0;
-}
-
 int64_t syscall_rename(thread_t * thread, cpu_context_t * context) {
     const char *oldpath = (const char *)SYSCALL_ARG0(context);
     const char *newpath = (const char *)SYSCALL_ARG1(context);
-    (void)thread;
-    status_t st = vfs_rename(oldpath, newpath);
+
+    char old_res[VFS_PATH_MAX], new_res[VFS_PATH_MAX];
+    int r = resolve_at(thread, AT_FDCWD, oldpath, old_res, sizeof(old_res));
+    if (r < 0) return r;
+    r = resolve_at(thread, AT_FDCWD, newpath, new_res, sizeof(new_res));
+    if (r < 0) return r;
+
+    status_t st = vfs_rename(old_res, new_res);
     if (st == NOT_FOUND)      return -ENOENT;
     if (st == NOT_IMPLEMENTED) return -EROFS;
     return (st == SUCCESS) ? 0 : -EIO;
@@ -692,8 +873,12 @@ int64_t syscall_rename(thread_t * thread, cpu_context_t * context) {
 int64_t syscall_mkdir(thread_t * thread, cpu_context_t * context) {
     const char *path = (const char *)SYSCALL_ARG0(context);
     uint32_t mode    = (uint32_t)SYSCALL_ARG1(context);
-    (void)thread;
-    status_t st = vfs_mkdir(path, mode ? mode : 0755);
+
+    char resolved[VFS_PATH_MAX];
+    int rr = resolve_at(thread, AT_FDCWD, path, resolved, sizeof(resolved));
+    if (rr < 0) return rr;
+
+    status_t st = vfs_mkdir(resolved, mode ? mode : 0755);
     if (st == ALREADY_EXISTS)  return -EEXIST;
     if (st == NOT_IMPLEMENTED) return -EROFS;
     return (st == SUCCESS) ? 0 : -EIO;
@@ -702,15 +887,20 @@ int64_t syscall_mkdir(thread_t * thread, cpu_context_t * context) {
 int64_t syscall_creat(thread_t * thread, cpu_context_t * context) {
     const char *path = (const char *)SYSCALL_ARG0(context);
     process_t *proc  = (process_t *)thread->process;
+
+    char resolved[VFS_PATH_MAX];
+    int rr = resolve_at(thread, AT_FDCWD, path, resolved, sizeof(resolved));
+    if (rr < 0) return rr;
+
     int slot = process_allocate_fd_slot(proc);
     if (slot < 0) return -EMFILE;
 
     vfs_file_descriptor_t newfd;
     /* creat = open(path, O_WRONLY|O_CREAT|O_TRUNC) */
-    status_t st = vfs_open(path, O_WRONLY | O_CREAT, &newfd);
+    status_t st = vfs_open(resolved, O_WRONLY | O_CREAT, &newfd);
     if (st == ALREADY_EXISTS) {
         /* file exists — open it for writing */
-        st = vfs_open(path, O_WRONLY, &newfd);
+        st = vfs_open(resolved, O_WRONLY, &newfd);
     }
     if (st != SUCCESS || !newfd.valid) return -EIO;
     proc->open_files[slot] = newfd;
@@ -797,52 +987,136 @@ int64_t syscall_renameat(thread_t * thread, cpu_context_t * context) {
     return (st == SUCCESS) ? 0 : -EIO;
 }
 
-/* pselect: report all valid fds in readfds/writefds as ready.
-   Kernel fd_set is 128 bytes (1024 bits). */
+#define PSELECT_FDSET_BYTES 128 /* kernel fd_set is 128 bytes (1024 bits) */
+
+/* Readiness checks mirror each fd type's own blocking condition exactly
+   (pipe_read/pipe_write's loop conditions, tty_read's), so a "ready" fd is
+   guaranteed not to block the following read()/write(). Anything without
+   a real backing wait channel (regular files, memdev, ...) is always
+   ready — its I/O is synchronous and never blocks anyway. */
+static int fd_ready_for_read(vfs_file_descriptor_t *desc) {
+    if (desc->pipe) {
+        pipe_t *p = desc->pipe;
+        return p->count > 0 || p->writers == 0;
+    }
+    if (desc->mount && desc->mount->ops && desc->mount->ops->poll)
+        return desc->mount->ops->poll(desc->mount->major, desc->mount->minor, desc->native_path, 0);
+    return 1;
+}
+
+static int fd_ready_for_write(vfs_file_descriptor_t *desc) {
+    if (desc->pipe) {
+        pipe_t *p = desc->pipe;
+        return (p->capacity - p->count) > 0 || p->readers == 0;
+    }
+    if (desc->mount && desc->mount->ops && desc->mount->ops->poll)
+        return desc->mount->ops->poll(desc->mount->major, desc->mount->minor, desc->native_path, 1);
+    return 1;
+}
+
+/* pselect: real fd readiness for pipes and the tty (see fd_ready_for_*),
+   everything else always ready. There's no event-driven multi-fd wait in
+   this kernel (sleep()/wakeup() only support one wait channel per call),
+   so an unready set is polled at the scheduler's HPET tick granularity
+   until something is ready or the timeout (tracked in "remaining",
+   decremented by the actual elapsed time per tick) runs out. */
 int64_t syscall_pselect(thread_t * thread, cpu_context_t * context) {
     int nfds = (int)SYSCALL_ARG0(context);
     uint8_t *readfds   = (uint8_t *)SYSCALL_ARG1(context);
     uint8_t *writefds  = (uint8_t *)SYSCALL_ARG2(context);
     uint8_t *exceptfds = (uint8_t *)SYSCALL_ARG3(context);
-    /* timeout and sigmask (args 4,5) ignored */
+    struct timespec *timeout = (struct timespec *)SYSCALL_ARG4(context);
+    /* arg5 is NOT sigmask (mlibc's sys_pselect never passes that through to
+       the syscall — it's accepted but unused C++-side). It's `num_events`:
+       mlibc's wrapper treats the raw syscall return as a plain 0/-errno
+       code and expects the actual ready-fd count written through this
+       out-pointer instead — every prior version of this function ignored
+       that and just returned the count directly, leaving the caller's
+       num_events uninitialized on every call. Concretely: bash/readline
+       calling pselect() got back "success" with a garbage ready-count,
+       then used that garbage count downstream (e.g. deciding how many
+       fd_set bits to inspect), producing memory corruption whose exact
+       shape depended on whatever was on the caller's stack — the "crashes
+       instantly near fileno/abstract_file, differently each time" pattern
+       this was hunted down from. */
+    int *num_events = (int *)SYSCALL_ARG5(context);
 
     process_t *proc = (process_t *)thread->process;
-    int ready = 0;
 
-    for (int fd = 0; fd < nfds; fd++) {
-        int byte = fd / 8, bit = fd % 8;
-        int in_read  = readfds  && (readfds[byte]  & (1 << bit));
-        int in_write = writefds && (writefds[byte]  & (1 << bit));
-        if (!in_read && !in_write) continue;
+    if (exceptfds) memset(exceptfds, 0, PSELECT_FDSET_BYTES);
 
-        vfs_file_descriptor_t *desc = process_get_fd(proc, fd);
-        if (desc && desc->valid) {
-            ready += in_read + in_write;
-        } else {
-            /* fd not open — clear it from the sets */
-            if (in_read)  readfds[byte]  &= ~(1 << bit);
-            if (in_write) writefds[byte] &= ~(1 << bit);
+    uint8_t req_read[PSELECT_FDSET_BYTES], req_write[PSELECT_FDSET_BYTES];
+    memset(req_read, 0, sizeof(req_read));
+    memset(req_write, 0, sizeof(req_write));
+    if (readfds)  memcpy(req_read, readfds, PSELECT_FDSET_BYTES);
+    if (writefds) memcpy(req_write, writefds, PSELECT_FDSET_BYTES);
+
+    struct timespec remaining = {0, 0};
+    if (timeout) remaining = *timeout;
+
+    for (;;) {
+        uint8_t out_read[PSELECT_FDSET_BYTES], out_write[PSELECT_FDSET_BYTES];
+        memset(out_read, 0, sizeof(out_read));
+        memset(out_write, 0, sizeof(out_write));
+        int ready = 0;
+
+        for (int fd = 0; fd < nfds; fd++) {
+            int byte = fd / 8, bit = fd % 8;
+            int in_read  = (req_read[byte]  >> bit) & 1;
+            int in_write = (req_write[byte] >> bit) & 1;
+            if (!in_read && !in_write) continue;
+
+            vfs_file_descriptor_t *desc = process_get_fd(proc, fd);
+            if (!desc || !desc->valid) continue; /* closed fd: never becomes ready */
+
+            if (in_read && fd_ready_for_read(desc))   { out_read[byte]  |= (1 << bit); ready++; }
+            if (in_write && fd_ready_for_write(desc)) { out_write[byte] |= (1 << bit); ready++; }
+        }
+
+        if (ready > 0) {
+            if (readfds)  memcpy(readfds, out_read, PSELECT_FDSET_BYTES);
+            if (writefds) memcpy(writefds, out_write, PSELECT_FDSET_BYTES);
+            if (num_events) *num_events = ready;
+            return 0;
+        }
+
+        if (timeout && remaining.tv_sec == 0 && remaining.tv_nsec == 0) {
+            if (readfds)  memset(readfds, 0, PSELECT_FDSET_BYTES);
+            if (writefds) memset(writefds, 0, PSELECT_FDSET_BYTES);
+            if (num_events) *num_events = 0;
+            return 0;
+        }
+
+        struct timespec tick = { .tv_sec = 0, .tv_nsec = HPET_SYSTEM_TASK_NANO };
+        struct timespec rem;
+        status_t nsres = nanosleep(thread, &tick, &rem);
+        if (nsres != SUCCESS) {
+            return -EINTR;
+        }
+
+        if (timeout) {
+            uint64_t rem_ns = (uint64_t)remaining.tv_sec * 1000000000ULL + (uint64_t)remaining.tv_nsec;
+            rem_ns = (rem_ns > HPET_SYSTEM_TASK_NANO) ? (rem_ns - HPET_SYSTEM_TASK_NANO) : 0;
+            remaining.tv_sec  = (long)(rem_ns / 1000000000ULL);
+            remaining.tv_nsec = (long)(rem_ns % 1000000000ULL);
         }
     }
-    /* Clear exceptfds entirely — no exceptional conditions */
-    if (exceptfds) {
-        int bytes = (nfds + 7) / 8;
-        for (int i = 0; i < bytes; i++) exceptfds[i] = 0;
-    }
-    return ready;
 }
 
 int64_t syscall_statx(thread_t * thread, cpu_context_t * context) {
     /* mlibc calls: SYS_STATX(dirfd, path, flags, mask, statxbuf) */
+    int dirfd             = (int)SYSCALL_ARG0(context);
     const char *path    = (const char *)SYSCALL_ARG1(context);
     vfs_statx_t *statxbuf = (vfs_statx_t *)SYSCALL_ARG4(context);
 
-    (void)thread;
-
     if (!path || !statxbuf) return -EINVAL;
 
+    char resolved[VFS_PATH_MAX];
+    int rr = resolve_at(thread, dirfd, path, resolved, sizeof(resolved));
+    if (rr < 0) return rr;
+
     vfs_file_descriptor_t tmp;
-    status_t st = vfs_open(path, 0, &tmp);
+    status_t st = vfs_open(resolved, 0, &tmp);
     if (st != SUCCESS || !tmp.valid) return -ENOENT;
 
     vfs_stat_t s;
@@ -882,17 +1156,52 @@ int64_t syscall_debug(thread_t * thread, cpu_context_t * context) {
     return 0;
 }
 
-int64_t syscall_sigret(thread_t * thread, cpu_context_t * context) {
-    (void)context;
-    kprintf("syscall_sigret invoked by thread %lu\n", thread->tid);
-    process_sigret(thread);
-    /* sysretq cannot return to kernel mode. If nanosleep's int $0x81 left
-       kcontext_pending set, restoring the kernel context here would cause sysretq
-       to jump to a kernel address with user CS → fault. Clear it so scheduler
-       falls through to restoring thread->context (last user-mode state). */
+int64_t syscall_sigret(thread_t * thread, cpu_context_t * ctx) {
+    process_t *proc = GET_PROC(thread);
+
+    /* ctx->rsp is the user RSP when the restorer called syscall.
+       After the handler ret'd to the restorer, RSP = frame_addr (start of rt_sigframe).
+       The restorer does mov eax,49; syscall so user RSP = frame_addr at syscall entry. */
+    uint64_t frame_addr = ctx->rsp;
+    struct rt_sigframe *kframe = to_kident(proc->vmm, (void *)frame_addr);
+    if (!kframe) {
+        return -EFAULT;
+    }
+
+    k_mcontext_t *mc = &kframe->uc.uc_mcontext;
+
+    /* Restore general-purpose registers from the saved mcontext.
+       Note: the syscall epilogue overwrites rcx←ctx->rip and r11←ctx->rflags
+       before sysret, so the user sees rip/rflags correctly but rcx/r11
+       from mcontext are clobbered — this is the expected sysret trade-off. */
+    ctx->r8     = mc->gregs[MC_R8];
+    ctx->r9     = mc->gregs[MC_R9];
+    ctx->r10    = mc->gregs[MC_R10];
+    ctx->r11    = mc->gregs[MC_R11];
+    ctx->r12    = mc->gregs[MC_R12];
+    ctx->r13    = mc->gregs[MC_R13];
+    ctx->r14    = mc->gregs[MC_R14];
+    ctx->r15    = mc->gregs[MC_R15];
+    ctx->rdi    = mc->gregs[MC_RDI];
+    ctx->rsi    = mc->gregs[MC_RSI];
+    ctx->rbp    = mc->gregs[MC_RBP];
+    ctx->rbx    = mc->gregs[MC_RBX];
+    ctx->rdx    = mc->gregs[MC_RDX];
+    ctx->rax    = mc->gregs[MC_RAX];
+    ctx->rcx    = mc->gregs[MC_RCX];
+    ctx->rsp    = mc->gregs[MC_RSP];
+    ctx->rip    = mc->gregs[MC_RIP];
+    ctx->rflags = mc->gregs[MC_EFL];
+
+    /* Restore signal mask (SIGKILL/SIGSTOP cannot be unblocked) */
+    proc->sig_mask = kframe->uc.uc_sigmask;
+    proc->sig_mask &= ~((1UL << (SIGKILL - 1)) | (1UL << (SIGSTOP - 1)));
+
     thread->kcontext_pending = 0;
-    scheduler_handler(context, getApicId(), SCHEDULER_USER_CONTEXT, 0);
-    return 0;
+
+    /* Return 0; the syscall epilogue will apply rip/rsp/rflags from ctx
+       via sysret, effectively resuming where the signal interrupted. */
+    return ctx->rax; /* preserve user rax from the interrupted context */
 }
 
 int64_t syscall_sigaction(thread_t * thread, cpu_context_t * context) {
@@ -915,8 +1224,12 @@ int64_t syscall_sigprocmask(thread_t * thread, cpu_context_t * context) {
 
 int64_t syscall_rmdir(thread_t * thread, cpu_context_t * context) {
     const char *path = (const char *)SYSCALL_ARG0(context);
-    (void)thread;
-    status_t st = vfs_rmdir(path);
+
+    char resolved[VFS_PATH_MAX];
+    int rr = resolve_at(thread, AT_FDCWD, path, resolved, sizeof(resolved));
+    if (rr < 0) return rr;
+
+    status_t st = vfs_rmdir(resolved);
     if (st == NOT_FOUND)      return -ENOENT;
     if (st == NOT_IMPLEMENTED) return -EROFS;
     if (st == FAILURE)         return -ENOTEMPTY;
@@ -943,7 +1256,86 @@ int64_t syscall_getegid(thread_t * thread, cpu_context_t * context) {
     return (int64_t)((process_t *)thread->process)->gid;
 }
 
-static syscall_handler_t handlers[SYS_COUNT] = { 
+int64_t syscall_pipe(thread_t * thread, cpu_context_t * context) {
+    int *fds = (int *)SYSCALL_ARG0(context);
+    int flags = (int)SYSCALL_ARG1(context);
+    if (!fds) return -EFAULT;
+
+    process_t *proc = (process_t *)thread->process;
+
+    int read_slot = process_allocate_fd_slot(proc);
+    if (read_slot < 0) return -EMFILE;
+    /* Reserve the slot immediately so the second allocate call can't reuse it */
+    proc->open_files[read_slot].native_path = (char *)(uintptr_t)1;
+
+    int write_slot = process_allocate_fd_slot(proc);
+    if (write_slot < 0) {
+        proc->open_files[read_slot].native_path = NULL;
+        return -EMFILE;
+    }
+
+    status_t st = pipe_create(&proc->open_files[read_slot], &proc->open_files[write_slot]);
+    if (st != SUCCESS) {
+        proc->open_files[read_slot].native_path = NULL;
+        return -ENFILE;
+    }
+    proc->open_files[read_slot].flags  |= (flags & (O_NONBLOCK | O_CLOEXEC));
+    proc->open_files[write_slot].flags |= (flags & (O_NONBLOCK | O_CLOEXEC));
+    proc->open_file_count += 2;
+
+    fds[0] = read_slot;
+    fds[1] = write_slot;
+    return 0;
+}
+
+int64_t syscall_setpgid(thread_t * thread, cpu_context_t * context) {
+    pid_t pid  = (pid_t)(int)SYSCALL_ARG0(context);
+    pid_t pgid = (pid_t)(int)SYSCALL_ARG1(context);
+    process_t *proc = (process_t *)thread->process;
+
+    if (pgid < 0) return -EINVAL;
+
+    process_t *target = (pid == 0) ? proc : scheduler_get_process_by_pid(pid);
+    if (!target) return -ESRCH;
+
+    /* pgid == 0 means "make it its own group leader". */
+    target->pgid = (pgid == 0) ? target->pid : pgid;
+    return 0;
+}
+
+int64_t syscall_getpgid(thread_t * thread, cpu_context_t * context) {
+    pid_t pid = (pid_t)(int)SYSCALL_ARG0(context);
+    process_t *proc = (process_t *)thread->process;
+
+    process_t *target = (pid == 0) ? proc : scheduler_get_process_by_pid(pid);
+    if (!target) return -ESRCH;
+
+    return (int64_t)target->pgid;
+}
+
+int64_t syscall_setsid(thread_t * thread, cpu_context_t * context) {
+    (void)context;
+    process_t *proc = (process_t *)thread->process;
+
+    /* POSIX: a session leader must not already be a process-group leader. */
+    if (proc->pgid == proc->pid) return -EPERM;
+
+    proc->sid  = proc->pid;
+    proc->pgid = proc->pid;
+    return (int64_t)proc->pid;
+}
+
+int64_t syscall_getsid(thread_t * thread, cpu_context_t * context) {
+    pid_t pid = (pid_t)(int)SYSCALL_ARG0(context);
+    process_t *proc = (process_t *)thread->process;
+
+    process_t *target = (pid == 0) ? proc : scheduler_get_process_by_pid(pid);
+    if (!target) return -ESRCH;
+
+    return (int64_t)target->sid;
+}
+
+static syscall_handler_t handlers[SYS_COUNT] = {
     syscall_read, //0
     syscall_write,
     syscall_open,
@@ -1002,6 +1394,13 @@ static syscall_handler_t handlers[SYS_COUNT] = {
     syscall_getgid,  //55
     syscall_geteuid, //56
     syscall_getegid, //57
+    syscall_pipe,    //58
+    syscall_setpgid, //59
+    syscall_getpgid, //60
+    syscall_setsid,  //61
+    syscall_getsid,  //62
+    syscall_fchdir,  //63
+    syscall_openat,  //64
 };
 
 void syscall_handler(cpu_context_t * context) {
@@ -1026,5 +1425,38 @@ void syscall_handler(cpu_context_t * context) {
         );
     } else {
         SYSCALL_RET(context) = -1; // Unimplemented syscall
+    }
+
+    /* Deliver a pending signal before returning to userspace.
+     *
+     * scheduler_get_next_thread() can wake an INTERRUPTIBLE_SLEEP thread that
+     * has a deliverable signal with a custom handler *without* dequeuing it
+     * (it only unblocks the sleep -- it can't build a handler frame there
+     * since it doesn't have a valid *user* ctx to redirect, only whatever
+     * kernel-context state the thread was sleeping in). The signal is left
+     * queued on the assumption the thread will soon reach a point where a
+     * real user ctx is available and the normal preemption-driven delivery
+     * in scheduler_handler() (context_restore + process_get_signal +
+     * signal_deliver) applies it.
+     *
+     * That assumption breaks for a thread whose usermode window between
+     * syscalls is too short to ever coincide with a timer tick -- e.g. a
+     * blocking read() that keeps returning -EINTR and getting retried
+     * immediately (exactly what an interactive readline loop does). Such a
+     * thread can cycle through kernel-context sleep/wake indefinitely
+     * without ever being *caught* in usermode by the timer, so the signal
+     * never gets dequeued: scheduler_get_next_thread() sees the same still-
+     * queued signal on every pass and re-wakes the thread over and over,
+     * an infinite spurious-EINTR loop that never lets the handler run.
+     *
+     * Checking here closes that gap: it runs on every syscall return
+     * (not just preemption), which the retry loop above hits constantly
+     * regardless of how brief its usermode window is. process_get_signal()
+     * dequeues at most once, so this is safe to run alongside the
+     * scheduler_handler() path -- whichever gets there first consumes it. */
+    process_t *current_proc = GET_PROC(current_thread);
+    signal_t *pending_sig = process_get_signal(current_proc);
+    if (pending_sig) {
+        signal_deliver(current_thread, pending_sig, context);
     }
 }

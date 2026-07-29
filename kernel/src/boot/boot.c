@@ -4,6 +4,8 @@
 #include <krnl/drivers/ramdisk/ramdisk.h>
 #include <krnl/drivers/ps2/ps2.h>
 #include <krnl/drivers/framebuffer/framebuffer.h>
+#include <krnl/drivers/pci/pci.h>
+#include <krnl/drivers/ahci/ahci.h>
 #include <krnl/devices/devices.h>
 #include <krnl/libraries/std/string.h>
 #include <krnl/libraries/std/stddef.h>
@@ -17,6 +19,7 @@
 #include <krnl/fs/x1fs/x1fs.h>
 #include <krnl/fs/ext2/ext2.h>
 #include <krnl/fs/tty/tty.h>
+#include <krnl/fs/memdev/memdev.h>
 #include <krnl/vfs/vfs.h>
 #include <krnl/arch/x86/apic.h>
 #include <krnl/process/scheduler.h>
@@ -41,6 +44,7 @@ void boot_startup() {
     ramdisk_init_pnp();
     framebuffer_init_pnp();
     ps2_init_pnp();
+    ahci_init_pnp();
     ktrace("This is a fucking test...\n");
 
     //Enable serial interrupts
@@ -58,8 +62,21 @@ void boot_startup() {
     ext2_init();
     x1fs_init();
     tty_init();
-    vfs_mount_t * root_mount = vfs_new_mount(4, 0, "/");
+    memdev_init();
+
+    device_major_t root_major = RAMDISK_DRIVER_MAJOR;
+    device_minor_t root_minor = 0;
+    device_minor_t ahci_minor;
+    if (ahci_get_boot_drive(&ahci_minor)) {
+        root_major = AHCI_DRIVER_MAJOR;
+        root_minor = ahci_minor;
+    }
+    vfs_mount_t * root_mount = vfs_new_mount(root_major, root_minor, "/");
     vfs_new_mount(3, 0, "/dev/tty0"); //Placeholders!!!!
+    vfs_new_mount(MEMDEV_DRIVER_MAJOR, MEMDEV_MINOR_NULL, "/dev/null");
+    vfs_new_mount(MEMDEV_DRIVER_MAJOR, MEMDEV_MINOR_ZERO, "/dev/zero");
+    vfs_new_mount(MEMDEV_DRIVER_MAJOR, MEMDEV_MINOR_RANDOM, "/dev/random");
+    vfs_new_mount(MEMDEV_DRIVER_MAJOR, MEMDEV_MINOR_URANDOM, "/dev/urandom");
     vfs_path_t root_path;
     root_path.mount = root_mount;
     strcpy(root_path.internal_path, "/");
@@ -72,6 +89,7 @@ void boot_startup() {
 
     process_init("/init.elf", "/dev/tty0", cwd_path, root_path);
     scheduler_create_idle_thread();
+    ahci_mark_scheduler_ready();
     __asm__("sti");
     while (1);
 }
