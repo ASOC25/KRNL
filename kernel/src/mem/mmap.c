@@ -1,6 +1,7 @@
 #include <krnl/mem/mmap.h>
 #include <krnl/process/process.h>
 #include <krnl/mem/allocator.h>
+#include <krnl/mem/pmm.h>
 #include <krnl/vfs/vfs.h>
 #include <krnl/debug/debug.h>
 #include <krnl/libraries/std/string.h>
@@ -149,6 +150,33 @@ status_t vmarea_try_cow(process_t * process, void * address) {
         panic("vmarea_try_cow: Failed to unmap original pages");
     }
 
+    /* Retire the bookkeeping record for the pages just unmapped -- every VMA
+       is backed by exactly one contiguous pmm_alloc_pages() block (see
+       vmarea_mmap()/vmarea_fork()), tracked by exactly one allocation record
+       for (process->vmm, vma->start). malloc() below adds a *new* record at
+       the same (root, vaddr) for the freshly-copied pages; add_allocation()
+       prepends, so without retiring this one first it would be permanently
+       shadowed from every future free()/remove_allocation() lookup and its
+       physical pages would never be returned to the allocator (a real bug:
+       this leaked one physical block per (fork, subsequent-COW-write) pair
+       for the life of the process).
+
+       Removing the *record* has to happen now, before malloc() adds a
+       second record for the same (root, vaddr) that remove_allocation()
+       couldn't tell apart from this one. But actually *freeing* the old
+       physical pages (should_deallocate_pmm + pmm_free_pages) must wait
+       until after the copy loop below -- doing it here handed the old,
+       still-needed pages straight back to the allocator, which malloc()
+       then immediately re-issued as the "new" pages, and its own
+       memset-to-zero wiped the source data before it could be copied
+       (corrupted the VMA's whole contents instead of just leaking memory
+       -- caught by a full isolation test before shipping this fix). So:
+       decide now whether it'll be safe to free (no other process still
+       maps this physical range), remove the bookkeeping record now, and
+       only call pmm_free_pages() once the copy is actually done. */
+    uint8_t old_pages_freeable = should_deallocate_pmm((vmm_root_t *)process->vmm, (void *)phys_addrs[0]);
+    remove_allocation((vmm_root_t *)process->vmm, vma->start);
+
     void * ptr = malloc(
         (vmm_root_t *)process->vmm,
         vma->size,
@@ -174,6 +202,13 @@ status_t vmarea_try_cow(process_t * process, void * address) {
             (void *)vmm_to_identity_map(phys_addrs[i]),
             vma->page_size
         );
+    }
+
+    /* Now that the old contents have actually been copied into the new,
+       independent pages, it's safe to return the old physical block to the
+       allocator (see the comment above the should_deallocate_pmm() call). */
+    if (old_pages_freeable) {
+        pmm_free_pages((void *)phys_addrs[0], num_pages);
     }
 
     kfree(phys_addrs);

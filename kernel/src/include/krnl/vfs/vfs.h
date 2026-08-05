@@ -98,9 +98,19 @@ typedef struct {
 } krnl_dirent_t;
 
 #define DT_UNKNOWN 0
+#define DT_FIFO    1
 #define DT_DIR     4
 #define DT_CHR     2
 #define DT_REG     8
+#define DT_LNK     10
+
+#define S_IFMT   0xF000
+#define S_IFLNK  0xA000
+#define S_IFIFO  0x1000
+#define S_IFDIR  0x4000
+#define S_ISLNK(m) (((m) & S_IFMT) == S_IFLNK)
+#define S_ISFIFO(m) (((m) & S_IFMT) == S_IFIFO)
+#define S_ISDIR(m) (((m) & S_IFMT) == S_IFDIR)
 
 typedef struct vfs_fs {
     char name[32];
@@ -123,9 +133,14 @@ typedef struct vfs_fs {
     /* Write-capable operations (NULL = unsupported / read-only) */
     status_t (*mkdir)(device_major_t major, device_minor_t minor, const char *path, uint32_t mode);
     status_t (*create)(device_major_t major, device_minor_t minor, const char *path, uint32_t mode);
+    status_t (*mkfifo)(device_major_t major, device_minor_t minor, const char *path, uint32_t mode);
     status_t (*unlink)(device_major_t major, device_minor_t minor, const char *path);
     status_t (*rename_op)(device_major_t major, device_minor_t minor, const char *oldpath, const char *newpath);
     status_t (*rmdir)(device_major_t major, device_minor_t minor, const char *path);
+    status_t (*symlink)(device_major_t major, device_minor_t minor, const char *path, const char *target);
+    ssize_t  (*readlink)(device_major_t major, device_minor_t minor, const char *path, char *buf, size_t bufsz);
+    status_t (*chmod)(device_major_t major, device_minor_t minor, const char *path, uint32_t mode);
+    status_t (*chown)(device_major_t major, device_minor_t minor, const char *path, uint32_t uid, uint32_t gid);
 
     struct vfs_fs *next;
 } vfs_fs_t;
@@ -160,9 +175,11 @@ status_t vfs_register_fs(vfs_fs_t *ops);
 status_t vfs_unregister_fs(char *fs_name);
 
 vfs_mount_t *vfs_new_mount(device_major_t major, device_minor_t minor, const char *mount_point);
+vfs_mount_t *vfs_new_mount_with_ops(vfs_fs_t *ops, device_major_t major, device_minor_t minor, const char *mount_point);
+vfs_mount_t *vfs_find_exact_mount(const char *path);
 status_t vfs_remove_mount(const char *mount_point);
 
-status_t vfs_open(const char *path, int flags, vfs_file_descriptor_t *fd);
+status_t vfs_open(const char *path, int flags, uint32_t mode, vfs_file_descriptor_t *fd);
 status_t vfs_open_dir(const char *path, vfs_file_descriptor_t *fd);
 status_t vfs_close(vfs_file_descriptor_t *fd);
 ssize_t vfs_read(vfs_file_descriptor_t *fd, void *buf, size_t count);
@@ -173,8 +190,14 @@ ssize_t vfs_readdir(vfs_file_descriptor_t *fd, void *buf, size_t count);
 
 /* Write-capable VFS operations */
 status_t vfs_mkdir(const char *path, uint32_t mode);
+status_t vfs_mkfifo(const char *path, uint32_t mode);
 status_t vfs_unlink(const char *path);
 status_t vfs_rename(const char *oldpath, const char *newpath);
 status_t vfs_rmdir(const char *path);
+status_t vfs_symlink(const char *target, const char *linkpath);
+status_t vfs_lstat_path(const char *path, vfs_stat_t *buf);
+ssize_t  vfs_readlink_path(const char *path, char *buf, size_t bufsz);
+status_t vfs_chmod(const char *path, uint32_t mode);
+status_t vfs_chown(const char *path, uint32_t uid, uint32_t gid);
 
 #endif

@@ -14,10 +14,18 @@
 #define TCSETS    0x5402
 #define TCSETSW   0x5403
 #define TCSETSF   0x5404
+#define TCXONC    0x540A
 #define TIOCGWINSZ  0x5413
 #define TIOCGPGRP   0x540F
 #define TIOCSPGRP   0x5410
 #define TTY_CHECK_VAL 0x69
+
+/* constants for tcflow()'s action argument, passed straight through as the
+   TCXONC ioctl's value (not a pointer) — matches Linux/glibc numbering. */
+#define TCOOFF 0
+#define TCOON  1
+#define TCIOFF 2
+#define TCION  3
 
 #define ECHO   0000010
 #define ICANON 0000002
@@ -332,6 +340,22 @@ status_t tty_ioctl(device_major_t major, device_minor_t minor, const char * path
             if (pgid > 0) tty_set_foreground_pgrp(pgid);
         }
         return SUCCESS;
+    }
+    if (request == TCXONC) {
+        /* Per ioctl(2)/tcflow(3): action is the value itself, not a pointer.
+           This virtual console has no real flow-control hardware (no remote
+           sender/receiver to pause) and writes never block, so all four
+           actions are accepted as no-ops rather than failing with ENOSYS. */
+        int action = (int)(intptr_t)arg;
+        switch (action) {
+            case TCOOFF:
+            case TCOON:
+            case TCIOFF:
+            case TCION:
+                return SUCCESS;
+            default:
+                return -EINVAL;
+        }
     }
     return -ENOTTY;
 }

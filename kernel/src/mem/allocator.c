@@ -161,6 +161,12 @@ void allocmatch() {
     kprintf("Allocation matches !!!\n");
 }
 
+uint64_t count_allocations(void) {
+    uint64_t n = 0;
+    for (struct allocation * current = allocations_head; current; current = current->next) n++;
+    return n;
+}
+
 //Detect double free attempts and panic
 void detect_double_lok(void * ptr) {
     struct deallocation * current = deallocations;

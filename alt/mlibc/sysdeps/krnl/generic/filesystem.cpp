@@ -4,6 +4,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <termios.h>
+#include <fcntl.h>
 #include <sys/ioctl.h>
 #include <krnl/syscall.h>
 #include <krnl/ttycheck.h>
@@ -150,6 +151,33 @@ namespace mlibc{
         return 0;
     }
 
+    int sys_mkfifoat(int dirfd, const char *path, mode_t mode) {
+        auto result = do_syscall(SYS_MKFIFOAT, dirfd, path, mode);
+        if(result < 0){
+            return -result;
+        }
+
+        return 0;
+    }
+
+    int sys_mount(const char *source, const char *target, const char *fstype, unsigned long flags, const void *data) {
+        auto result = do_syscall(SYS_MOUNT, source, target, fstype, flags, data);
+        if(result < 0){
+            return -result;
+        }
+
+        return 0;
+    }
+
+    int sys_umount2(const char *target, int flags) {
+        auto result = do_syscall(SYS_UMOUNT, target, flags);
+        if(result < 0){
+            return -result;
+        }
+
+        return 0;
+    }
+
 #ifndef MLIBC_BUILDING_RTLD
     // In contrast to the isatty() library function, the sysdep function uses return value
     // zero (and not one) to indicate that the file is a terminal.
@@ -202,6 +230,66 @@ namespace mlibc{
         if(result < 0){
             return -result;
         }
+        return 0;
+    }
+
+    int sys_symlink(const char *target_path, const char *link_path){
+        auto result = do_syscall(SYS_SYMLINK, target_path, link_path);
+        if(result < 0){
+            return -result;
+        }
+        return 0;
+    }
+
+    int sys_symlinkat(const char *target_path, int dirfd, const char *link_path){
+        auto result = do_syscall(SYS_SYMLINKAT, target_path, dirfd, link_path);
+        if(result < 0){
+            return -result;
+        }
+        return 0;
+    }
+
+    int sys_readlink(const char *path, void *buffer, size_t max_size, ssize_t *length){
+        auto result = do_syscall(SYS_READLINK, path, buffer, max_size);
+        if(result < 0){
+            *length = 0;
+            return -result;
+        }
+        *length = result;
+        return 0;
+    }
+
+    int sys_fchmodat(int fd, const char *pathname, mode_t mode, int flags){
+        auto result = do_syscall(SYS_FCHMODAT, fd, pathname, mode, flags);
+        if(result < 0){
+            return -result;
+        }
+        return 0;
+    }
+
+    int sys_chmod(const char *pathname, mode_t mode){
+        return sys_fchmodat(AT_FDCWD, pathname, mode, 0);
+    }
+
+    int sys_fchmod(int fd, mode_t mode){
+        return sys_fchmodat(fd, "", mode, AT_EMPTY_PATH);
+    }
+
+    int sys_fchownat(int dirfd, const char *pathname, uid_t owner, gid_t group, int flags){
+        auto result = do_syscall(SYS_FCHOWNAT, dirfd, pathname, owner, group, flags);
+        if(result < 0){
+            return -result;
+        }
+        return 0;
+    }
+
+    int sys_readlinkat(int dirfd, const char *path, void *buffer, size_t max_size, ssize_t *length){
+        auto result = do_syscall(SYS_READLINKAT, dirfd, path, buffer, max_size);
+        if(result < 0){
+            *length = 0;
+            return -result;
+        }
+        *length = result;
         return 0;
     }
 

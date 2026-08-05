@@ -434,7 +434,7 @@ proc_symtab_t * extract_elf_symtab(uint8_t * elf_data, size_t file_size, uint64_
 //Load dynamic linker at DYNAMIC_LINKER_BASE
 uint64_t load_dynamic_linker(process_t* process, char* dynamic_linker_path) {
     vfs_file_descriptor_t fd;
-    status_t st = vfs_open(dynamic_linker_path, 0, &fd);
+    status_t st = vfs_open(dynamic_linker_path, 0, 0, &fd);
     if(st != SUCCESS || !fd.valid) {
         return 0;
     }
@@ -500,7 +500,7 @@ uint64_t load_dynamic_linker(process_t* process, char* dynamic_linker_path) {
 loaded_elf_t* elf_load_elf(process_t * process, const char * filename, thread_t* thread) {
     PERF_BEGIN(t_open);
     vfs_file_descriptor_t fd;
-    status_t st = vfs_open(filename, 0, &fd);
+    status_t st = vfs_open(filename, 0, 0, &fd);
     if(st != SUCCESS || !fd.valid) {
         return NULL;
     }

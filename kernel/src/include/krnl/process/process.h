@@ -88,8 +88,7 @@ typedef struct process_t {
 
     vfs_file_descriptor_t open_files[MAX_OPEN_FILES];
     int open_file_count;
-    
-    struct process_t * parent;
+
     void * binary_entry;
 
     char ** argv;

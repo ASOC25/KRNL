@@ -628,6 +628,17 @@ process_t * scheduler_get_process_by_pid(pid_t pid) {
     return NULL;
 }
 
+/* Hands every direct child of `old_ppid` off to `new_ppid` (init) so it can
+   still be reaped after its real parent exits — otherwise a child's ppid
+   points at a pid nobody will ever match again in scheduler_waitpid's
+   comparators, and it stays a zombie (or unreaped orphan) forever. */
+void scheduler_reparent_children(pid_t old_ppid, pid_t new_ppid) {
+    for (scheduler_queue_t * current = sched_queue; current != NULL; current = current->next) {
+        process_t * proc = GET_PROC(current->thread);
+        if (proc->ppid == old_ppid) proc->ppid = new_ppid;
+    }
+}
+
 /* Delivers `signo` to every process in process group `pgid`. sched_queue
    holds one node per thread, so a multi-threaded process would otherwise be
    signalled once per thread; dedupe on the process pointer instead. */

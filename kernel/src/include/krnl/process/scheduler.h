@@ -59,5 +59,6 @@ int scheduler_waitpid(thread_t * caller, int pid, int * status, int options);
 void dump_scheduler_status();
 process_t * scheduler_get_process_by_pid(pid_t pid);
 void scheduler_signal_pgrp(pid_t pgid, int signo);
+void scheduler_reparent_children(pid_t old_ppid, pid_t new_ppid);
 void scheduler_create_idle_thread(void);
 #endif

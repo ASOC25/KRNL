@@ -55,6 +55,22 @@ namespace mlibc{
         return (gid_t)do_syscall(SYS_GETEGID);
     }
 
+    /* No distinct real/effective/saved id triple exists kernel-side (see
+     * SYS_SETUID's comment) -- only sys_setuid/sys_setgid are wired here,
+     * not sys_seteuid/sys_setegid, so callers asking for the effective-only
+     * variants correctly get ENOSYS instead of a misleading alias. */
+    int sys_setuid(uid_t uid) {
+        auto result = do_syscall(SYS_SETUID, uid);
+        if (result < 0) return -result;
+        return 0;
+    }
+
+    int sys_setgid(gid_t gid) {
+        auto result = do_syscall(SYS_SETGID, gid);
+        if (result < 0) return -result;
+        return 0;
+    }
+
     int sys_setpgid(pid_t pid, pid_t pgid) {
         auto result = do_syscall(SYS_SETPGID, pid, pgid);
 
@@ -334,6 +350,16 @@ namespace mlibc{
         }
 
         return do_syscall(SYS_FILE_IOCTL, fd, optional_action, attr);
+    }
+
+    int sys_tcflow(int fd, int action) {
+        auto result = do_syscall(SYS_FILE_IOCTL, fd, TCXONC, action);
+
+        if(result < 0){
+            return -result;
+        }
+
+        return 0;
     }
 
     int sys_access(const char* filename, int mode){

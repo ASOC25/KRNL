@@ -13,6 +13,8 @@
 #include <krnl/libraries/std/time.h>
 #include <krnl/libraries/std/string.h>
 #include <krnl/arch/x86/hpet.h>
+#include <krnl/fs/x1fs/x1fs.h>
+#include <krnl/drivers/ramdisk/ramdisk.h>
 
 #define SYSCALL_NUMBER(context) ((context)->rax)
 #define SYSCALL_ARG0(context)   ((context)->rdi)
@@ -26,7 +28,15 @@
 typedef int64_t (*syscall_handler_t)(thread_t * thread, cpu_context_t * context);
 
 #define AT_FDCWD      (-100)
+#define AT_SYMLINK_NOFOLLOW 0x100
 #define AT_REMOVEDIR  0x200
+#define AT_EMPTY_PATH 0x1000
+
+#define MAX_SYMLINK_DEPTH 40
+
+#define R_OK 4
+#define W_OK 2
+#define X_OK 1
 
 /* Collapses "." and ".." components in an absolute path, in place.
  * "/a/./b/../c" -> "/a/c". Never ascends above root. The backends
@@ -71,6 +81,75 @@ static void normalize_path(char *path) {
     strcpy(path, tmp);
 }
 
+/* path is absolute + already lexically normalized. Walks it left to right;
+ * whenever a prefix up to a component boundary is itself a symlink, splices
+ * in its target (absolute target replaces the whole prefix; relative target
+ * is relative to the symlink's own containing directory) and restarts from
+ * the beginning of the (new) string. If follow_final==0, the last component
+ * is left alone even if it is itself a symlink (lstat/unlink/rename/readlink/
+ * O_NOFOLLOW). Bounded by MAX_SYMLINK_DEPTH -> -ELOOP. */
+static int follow_symlinks(char *path, size_t sz, int follow_final) {
+    int budget = MAX_SYMLINK_DEPTH;
+restart:
+    {
+        size_t len = strlen(path);
+        size_t i = 1; /* skip leading '/' */
+        while (i <= len) {
+            size_t comp_end = i;
+            while (comp_end < len && path[comp_end] != '/') comp_end++;
+            int is_last = (comp_end >= len);
+            if (is_last && !follow_final) break;
+
+            char saved = path[comp_end];
+            path[comp_end] = '\0';
+            vfs_stat_t st;
+            status_t r = vfs_lstat_path(path, &st);
+            int is_link = (r == SUCCESS) && S_ISLNK(st.st_mode);
+            path[comp_end] = saved;
+
+            if (is_link) {
+                if (--budget <= 0) return -ELOOP;
+                char target[VFS_PATH_MAX];
+                path[comp_end] = '\0';
+                ssize_t tlen = vfs_readlink_path(path, target, sizeof(target) - 1);
+                path[comp_end] = saved;
+                if (tlen < 0) return (int)tlen;
+                target[tlen] = '\0';
+
+                /* '/' that starts this component -- the symlink's own
+                 * containing directory, for a relative target */
+                size_t dir_end = i - 1;
+                char newpath[VFS_PATH_MAX];
+                size_t np = 0;
+                if (target[0] == '/') {
+                    np = strlen(target);
+                    if (np >= sz) return -ENAMETOOLONG;
+                    memcpy(newpath, target, np);
+                } else {
+                    if (dir_end >= sz) return -ENAMETOOLONG;
+                    memcpy(newpath, path, dir_end);
+                    np = dir_end;
+                    if (np == 0 || newpath[np - 1] != '/') newpath[np++] = '/';
+                    size_t tl = strlen(target);
+                    if (np + tl >= sz) return -ENAMETOOLONG;
+                    memcpy(newpath + np, target, tl);
+                    np += tl;
+                }
+                size_t suffix_len = len - comp_end; /* trailing "/rest...", if any */
+                if (np + suffix_len >= sz) return -ENAMETOOLONG;
+                memcpy(newpath + np, path + comp_end, suffix_len);
+                newpath[np + suffix_len] = '\0';
+
+                strcpy(path, newpath);
+                normalize_path(path);
+                goto restart;
+            }
+            i = comp_end + 1;
+        }
+    }
+    return 0;
+}
+
 /* Reconstructs the full VFS path an already-open fd refers to, from its
  * mount's mount_point plus its native_path within that mount (the inverse of
  * vfs_get_native_path). Shared by resolve_at (dirfd-relative *at() syscalls)
@@ -93,36 +172,149 @@ static int fd_full_path(process_t *proc, int fd, char *out, size_t sz) {
     return 0;
 }
 
+/* Standard owner/group/other permission check against `st`, for `proc`.
+ * Root (uid 0) always passes -- this kernel has no distinct real/effective/
+ * saved id split yet (see syscall_setuid), so "uid" is the only identity
+ * a process has. */
+static int check_access(process_t *proc, vfs_stat_t *st, uint32_t want) {
+    if (proc->uid == 0) return 0;
+    uint32_t bits;
+    if (st->st_uid == (uint32_t)(uint16_t)proc->uid) {
+        bits = (st->st_mode >> 6) & 07;
+    } else if (st->st_gid == (uint32_t)(uint16_t)proc->gid) {
+        bits = (st->st_mode >> 3) & 07;
+    } else {
+        bits = st->st_mode & 07;
+    }
+    return ((bits & want) == want) ? 0 : -EACCES;
+}
+
+/* Search (x) permission on every directory component of `path` except the
+ * last (the caller checks the final component itself, against whatever
+ * access the specific operation needs). Mirrors follow_symlinks' own
+ * prefix-walk since the VFS has no per-component vnode walk of its own. */
+static int check_path_traversal(process_t *proc, char *path) {
+    if (proc->uid == 0) return 0;
+    size_t len = strlen(path);
+    size_t i = 1; /* skip leading '/' */
+    while (i <= len) {
+        size_t comp_end = i;
+        while (comp_end < len && path[comp_end] != '/') comp_end++;
+        if (comp_end >= len) break; /* final component -- not ours to check */
+
+        char saved = path[comp_end];
+        path[comp_end] = '\0';
+        vfs_stat_t st;
+        status_t r = vfs_lstat_path(path, &st);
+        int rc = (r == SUCCESS) ? check_access(proc, &st, X_OK) : 0;
+        path[comp_end] = saved;
+
+        if (r == SUCCESS && rc < 0) return rc;
+        i = comp_end + 1;
+    }
+    return 0;
+}
+
+/* Splits an absolute, normalized path into its parent directory. "/" for a
+ * top-level entry. Used by callers that need to check write permission on
+ * the directory a new/removed/renamed entry lives in. */
+static void parent_dir_of(const char *path, char *out, size_t sz) {
+    size_t len = strlen(path);
+    while (len > 1 && path[len - 1] == '/') len--;
+    size_t i = len;
+    while (i > 0 && path[i - 1] != '/') i--;
+    size_t plen = (i > 1) ? i - 1 : 1;
+    if (plen >= sz) plen = sz - 1;
+    memcpy(out, path, plen);
+    out[plen] = '\0';
+}
+
 /* Resolves `path` against `dirfd` into `out`. Absolute paths are copied
  * through unchanged (besides normalization); relative paths are resolved
  * against AT_FDCWD (the caller's cwd) or against an arbitrary already-open
- * directory fd (via fd_full_path). */
+ * directory fd (via fd_full_path). Checks search (x) permission on every
+ * directory component traversed along the way. */
 static int resolve_at(thread_t *thread, int dirfd, const char *path,
-                      char *out, size_t sz) {
+                      char *out, size_t sz, int follow_final) {
     if (!path || !path[0]) return -ENOENT;
+    process_t *proc = (process_t *)thread->process;
     if (path[0] == '/') {
         if (strlen(path) >= sz) return -ENAMETOOLONG;
         strncpy(out, path, sz);
-        normalize_path(out);
-        return 0;
-    }
-    process_t *proc = (process_t *)thread->process;
-    char base_buf[VFS_PATH_MAX];
-    const char *base;
-    if (dirfd == AT_FDCWD) {
-        base = proc->cwd.internal_path;
     } else {
-        int rr = fd_full_path(proc, dirfd, base_buf, sizeof(base_buf));
-        if (rr < 0) return rr;
-        base = base_buf;
+        char base_buf[VFS_PATH_MAX];
+        const char *base;
+        if (dirfd == AT_FDCWD) {
+            base = proc->cwd.internal_path;
+        } else {
+            int rr = fd_full_path(proc, dirfd, base_buf, sizeof(base_buf));
+            if (rr < 0) return rr;
+            base = base_buf;
+        }
+        size_t blen = strlen(base), plen = strlen(path);
+        if (blen + 1 + plen + 1 > sz) return -ENAMETOOLONG;
+        memcpy(out, base, blen);
+        if (blen && base[blen - 1] != '/') out[blen++] = '/';
+        memcpy(out + blen, path, plen + 1);
     }
-    size_t blen = strlen(base), plen = strlen(path);
-    if (blen + 1 + plen + 1 > sz) return -ENAMETOOLONG;
-    memcpy(out, base, blen);
-    if (blen && base[blen - 1] != '/') out[blen++] = '/';
-    memcpy(out + blen, path, plen + 1);
     normalize_path(out);
-    return 0;
+    int fr = follow_symlinks(out, sz, follow_final);
+    if (fr < 0) return fr;
+    return check_path_traversal(proc, out);
+}
+
+/* R_OK/W_OK check for open()/openat(), based on O_ACCMODE and whether the
+ * target already exists. If it doesn't exist and O_CREAT is set, checks
+ * W_OK on the parent directory instead (X_OK on the parent was already
+ * checked by resolve_at's traversal). *existed_out reports whether the
+ * target was found, so the caller can tell a fresh O_CREAT apart from
+ * opening something that was already there (only the former should take
+ * new ownership -- see chown_new_entry). O_PATH opens need no access check
+ * at all (only path resolution rights, already covered by traversal). */
+static int check_open_access(process_t *proc, const char *resolved, int flags, int *existed_out) {
+    vfs_stat_t st;
+    status_t r = vfs_lstat_path(resolved, &st);
+    if (existed_out) *existed_out = (r == SUCCESS);
+    if (flags & O_PATH) return 0;
+
+    int want = 0;
+    switch (flags & 03) {
+        case O_RDONLY: want = R_OK; break;
+        case O_WRONLY: want = W_OK; break;
+        case O_RDWR:   want = R_OK | W_OK; break;
+    }
+
+    if (r == SUCCESS) return check_access(proc, &st, want);
+    if (flags & O_CREAT) {
+        char parent[VFS_PATH_MAX];
+        parent_dir_of(resolved, parent, sizeof(parent));
+        vfs_stat_t pst;
+        if (vfs_lstat_path(parent, &pst) == SUCCESS) return check_access(proc, &pst, W_OK);
+    }
+    return 0; /* doesn't exist, no O_CREAT -- vfs_open() reports ENOENT itself */
+}
+
+/* W_OK on the directory containing `path` -- mkdir/unlink/rmdir/rename/
+ * symlink all create or remove a directory entry, which POSIX gates on
+ * write permission to the containing directory itself, not the entry
+ * being touched. X_OK on the parent was already checked by resolve_at's
+ * traversal, since the parent is always an ancestor of `path`. */
+static int check_parent_write(process_t *proc, const char *path) {
+    char parent[VFS_PATH_MAX];
+    parent_dir_of(path, parent, sizeof(parent));
+    vfs_stat_t st;
+    if (vfs_lstat_path(parent, &st) != SUCCESS) return 0; /* let the real op report the error */
+    return check_access(proc, &st, W_OK);
+}
+
+/* New files/dirs/symlinks are created as though by root (uid 0, gid 0) --
+ * ext2/x1fs's create()/mkdir()/symlink() ops take no uid/gid of their own.
+ * Give them real ownership immediately after a non-root creator makes them,
+ * rather than threading uid/gid through every filesystem backend's create
+ * path. Only call this for entries that were *just* created (see callers). */
+static void chown_new_entry(process_t *proc, const char *path) {
+    if (proc->uid == 0) return;
+    vfs_chown(path, (uint32_t)(uint16_t)proc->uid, (uint32_t)(uint16_t)proc->gid);
 }
 
 int64_t syscall_log(thread_t*thread, cpu_context_t* ctx) {
@@ -159,18 +351,22 @@ int64_t syscall_write(thread_t * thread, cpu_context_t * context) {
 int64_t syscall_open(thread_t * thread, cpu_context_t * context) {
     const char *path = (const char *)SYSCALL_ARG0(context);
     int flags = (int)SYSCALL_ARG1(context);
+    uint32_t mode = (uint32_t)SYSCALL_ARG2(context);
     process_t *proc = (process_t *)thread->process;
 
     char resolved[VFS_PATH_MAX];
-    int rr = resolve_at(thread, AT_FDCWD, path, resolved, sizeof(resolved));
+    int rr = resolve_at(thread, AT_FDCWD, path, resolved, sizeof(resolved), !(flags & O_NOFOLLOW));
     if (rr < 0) return rr;
+    int existed = 0;
+    int acc = check_open_access(proc, resolved, flags, &existed);
+    if (acc < 0) return acc;
 
     int slot = process_allocate_fd_slot(proc);
     if (slot < 0) {
         return -EMFILE;
     }
     vfs_file_descriptor_t newfd;
-    status_t st = vfs_open(resolved, flags, &newfd);
+    status_t st = vfs_open(resolved, flags, mode, &newfd);
     if (st == ALREADY_EXISTS) return -EEXIST;
     if (st != SUCCESS || !newfd.valid) {
         return -ENOENT;
@@ -178,6 +374,7 @@ int64_t syscall_open(thread_t * thread, cpu_context_t * context) {
     // Copy into process table slot
     proc->open_files[slot] = newfd;
     proc->open_file_count++;
+    if (!existed && (flags & O_CREAT)) chown_new_entry(proc, resolved);
     return slot;
 }
 
@@ -189,24 +386,29 @@ int64_t syscall_openat(thread_t * thread, cpu_context_t * context) {
     int dirfd = (int)SYSCALL_ARG0(context);
     const char *path = (const char *)SYSCALL_ARG1(context);
     int flags = (int)SYSCALL_ARG2(context);
+    uint32_t mode = (uint32_t)SYSCALL_ARG3(context);
     process_t *proc = (process_t *)thread->process;
 
     char resolved[VFS_PATH_MAX];
-    int rr = resolve_at(thread, dirfd, path, resolved, sizeof(resolved));
+    int rr = resolve_at(thread, dirfd, path, resolved, sizeof(resolved), !(flags & O_NOFOLLOW));
     if (rr < 0) return rr;
+    int existed = 0;
+    int acc = check_open_access(proc, resolved, flags, &existed);
+    if (acc < 0) return acc;
 
     int slot = process_allocate_fd_slot(proc);
     if (slot < 0) {
         return -EMFILE;
     }
     vfs_file_descriptor_t newfd;
-    status_t st = vfs_open(resolved, flags, &newfd);
+    status_t st = vfs_open(resolved, flags, mode, &newfd);
     if (st == ALREADY_EXISTS) return -EEXIST;
     if (st != SUCCESS || !newfd.valid) {
         return -ENOENT;
     }
     proc->open_files[slot] = newfd;
     proc->open_file_count++;
+    if (!existed && (flags & O_CREAT)) chown_new_entry(proc, resolved);
     return slot;
 }
 
@@ -234,16 +436,18 @@ int64_t syscall_stat(thread_t * thread, cpu_context_t * context) {
     /* mlibc calls: SYS_PATH_STAT(path, strlen(path), flags, statbuf, dirfd)
      * — dirfd is AT_FDCWD for plain stat()/lstat(), or a real directory fd
      * for fstatat(dirfd, path, ...) (mlibc's fsfd_target::fd_path case). */
+    int flags = (int)SYSCALL_ARG2(context);
     vfs_stat_t *buf = (vfs_stat_t *)SYSCALL_ARG3(context);
     int dirfd = (int)SYSCALL_ARG4(context);
 
     char resolved[VFS_PATH_MAX];
-    int rr = resolve_at(thread, dirfd, path, resolved, sizeof(resolved));
+    int rr = resolve_at(thread, dirfd, path, resolved, sizeof(resolved), !(flags & AT_SYMLINK_NOFOLLOW));
     if (rr < 0) return rr;
 
-    // Open read-only, then fstat and close
+    // Open read-only (O_PATH: metadata only -- must not block/connect on a
+    // FIFO), then fstat and close
     vfs_file_descriptor_t tmp;
-    status_t st = vfs_open(resolved, O_RDONLY, &tmp);
+    status_t st = vfs_open(resolved, O_RDONLY | O_PATH, 0, &tmp);
     if (st != SUCCESS || !tmp.valid) {
         return -ENOENT;
     }
@@ -514,8 +718,14 @@ int64_t syscall_execve(thread_t * thread, cpu_context_t * context) {
     const char ** envp = (const char **)SYSCALL_ARG2(context);
 
     char resolved_filename[VFS_PATH_MAX];
-    int rr = resolve_at(thread, AT_FDCWD, filename, resolved_filename, sizeof(resolved_filename));
+    int rr = resolve_at(thread, AT_FDCWD, filename, resolved_filename, sizeof(resolved_filename), 1);
     if (rr < 0) return rr;
+    {
+        vfs_stat_t xst;
+        if (vfs_lstat_path(resolved_filename, &xst) != SUCCESS) return -ENOENT;
+        int acc = check_access((process_t *)thread->process, &xst, X_OK);
+        if (acc < 0) return acc;
+    }
 
     PERF_BEGIN(t_total);
 
@@ -605,6 +815,18 @@ int64_t syscall_setgid(thread_t * thread, cpu_context_t * context) {
     return 0;
 }
 
+/* Unrestricted, like setgid() above -- this kernel has no distinct real/
+ * effective/saved id triple (process_t has a single `uid` field), so it
+ * can't enforce POSIX's "non-root may only switch to its saved/real uid"
+ * rule. Good enough to let a process drop privilege for testing EACCES;
+ * revisit once real multi-user/login support tracks more than one id. */
+int64_t syscall_setuid(thread_t * thread, cpu_context_t * context) {
+    gid_t uid = (gid_t)SYSCALL_ARG0(context);
+    process_t * proc = (process_t *)thread->process;
+    proc->uid = uid;
+    return 0;
+}
+
 int64_t syscall_dup(thread_t * thread, cpu_context_t * context) {
     //use vfs_file_descriptor_t * process_dup(process_t * process, int old_fd, int new_fd);
     int old_fd = (int)SYSCALL_ARG0(context);
@@ -632,7 +854,7 @@ int64_t syscall_chdir(thread_t * thread, cpu_context_t * context) {
     process_t * proc = (process_t *)thread->process;
 
     char resolved[VFS_PATH_MAX];
-    int rr = resolve_at(thread, AT_FDCWD, path, resolved, sizeof(resolved));
+    int rr = resolve_at(thread, AT_FDCWD, path, resolved, sizeof(resolved), 1);
     if (rr < 0) return rr;
 
     /* Verify the target actually exists before committing to it */
@@ -690,11 +912,7 @@ int64_t syscall_getcwd(thread_t * thread, cpu_context_t * context) {
 int64_t syscall_getppid(thread_t * thread, cpu_context_t * context) {
     (void)context; // Unused
     process_t * proc = (process_t *)thread->process;
-    if (proc->parent) {
-        return (int64_t)proc->parent->pid;
-    } else {
-        return -1;
-    }
+    return (int64_t)proc->ppid;
 }
 
 int64_t syscall_get_tid(thread_t * thread, cpu_context_t * context) {
@@ -776,7 +994,7 @@ int64_t syscall_dir_open(thread_t * thread, cpu_context_t * context) {
     process_t *proc = (process_t *)thread->process;
 
     char resolved[VFS_PATH_MAX];
-    int rr = resolve_at(thread, AT_FDCWD, path, resolved, sizeof(resolved));
+    int rr = resolve_at(thread, AT_FDCWD, path, resolved, sizeof(resolved), 1);
     if (rr < 0) return rr;
 
     int slot = process_allocate_fd_slot(proc);
@@ -857,11 +1075,16 @@ int64_t syscall_fcntl(thread_t * thread, cpu_context_t * context) {
 int64_t syscall_rename(thread_t * thread, cpu_context_t * context) {
     const char *oldpath = (const char *)SYSCALL_ARG0(context);
     const char *newpath = (const char *)SYSCALL_ARG1(context);
+    process_t *proc = (process_t *)thread->process;
 
     char old_res[VFS_PATH_MAX], new_res[VFS_PATH_MAX];
-    int r = resolve_at(thread, AT_FDCWD, oldpath, old_res, sizeof(old_res));
+    int r = resolve_at(thread, AT_FDCWD, oldpath, old_res, sizeof(old_res), 0);
     if (r < 0) return r;
-    r = resolve_at(thread, AT_FDCWD, newpath, new_res, sizeof(new_res));
+    r = resolve_at(thread, AT_FDCWD, newpath, new_res, sizeof(new_res), 0);
+    if (r < 0) return r;
+    r = check_parent_write(proc, old_res);
+    if (r < 0) return r;
+    r = check_parent_write(proc, new_res);
     if (r < 0) return r;
 
     status_t st = vfs_rename(old_res, new_res);
@@ -873,15 +1096,111 @@ int64_t syscall_rename(thread_t * thread, cpu_context_t * context) {
 int64_t syscall_mkdir(thread_t * thread, cpu_context_t * context) {
     const char *path = (const char *)SYSCALL_ARG0(context);
     uint32_t mode    = (uint32_t)SYSCALL_ARG1(context);
+    process_t *proc  = (process_t *)thread->process;
 
     char resolved[VFS_PATH_MAX];
-    int rr = resolve_at(thread, AT_FDCWD, path, resolved, sizeof(resolved));
+    int rr = resolve_at(thread, AT_FDCWD, path, resolved, sizeof(resolved), 1);
+    if (rr < 0) return rr;
+    rr = check_parent_write(proc, resolved);
     if (rr < 0) return rr;
 
     status_t st = vfs_mkdir(resolved, mode ? mode : 0755);
     if (st == ALREADY_EXISTS)  return -EEXIST;
     if (st == NOT_IMPLEMENTED) return -EROFS;
+    if (st == SUCCESS) chown_new_entry(proc, resolved);
     return (st == SUCCESS) ? 0 : -EIO;
+}
+
+/* mkfifoat: creates a FIFO node at `path` resolved against `dirfd`. Only the
+ * on-disk node is created here -- actually connecting readers and writers
+ * happens later, in vfs_open()'s S_ISFIFO special case. */
+int64_t syscall_mkfifoat(thread_t * thread, cpu_context_t * context) {
+    int dirfd        = (int)SYSCALL_ARG0(context);
+    const char *path = (const char *)SYSCALL_ARG1(context);
+    uint32_t mode    = (uint32_t)SYSCALL_ARG2(context);
+    process_t *proc  = (process_t *)thread->process;
+
+    char resolved[VFS_PATH_MAX];
+    int rr = resolve_at(thread, dirfd, path, resolved, sizeof(resolved), 1);
+    if (rr < 0) return rr;
+    rr = check_parent_write(proc, resolved);
+    if (rr < 0) return rr;
+
+    status_t st = vfs_mkfifo(resolved, mode ? (mode & 07777) : 0644);
+    if (st == ALREADY_EXISTS)  return -EEXIST;
+    if (st == NOT_IMPLEMENTED) return -EROFS;
+    if (st == SUCCESS) chown_new_entry(proc, resolved);
+    return (st == SUCCESS) ? 0 : -EIO;
+}
+
+/* mount(source, target, fstype, flags, data): `source`/`flags`/`data` are
+ * currently unused -- matches real Linux, which ignores `source` for
+ * pseudo-filesystems too. "tmpfs" is the only fstype implemented so far,
+ * backed by a fresh, deviceless x1fs instance (x1fs_create_tmpfs()); real
+ * block devices aren't nameable from userspace yet (no /dev block-device-
+ * node infrastructure exists), so mounting an actual disk isn't supported
+ * here -- that needs its own follow-up once such device nodes exist. */
+int64_t syscall_mount(thread_t * thread, cpu_context_t * context) {
+    const char *target = (const char *)SYSCALL_ARG1(context);
+    const char *fstype = (const char *)SYSCALL_ARG2(context);
+    process_t *proc = (process_t *)thread->process;
+
+    if (!target || !fstype) return -EFAULT;
+    if (proc->uid != 0) return -EPERM; /* mount is a privileged operation */
+
+    char resolved[VFS_PATH_MAX];
+    int rr = resolve_at(thread, AT_FDCWD, target, resolved, sizeof(resolved), 1);
+    if (rr < 0) return rr;
+
+    vfs_stat_t st;
+    if (vfs_lstat_path(resolved, &st) != SUCCESS) return -ENOENT;
+    if (!S_ISDIR(st.st_mode)) return -ENOTDIR;
+
+    /* Refuse an exact-path duplicate here rather than letting
+     * vfs_find_mount()'s own same-length-match panic fire on the next
+     * lookup through this path. */
+    if (vfs_find_exact_mount(resolved)) return -EBUSY;
+
+    if (strcmp(fstype, "tmpfs") != 0) return -ENODEV;
+
+    device_minor_t minor;
+    if (x1fs_create_tmpfs(&minor) != SUCCESS) return -ENOMEM;
+
+    if (!vfs_new_mount_with_ops(x1fs_get_ops(), RAMDISK_DRIVER_MAJOR, minor, resolved)) {
+        x1fs_destroy_tmpfs(minor);
+        return -EIO;
+    }
+    return 0;
+}
+
+/* umount2(target, flags) -- `flags` (e.g. MNT_FORCE/MNT_DETACH) aren't
+ * meaningful yet (there's no notion of a busy mount to force through), so
+ * it's accepted but ignored. Refuses to unmount "/" and refuses any path
+ * that isn't itself exactly a mount point (mirrors real umount(2), which
+ * doesn't let you unmount a plain subdirectory). */
+int64_t syscall_umount(thread_t * thread, cpu_context_t * context) {
+    const char *target = (const char *)SYSCALL_ARG0(context);
+    process_t *proc = (process_t *)thread->process;
+
+    if (!target) return -EFAULT;
+    if (proc->uid != 0) return -EPERM;
+
+    char resolved[VFS_PATH_MAX];
+    int rr = resolve_at(thread, AT_FDCWD, target, resolved, sizeof(resolved), 1);
+    if (rr < 0) return rr;
+
+    if (strcmp(resolved, "/") == 0) return -EINVAL;
+
+    vfs_mount_t *m = vfs_find_exact_mount(resolved);
+    if (!m) return -EINVAL;
+
+    uint8_t was_tmpfs = (m->ops == x1fs_get_ops() && m->minor != 0);
+    device_minor_t minor = m->minor;
+
+    if (vfs_remove_mount(resolved) != SUCCESS) return -EINVAL;
+
+    if (was_tmpfs) x1fs_destroy_tmpfs(minor);
+    return 0;
 }
 
 int64_t syscall_creat(thread_t * thread, cpu_context_t * context) {
@@ -889,7 +1208,7 @@ int64_t syscall_creat(thread_t * thread, cpu_context_t * context) {
     process_t *proc  = (process_t *)thread->process;
 
     char resolved[VFS_PATH_MAX];
-    int rr = resolve_at(thread, AT_FDCWD, path, resolved, sizeof(resolved));
+    int rr = resolve_at(thread, AT_FDCWD, path, resolved, sizeof(resolved), 1);
     if (rr < 0) return rr;
 
     int slot = process_allocate_fd_slot(proc);
@@ -897,10 +1216,10 @@ int64_t syscall_creat(thread_t * thread, cpu_context_t * context) {
 
     vfs_file_descriptor_t newfd;
     /* creat = open(path, O_WRONLY|O_CREAT|O_TRUNC) */
-    status_t st = vfs_open(resolved, O_WRONLY | O_CREAT, &newfd);
+    status_t st = vfs_open(resolved, O_WRONLY | O_CREAT, 0644, &newfd);
     if (st == ALREADY_EXISTS) {
         /* file exists — open it for writing */
-        st = vfs_open(resolved, O_WRONLY, &newfd);
+        st = vfs_open(resolved, O_WRONLY, 0, &newfd);
     }
     if (st != SUCCESS || !newfd.valid) return -EIO;
     proc->open_files[slot] = newfd;
@@ -945,18 +1264,74 @@ int64_t syscall_arch_prctl(thread_t * thread, cpu_context_t * context) {
     }
 }
 
+/* Only root may change ownership -- POSIX lets an owner give a file's group
+ * away to a group they belong to, but this kernel doesn't track supplementary
+ * groups, so that half of the real rule can't be checked; simplify to
+ * root-only, which is always a safe subset of the real POSIX behaviour. */
 int64_t syscall_fchownat(thread_t * thread, cpu_context_t * context) {
-    (void)thread;
-    (void)context;
-    return -ENOSYS;
+    int dirfd        = (int)SYSCALL_ARG0(context);
+    const char *path = (const char *)SYSCALL_ARG1(context);
+    uint32_t uid     = (uint32_t)SYSCALL_ARG2(context);
+    uint32_t gid     = (uint32_t)SYSCALL_ARG3(context);
+    int flags        = (int)SYSCALL_ARG4(context);
+    process_t *proc  = (process_t *)thread->process;
+
+    char resolved[VFS_PATH_MAX];
+    if ((flags & AT_EMPTY_PATH) && (!path || !path[0])) {
+        int rr = fd_full_path(proc, dirfd, resolved, sizeof(resolved));
+        if (rr < 0) return rr;
+    } else {
+        int rr = resolve_at(thread, dirfd, path, resolved, sizeof(resolved), !(flags & AT_SYMLINK_NOFOLLOW));
+        if (rr < 0) return rr;
+    }
+
+    if (proc->uid != 0) return -EPERM;
+
+    vfs_stat_t st;
+    if (vfs_lstat_path(resolved, &st) != SUCCESS) return -ENOENT;
+    if (uid == (uint32_t)-1) uid = st.st_uid;
+    if (gid == (uint32_t)-1) gid = st.st_gid;
+
+    status_t r = vfs_chown(resolved, uid, gid);
+    if (r == NOT_IMPLEMENTED) return -EROFS;
+    return (r == SUCCESS) ? 0 : -EIO;
+}
+
+/* chmod may be done by root or by the file's own owner (POSIX). */
+int64_t syscall_fchmodat(thread_t * thread, cpu_context_t * context) {
+    int dirfd        = (int)SYSCALL_ARG0(context);
+    const char *path = (const char *)SYSCALL_ARG1(context);
+    uint32_t mode    = (uint32_t)SYSCALL_ARG2(context);
+    int flags        = (int)SYSCALL_ARG3(context);
+    process_t *proc  = (process_t *)thread->process;
+
+    char resolved[VFS_PATH_MAX];
+    if ((flags & AT_EMPTY_PATH) && (!path || !path[0])) {
+        int rr = fd_full_path(proc, dirfd, resolved, sizeof(resolved));
+        if (rr < 0) return rr;
+    } else {
+        int rr = resolve_at(thread, dirfd, path, resolved, sizeof(resolved), !(flags & AT_SYMLINK_NOFOLLOW));
+        if (rr < 0) return rr;
+    }
+
+    vfs_stat_t st;
+    if (vfs_lstat_path(resolved, &st) != SUCCESS) return -ENOENT;
+    if (proc->uid != 0 && st.st_uid != (uint32_t)(uint16_t)proc->uid) return -EPERM;
+
+    status_t r = vfs_chmod(resolved, mode);
+    if (r == NOT_IMPLEMENTED) return -EROFS;
+    return (r == SUCCESS) ? 0 : -EIO;
 }
 
 int64_t syscall_unlinkat(thread_t * thread, cpu_context_t * context) {
     int         dirfd = (int)SYSCALL_ARG0(context);
     const char *path  = (const char *)SYSCALL_ARG1(context);
     int         flags = (int)SYSCALL_ARG2(context);
+    process_t *proc   = (process_t *)thread->process;
     char resolved[VFS_PATH_MAX];
-    int r = resolve_at(thread, dirfd, path, resolved, sizeof(resolved));
+    int r = resolve_at(thread, dirfd, path, resolved, sizeof(resolved), 0);
+    if (r < 0) return r;
+    r = check_parent_write(proc, resolved);
     if (r < 0) return r;
     status_t st;
     if (flags & AT_REMOVEDIR) {
@@ -970,15 +1345,78 @@ int64_t syscall_unlinkat(thread_t * thread, cpu_context_t * context) {
     return (st == SUCCESS) ? 0 : -EIO;
 }
 
+int64_t syscall_symlink(thread_t * thread, cpu_context_t * context) {
+    const char *target   = (const char *)SYSCALL_ARG0(context);
+    const char *linkpath = (const char *)SYSCALL_ARG1(context);
+    process_t *proc      = (process_t *)thread->process;
+    if (!target || !linkpath) return -EINVAL;
+    char resolved[VFS_PATH_MAX];
+    int rr = resolve_at(thread, AT_FDCWD, linkpath, resolved, sizeof(resolved), 0);
+    if (rr < 0) return rr;
+    rr = check_parent_write(proc, resolved);
+    if (rr < 0) return rr;
+    status_t st = vfs_symlink(target, resolved);
+    if (st == ALREADY_EXISTS)  return -EEXIST;
+    if (st == NOT_IMPLEMENTED) return -EROFS;
+    if (st == SUCCESS) chown_new_entry(proc, resolved);
+    return (st == SUCCESS) ? 0 : -EIO;
+}
+
+int64_t syscall_symlinkat(thread_t * thread, cpu_context_t * context) {
+    const char *target   = (const char *)SYSCALL_ARG0(context);
+    int dirfd             = (int)SYSCALL_ARG1(context);
+    const char *linkpath  = (const char *)SYSCALL_ARG2(context);
+    process_t *proc       = (process_t *)thread->process;
+    if (!target || !linkpath) return -EINVAL;
+    char resolved[VFS_PATH_MAX];
+    int rr = resolve_at(thread, dirfd, linkpath, resolved, sizeof(resolved), 0);
+    if (rr < 0) return rr;
+    rr = check_parent_write(proc, resolved);
+    if (rr < 0) return rr;
+    status_t st = vfs_symlink(target, resolved);
+    if (st == ALREADY_EXISTS)  return -EEXIST;
+    if (st == NOT_IMPLEMENTED) return -EROFS;
+    if (st == SUCCESS) chown_new_entry(proc, resolved);
+    return (st == SUCCESS) ? 0 : -EIO;
+}
+
+int64_t syscall_readlink(thread_t * thread, cpu_context_t * context) {
+    const char *path = (const char *)SYSCALL_ARG0(context);
+    char *buf         = (char *)SYSCALL_ARG1(context);
+    size_t bufsz      = (size_t)SYSCALL_ARG2(context);
+    if (!path || !buf) return -EINVAL;
+    char resolved[VFS_PATH_MAX];
+    int rr = resolve_at(thread, AT_FDCWD, path, resolved, sizeof(resolved), 0);
+    if (rr < 0) return rr;
+    return (int64_t)vfs_readlink_path(resolved, buf, bufsz);
+}
+
+int64_t syscall_readlinkat(thread_t * thread, cpu_context_t * context) {
+    int dirfd         = (int)SYSCALL_ARG0(context);
+    const char *path  = (const char *)SYSCALL_ARG1(context);
+    char *buf          = (char *)SYSCALL_ARG2(context);
+    size_t bufsz       = (size_t)SYSCALL_ARG3(context);
+    if (!path || !buf) return -EINVAL;
+    char resolved[VFS_PATH_MAX];
+    int rr = resolve_at(thread, dirfd, path, resolved, sizeof(resolved), 0);
+    if (rr < 0) return rr;
+    return (int64_t)vfs_readlink_path(resolved, buf, bufsz);
+}
+
 int64_t syscall_renameat(thread_t * thread, cpu_context_t * context) {
     int         olddirfd = (int)SYSCALL_ARG0(context);
     const char *oldpath  = (const char *)SYSCALL_ARG1(context);
     int         newdirfd = (int)SYSCALL_ARG2(context);
     const char *newpath  = (const char *)SYSCALL_ARG3(context);
+    process_t  *proc     = (process_t *)thread->process;
     char old_res[VFS_PATH_MAX], new_res[VFS_PATH_MAX];
-    int r = resolve_at(thread, olddirfd, oldpath, old_res, sizeof(old_res));
+    int r = resolve_at(thread, olddirfd, oldpath, old_res, sizeof(old_res), 0);
     if (r < 0) return r;
-    r = resolve_at(thread, newdirfd, newpath, new_res, sizeof(new_res));
+    r = resolve_at(thread, newdirfd, newpath, new_res, sizeof(new_res), 0);
+    if (r < 0) return r;
+    r = check_parent_write(proc, old_res);
+    if (r < 0) return r;
+    r = check_parent_write(proc, new_res);
     if (r < 0) return r;
     status_t st = vfs_rename(old_res, new_res);
     if (st == NOT_FOUND)      return -ENOENT;
@@ -1107,16 +1545,18 @@ int64_t syscall_statx(thread_t * thread, cpu_context_t * context) {
     /* mlibc calls: SYS_STATX(dirfd, path, flags, mask, statxbuf) */
     int dirfd             = (int)SYSCALL_ARG0(context);
     const char *path    = (const char *)SYSCALL_ARG1(context);
+    int flags             = (int)SYSCALL_ARG2(context);
     vfs_statx_t *statxbuf = (vfs_statx_t *)SYSCALL_ARG4(context);
 
     if (!path || !statxbuf) return -EINVAL;
 
     char resolved[VFS_PATH_MAX];
-    int rr = resolve_at(thread, dirfd, path, resolved, sizeof(resolved));
+    int rr = resolve_at(thread, dirfd, path, resolved, sizeof(resolved), !(flags & AT_SYMLINK_NOFOLLOW));
     if (rr < 0) return rr;
 
+    // O_PATH: metadata only -- must not block/connect on a FIFO
     vfs_file_descriptor_t tmp;
-    status_t st = vfs_open(resolved, 0, &tmp);
+    status_t st = vfs_open(resolved, O_PATH, 0, &tmp);
     if (st != SUCCESS || !tmp.valid) return -ENOENT;
 
     vfs_stat_t s;
@@ -1224,9 +1664,12 @@ int64_t syscall_sigprocmask(thread_t * thread, cpu_context_t * context) {
 
 int64_t syscall_rmdir(thread_t * thread, cpu_context_t * context) {
     const char *path = (const char *)SYSCALL_ARG0(context);
+    process_t *proc  = (process_t *)thread->process;
 
     char resolved[VFS_PATH_MAX];
-    int rr = resolve_at(thread, AT_FDCWD, path, resolved, sizeof(resolved));
+    int rr = resolve_at(thread, AT_FDCWD, path, resolved, sizeof(resolved), 0);
+    if (rr < 0) return rr;
+    rr = check_parent_write(proc, resolved);
     if (rr < 0) return rr;
 
     status_t st = vfs_rmdir(resolved);
@@ -1401,6 +1844,15 @@ static syscall_handler_t handlers[SYS_COUNT] = {
     syscall_getsid,  //62
     syscall_fchdir,  //63
     syscall_openat,  //64
+    syscall_symlink,     //65
+    syscall_symlinkat,   //66
+    syscall_readlink,    //67
+    syscall_readlinkat,  //68
+    syscall_fchmodat,    //69
+    syscall_setuid,      //70
+    syscall_mkfifoat,    //71
+    syscall_mount,       //72
+    syscall_umount,      //73
 };
 
 void syscall_handler(cpu_context_t * context) {

@@ -20,6 +20,11 @@
 
 extern void set_cpu_fs_base(uint64_t base);
 
+/* Set once, in process_init(), and never again. Orphans are reparented to
+   this pid so they can still be reaped (see process_exit()/
+   scheduler_reparent_children()). -1 means "no init yet". */
+static pid_t g_init_pid = -1;
+
 vfs_file_descriptor_t * process_get_fd(process_t *proc, int fd) {
     if (!proc) return NULL;
 
@@ -106,7 +111,7 @@ void process_open_stdfiles(process_t * process, const char * tty) {
             panic("process_open_stdfiles: Unable to allocate fd slot");
         }
         vfs_file_descriptor_t newfd;
-        status_t st = vfs_open(tty, O_RDWR, &newfd);
+        status_t st = vfs_open(tty, O_RDWR, 0, &newfd);
         if (st != SUCCESS || !newfd.valid) {
             panic("process_open_stdfiles: Unable to open tty for stdfile");
         }
@@ -181,7 +186,6 @@ process_t * process_create(process_t * parent, const char * filename, const char
             new_process->open_files[i] = (vfs_file_descriptor_t){0};
         }
         new_process->open_file_count = 0;
-        new_process->parent = NULL;
         process_open_stdfiles(new_process, tty);
     } else {
         new_process->ppid = parent->pid;
@@ -191,7 +195,6 @@ process_t * process_create(process_t * parent, const char * filename, const char
             new_process->open_files[i] = parent->open_files[i];
         }
         new_process->open_file_count = parent->open_file_count;
-        new_process->parent = parent;
     }
 
     return new_process;
@@ -335,7 +338,13 @@ status_t process_handle_default_signal(thread_t * thread, signal_t * signal) {
                     proc->threads[i]->state = SCHEDULER_STATUS_STOPPED;
             }
             proc->state = SCHEDULER_STATUS_STOPPED;
-            if (proc->parent) process_kill(proc->parent, SIGCHLD);
+            /* Deliberately not sending the parent an actual SIGCHLD signal
+               here (only the wakeup() below, which is what unblocks a
+               waitpid() and is all job control actually needs) -- doing so
+               was tried and reproducibly made bash's own sigchld_handler
+               misbehave (it re-ran the just-stopped foreground command from
+               history), a latent bash/mlibc bug this code path had simply
+               never exercised before. See FEATURES.md / project memory. */
             wakeup(SIGNAL_WAITPID);
             return SUCCESS;
 
@@ -355,7 +364,7 @@ status_t process_handle_default_signal(thread_t * thread, signal_t * signal) {
                     proc->threads[i]->state = SCHEDULER_STATUS_RUNABLE;
             }
             proc->state = SCHEDULER_STATUS_CONTINUED;
-            if (proc->parent) process_kill(proc->parent, SIGCHLD);
+            /* See the matching comment in the Stop case above. */
             wakeup(SIGNAL_WAITPID);
             return SUCCESS;
         }
@@ -669,6 +678,16 @@ thread_t * duplicate_thread(process_t * parent, thread_t * og) {
     }
     memset(new_thread->kcontext, 0, sizeof(context_t));
     new_thread->kcontext_pending = 0;
+    /* Mirrors new_ctx->fs_base above: a forked child that never execve()s
+       only ever gets FS_BASE re-synced via arch_prctl(ARCH_SET_FS, ...),
+       which a fork inherits TLS across without re-calling. Leaving this at
+       the memset's 0 meant the first time this child blocked in a kernel-
+       context wait (sleep()/wakeup() -- pipe/tty/futex/fifo) and later woke
+       back up, scheduler_handler's kcontext_pending resume path applied
+       fs_base=0 to the live FS_BASE MSR, and the next TLS-relative access
+       (get_current_tcb(), used by nearly every libc call) dereferenced
+       fs:0 as a NULL pointer. */
+    new_thread->kcontext->fs_base = og->context->fs_base;
     new_thread->kcontext->simd_ctx = simd_create_context();
     //kprintf("duplicate_thread: Created new KERNEL SIMD for process %d thread %p at %p\n", parent->pid, og, new_thread->kcontext->simd_ctx);
     if (!new_thread->kcontext->simd_ctx) {
@@ -1292,7 +1311,7 @@ void process_load_shlib_symtabs(process_t * proc) {
             }
             if (!have) {
                 vfs_file_descriptor_t fd;
-                if (vfs_open(path, 0, &fd) == SUCCESS && fd.valid) {
+                if (vfs_open(path, 0, 0, &fd) == SUCCESS && fd.valid) {
                     vfs_stat_t stat;
                     if (vfs_fstat(&fd, &stat) == SUCCESS) {
                         size_t fsz = (size_t)stat.st_size;
@@ -1348,15 +1367,6 @@ status_t process_destroy(process_t * process) {
         }
     }
 
-    /* Close all open fds so pipe refcounts (and any other fd-owned
-     * resources) are released — otherwise a reader blocked on a pipe
-     * whose writer just exited would never see EOF. */
-    for (int i = 0; i < MAX_OPEN_FILES; i++) {
-        if (process->open_files[i].valid) {
-            vfs_close(&process->open_files[i]);
-        }
-    }
-
     //kprintf("process_destroy: Removing all VM areas for process %d\n", process->pid);
     vmarea_remove_all(process);
     vmm_free_root(process->vmm);
@@ -1387,7 +1397,28 @@ status_t process_exit(process_t * process, int code) {
             process->threads[i]->state = SCHEDULER_STATUS_ZOMBIE;
     }
     process->state = SCHEDULER_STATUS_ZOMBIE;
-    if (process->parent) process_kill(process->parent, SIGCHLD);
+    /* Reparent any children to init so they can still be reaped — a zombie
+       will never call waitpid() again, so its children would otherwise be
+       unreapable the moment it exits, not just once it's later destroyed. */
+    if (g_init_pid >= 0 && process->pid != g_init_pid) {
+        scheduler_reparent_children(process->pid, g_init_pid);
+    }
+    /* Close all open fds now, not whenever the parent eventually reaps this
+       zombie via process_destroy() — otherwise a pipe's reader/writer on the
+       other end can block indefinitely on a peer that is functionally dead
+       but hasn't had its fds released yet (e.g. `producer | consumer` hangs
+       if consumer dies first and producer fills the pipe buffer before the
+       shell gets around to waitpid()-reaping consumer). A zombie thread
+       never runs again, so releasing its fds here is safe. */
+    for (int i = 0; i < MAX_OPEN_FILES; i++) {
+        if (process->open_files[i].valid) {
+            vfs_close(&process->open_files[i]);
+        }
+    }
+    /* No real SIGCHLD delivery to the parent here — see the Stop-case
+       comment in process_handle_default_signal(). wakeup() below is what
+       actually unblocks a parent's waitpid(); no caller in this kernel
+       relies on the signal itself arriving. */
     wakeup(SIGNAL_WAITPID);
     return SUCCESS;
 }
@@ -1412,6 +1443,8 @@ void process_init(const char * INIT_PROCESS, const char * INIT_TTY, vfs_path_t I
     if (st != SUCCESS) {
         panic("process_init: Failed to add init process to scheduler");
     }
+
+    g_init_pid = init_process->pid;
 
     /* Init is its own session/process-group leader. Since there is no
        getty/login to hand the controlling terminal's foreground group to

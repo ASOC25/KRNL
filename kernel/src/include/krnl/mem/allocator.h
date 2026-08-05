@@ -15,6 +15,9 @@ stack_t * kstackalloc(vmm_root_t * root, uint64_t initial_size);
 void kfree(void * virtual_address);
 void kstackfree(stack_t * stk);
 void add_allocation(vmm_root_t * root, void * physical_address, void * virtual_address, uint64_t size, uint8_t permisions);
+void remove_allocation(vmm_root_t * root, void * ptr);
+uint8_t should_deallocate_pmm(vmm_root_t * root, void * physical_address);
+uint64_t count_allocations(void);
 
 void* malloc(vmm_root_t * root, uint64_t size, uint64_t vaddr, uint8_t flags);
 stack_t * stackalloc(vmm_root_t * root, uint64_t size, uint64_t vaddr, uint8_t flags, uint8_t unique);

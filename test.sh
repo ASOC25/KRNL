@@ -50,6 +50,9 @@ if [ "$1" = "--build" ]; then
             cp -r "packages/$name/." sysroot/
         fi
     done
+    echo "Installing env/skel overlay to sysroot..."
+    mkdir -p sysroot
+    cp -r "env/skel/." sysroot/
     echo "Copying symbols for each binary in sysroot..."
     #Generate symbols for all ELF files in sysroot (binaries, .elf, .so)
     find sysroot/ -type f \( -name "*.elf" -o -name "*.so*" -o -perm /111 \) \
@@ -61,8 +64,8 @@ if [ "$1" = "--build" ]; then
     if [ ! -d "build" ]; then
         mkdir build
     fi
-    # Choose filesystem: FS=ext2 or FS=x1fs (default)
-    FS="${FS:-x1fs}"
+    # Choose filesystem: FS=ext2 (default) or FS=x1fs
+    FS="${FS:-ext2}"
     if [ "$FS" = "ext2" ]; then
         echo "Bundling ext2 filesystem onto a real AHCI-attached drive image..."
         sh ./env/scripts/create-ext2.sh ./sysroot ./build/ahci-disk.img
@@ -109,6 +112,8 @@ if [ "$1" = "--debug" ]; then
     if [ -d "packages/mlibc" ]; then
         cp -r "packages/mlibc/." sysroot/
     fi
+    mkdir -p sysroot
+    cp -r "env/skel/." sysroot/
     echo "Generating mlibc symbols..."
     find sysroot/ -type f \( -name "*.so*" \) -not -name "*.sym" | while read -r file; do
         objcopy --only-keep-debug "$file" "$file.sym" 2>/dev/null || true
@@ -117,7 +122,7 @@ if [ "$1" = "--debug" ]; then
     xbstrap build kernel || exit 1
     cp kernel/build/kernel.elf build/kernel.elf
     echo "Rebuilding ramdisk..."
-    FS="${FS:-x1fs}"
+    FS="${FS:-ext2}"
     if [ "$FS" = "ext2" ]; then
         sh ./env/scripts/create-ext2.sh ./sysroot ./build/ahci-disk.img
         printf '\0' > ./build/ramdisk.img

@@ -28,4 +28,12 @@ void pipe_dup(vfs_file_descriptor_t *fd);
    closed. Also frees fd->native_path and clears fd. */
 void pipe_close(vfs_file_descriptor_t *fd);
 
+/* Opens the named FIFO living at (mount, native_path), creating its shared
+   pipe_t on first open. Implements POSIX open-time rendezvous: O_RDONLY
+   blocks until a writer is present, O_WRONLY blocks until a reader is
+   present (or fails -ENXIO under O_NONBLOCK), O_RDWR never blocks. On
+   success sets fd->pipe and returns 0; on failure returns a negative errno
+   and leaves *fd otherwise untouched (caller still owns fd->native_path). */
+int64_t fifo_open(vfs_mount_t *mount, const char *native_path, int flags, vfs_file_descriptor_t *fd);
+
 #endif

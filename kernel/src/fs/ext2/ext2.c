@@ -27,7 +27,8 @@
 #define EXT2_S_IFIFO   0x1000
 
 #define S_ISREG(m)  (((m) & 0xF000) == EXT2_S_IFREG)
-#define S_ISDIR(m)  (((m) & 0xF000) == EXT2_S_IFDIR)
+/* S_ISLNK/S_ISDIR come from krnl/vfs/vfs.h (included above) -- numerically
+   identical to EXT2_S_IFLNK/EXT2_S_IFDIR, kept as shared definitions. */
 
 /* dir entry file_type values */
 #define EXT2_FT_UNKNOWN   0
@@ -429,6 +430,13 @@ static void file_set_block(struct ext2_fs *fs, struct ext2_inode *inode,
 }
 
 static void free_all_blocks(struct ext2_fs *fs, struct ext2_inode *inode) {
+    if (S_ISLNK(inode->i_mode) && inode->i_blocks == 0) {
+        /* fast symlink: i_block[] holds the raw target string, not real
+           block pointers -- must never reach free_block(). */
+        inode->i_size = 0;
+        return;
+    }
+
     uint32_t ptrs = fs->block_size / 4;
 
     for (int i = 0; i < 12; i++) {
@@ -922,6 +930,8 @@ ssize_t ext2_readdir(device_major_t major, device_minor_t minor, const char *pat
                 if (de->file_type == EXT2_FT_DIR)      dtype = DT_DIR;
                 else if (de->file_type == EXT2_FT_REG_FILE) dtype = DT_REG;
                 else if (de->file_type == EXT2_FT_CHRDEV)   dtype = DT_CHR;
+                else if (de->file_type == EXT2_FT_SYMLINK)  dtype = DT_LNK;
+                else if (de->file_type == EXT2_FT_FIFO)     dtype = DT_FIFO;
                 *(uint8_t *)(out_ptr + 18) = dtype;
                 memcpy(out_ptr + 19, de_name(de), nl);
                 (out_ptr + 19)[nl] = '\0';
@@ -1046,6 +1056,136 @@ status_t ext2_create(device_major_t major, device_minor_t minor, const char *pat
 
     dir_add(fs, parent_ino, name, new_ino, EXT2_FT_REG_FILE);
     return SUCCESS;
+}
+
+/* ------------------------------------------------------------------ */
+/* VFS interface: mkfifo                                               */
+/* ------------------------------------------------------------------ */
+
+status_t ext2_mkfifo(device_major_t major, device_minor_t minor, const char *path,
+                     uint32_t mode) {
+    struct ext2_fs *fs = ext2_get_fs(major, minor);
+    if (path_lookup(fs, path)) return ALREADY_EXISTS;
+
+    char parent[512], name[256];
+    if (split_path(path, parent, sizeof(parent), name, sizeof(name)) < 0)
+        return FAILURE;
+
+    uint32_t parent_ino = path_lookup(fs, parent);
+    if (!parent_ino) return FAILURE;
+
+    uint32_t group   = (parent_ino - 1) / fs->sb.s_inodes_per_group;
+    uint32_t new_ino = alloc_inode(fs, group, 0);
+    if (!new_ino) return FAILURE;
+
+    /* No data blocks -- a FIFO carries no on-disk content, its bytes only
+       ever live in the in-RAM pipe_t created the first time it's open()ed. */
+    struct ext2_inode inode;
+    memset(&inode, 0, sizeof(inode));
+    inode.i_mode        = (uint16_t)(EXT2_S_IFIFO | (mode & 0xFFF));
+    inode.i_links_count = 1;
+    inode_write(fs, new_ino, &inode);
+
+    dir_add(fs, parent_ino, name, new_ino, EXT2_FT_FIFO);
+    return SUCCESS;
+}
+
+/* ------------------------------------------------------------------ */
+/* VFS interface: chmod / chown                                        */
+/* ------------------------------------------------------------------ */
+
+status_t ext2_chmod(device_major_t major, device_minor_t minor, const char *path, uint32_t mode) {
+    struct ext2_fs *fs = ext2_get_fs(major, minor);
+    uint32_t ino = path_lookup(fs, path);
+    if (!ino) return FAILURE;
+
+    struct ext2_inode inode;
+    inode_read(fs, ino, &inode);
+    inode.i_mode = (uint16_t)((inode.i_mode & 0xF000) | (mode & 0x0FFF));
+    inode_write(fs, ino, &inode);
+    return SUCCESS;
+}
+
+status_t ext2_chown(device_major_t major, device_minor_t minor, const char *path, uint32_t uid, uint32_t gid) {
+    struct ext2_fs *fs = ext2_get_fs(major, minor);
+    uint32_t ino = path_lookup(fs, path);
+    if (!ino) return FAILURE;
+
+    struct ext2_inode inode;
+    inode_read(fs, ino, &inode);
+    inode.i_uid = (uint16_t)uid;
+    inode.i_gid = (uint16_t)gid;
+    inode_write(fs, ino, &inode);
+    return SUCCESS;
+}
+
+/* ------------------------------------------------------------------ */
+/* VFS interface: symlink / readlink                                   */
+/* ------------------------------------------------------------------ */
+
+status_t ext2_symlink(device_major_t major, device_minor_t minor,
+                      const char *path, const char *target) {
+    struct ext2_fs *fs = ext2_get_fs(major, minor);
+    if (path_lookup(fs, path)) return ALREADY_EXISTS;
+
+    char parent[512], name[256];
+    if (split_path(path, parent, sizeof(parent), name, sizeof(name)) < 0)
+        return FAILURE;
+    uint32_t parent_ino = path_lookup(fs, parent);
+    if (!parent_ino) return FAILURE;
+
+    size_t tlen = strlen(target);
+    uint32_t group = (parent_ino - 1) / fs->sb.s_inodes_per_group;
+    uint32_t new_ino = alloc_inode(fs, group, 0);
+    if (!new_ino) return FAILURE;
+
+    struct ext2_inode inode;
+    memset(&inode, 0, sizeof(inode));
+    inode.i_mode        = (uint16_t)(EXT2_S_IFLNK | 0777);
+    inode.i_links_count = 1;
+    inode.i_size        = (uint32_t)tlen;
+
+    if (tlen <= sizeof(inode.i_block)) {
+        /* fast symlink: target fits directly in the 60 bytes of i_block[] */
+        memcpy(inode.i_block, target, tlen);
+    } else {
+        /* slow symlink: target lives in one real data block */
+        uint32_t bno = alloc_block(fs, group);
+        if (!bno) { free_inode(fs, new_ino, 0); return FAILURE; }
+        uint8_t *buf = kmalloc(fs->block_size);
+        memset(buf, 0, fs->block_size);
+        memcpy(buf, target, tlen);
+        blk_write(fs, bno, buf);
+        kfree(buf);
+        inode.i_block[0] = bno;
+        inode.i_blocks   = fs->block_size / 512;
+    }
+
+    inode_write(fs, new_ino, &inode);
+    dir_add(fs, parent_ino, name, new_ino, EXT2_FT_SYMLINK);
+    return SUCCESS;
+}
+
+ssize_t ext2_readlink(device_major_t major, device_minor_t minor,
+                      const char *path, char *buf, size_t bufsz) {
+    struct ext2_fs *fs = ext2_get_fs(major, minor);
+    uint32_t ino = path_lookup(fs, path);
+    if (!ino) return -ENOENT;
+
+    struct ext2_inode inode;
+    inode_read(fs, ino, &inode);
+    if (!S_ISLNK(inode.i_mode)) return -EINVAL;
+
+    size_t n = (size_t)inode.i_size < bufsz ? (size_t)inode.i_size : bufsz;
+    if (inode.i_blocks == 0) {
+        memcpy(buf, inode.i_block, n);
+    } else {
+        uint8_t *blkbuf = kmalloc(fs->block_size);
+        blk_read(fs, inode.i_block[0], blkbuf);
+        memcpy(buf, blkbuf, n);
+        kfree(blkbuf);
+    }
+    return (ssize_t)n;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1231,9 +1371,14 @@ void ext2_init(void) {
     ops->readdir   = ext2_readdir;
     ops->mkdir     = ext2_mkdir;
     ops->create    = ext2_create;
+    ops->mkfifo    = ext2_mkfifo;
     ops->unlink    = ext2_unlink;
     ops->rename_op = ext2_rename;
     ops->rmdir     = ext2_rmdir;
+    ops->symlink   = ext2_symlink;
+    ops->readlink  = ext2_readlink;
+    ops->chmod     = ext2_chmod;
+    ops->chown     = ext2_chown;
     ops->next      = NULL;
 
     status_t r = vfs_register_fs(ops);

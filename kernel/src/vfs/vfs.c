@@ -67,15 +67,18 @@ vfs_fs_t * detect_fs(device_major_t major, device_minor_t minor) {
     return NULL;
 }
 
-vfs_mount_t * vfs_new_mount(device_major_t major, device_minor_t minor, const char *mount_point) {
+/* Shared by vfs_new_mount() (which resolves `ops` itself via detect_fs(),
+   probing the backing device for a filesystem signature) and
+   vfs_new_mount_with_ops() (used by mount() for filesystems like tmpfs
+   that have no backing device to probe -- the caller already knows
+   exactly which vfs_fs_t to attach). */
+static vfs_mount_t * vfs_new_mount_internal(vfs_fs_t *ops, device_major_t major, device_minor_t minor, const char *mount_point) {
     if (mount_point == NULL) {
         panic("vfs_new_mount: mount_point or ops is NULL");
     }
     if (strlen(mount_point) >= VFS_PATH_MAX) {
         panic("vfs_new_mount: Mount point path too long");
     }
-
-    vfs_fs_t *ops = detect_fs(major, minor);
 
     vfs_mount_t *new_mount = (vfs_mount_t *)kmalloc(sizeof(vfs_mount_t));
     if (!new_mount) {
@@ -94,6 +97,29 @@ vfs_mount_t * vfs_new_mount(device_major_t major, device_minor_t minor, const ch
     vfs_mounts = new_mount;
 
     return new_mount;
+}
+
+vfs_mount_t * vfs_new_mount(device_major_t major, device_minor_t minor, const char *mount_point) {
+    vfs_fs_t *ops = detect_fs(major, minor);
+    return vfs_new_mount_internal(ops, major, minor, mount_point);
+}
+
+vfs_mount_t * vfs_new_mount_with_ops(vfs_fs_t *ops, device_major_t major, device_minor_t minor, const char *mount_point) {
+    if (ops == NULL) {
+        panic("vfs_new_mount_with_ops: ops is NULL");
+    }
+    return vfs_new_mount_internal(ops, major, minor, mount_point);
+}
+
+/* Exact-string match against an existing mount point -- unlike
+   vfs_find_mount()'s longest-prefix match (used for ordinary path
+   resolution), mount()/umount() need to know whether a path IS a mount
+   point, not merely falls under one. */
+vfs_mount_t * vfs_find_exact_mount(const char *path) {
+    for (vfs_mount_t *m = vfs_mounts; m != NULL; m = m->next) {
+        if (strcmp(m->mount_point, path) == 0) return m;
+    }
+    return NULL;
 }
 
 status_t vfs_remove_mount(const char *mount_point) {
@@ -194,7 +220,29 @@ char * vfs_get_native_path(const char *path, vfs_mount_t *mount) {
     return native_path_copy;
 }
 
-status_t vfs_open(const char *path, int flags, vfs_file_descriptor_t *fd) {
+/* Defined below; forward-declared so vfs_fstat (which comes first) can use it. */
+static char * vfs_reconstruct_abs_path(vfs_file_descriptor_t *fd);
+
+/* True if some mount lives at or below `abs_path` (e.g. abs_path="/dev",
+   mount_point="/dev/null") -- makes `abs_path` an implicit directory even
+   though the underlying filesystem has no matching entry for it. Mirrors
+   the mount overlay in vfs_readdir, so stat()/opendir() on a directory
+   like /dev (which holds only device mounts and no real files/dirents)
+   agree with what `ls` actually shows for it. */
+static int vfs_path_has_mount_inside(const char *abs_path) {
+    size_t plen = strlen(abs_path);
+    int root = (plen == 1 && abs_path[0] == '/');
+    for (vfs_mount_t *m = vfs_mounts; m != NULL; m = m->next) {
+        size_t mlen = strlen(m->mount_point);
+        if (mlen <= plen) continue;
+        if (strncmp(m->mount_point, abs_path, plen) != 0) continue;
+        if (!root && m->mount_point[plen] != '/') continue;
+        return 1;
+    }
+    return 0;
+}
+
+status_t vfs_open(const char *path, int flags, uint32_t mode, vfs_file_descriptor_t *fd) {
     if (path == NULL) {
         panic("vfs_open: path is NULL");
     }
@@ -226,11 +274,28 @@ status_t vfs_open(const char *path, int flags, vfs_file_descriptor_t *fd) {
             fd->valid = 0;
             return ALREADY_EXISTS;
         }
+        if (S_ISFIFO(stat_buf.st_mode) && !(flags & O_PATH)) {
+            /* Named pipe: hand off to the shared-pipe rendezvous/blocking
+             * logic instead of a normal mount-backed open. On success,
+             * fd->native_path is kept as the pipe fd's occupied-marker
+             * (freed later by pipe_close, same as any other pipe fd).
+             * O_PATH is exempted -- stat()/statx() are implemented via a
+             * real vfs_open()+fstat()+close() (see syscall_stat/syscall_statx
+             * in syscall.c), and POSIX requires stat() on a FIFO to never
+             * block or otherwise "connect" to it. */
+            int64_t fr = fifo_open(fd->mount, fd->native_path, flags, fd);
+            if (fr != 0) {
+                kfree(fd->native_path);
+                fd->valid = 0;
+                return (status_t)fr;
+            }
+            return SUCCESS;
+        }
     } else {
         /* File does not exist */
         if ((flags & O_CREAT) && fd->mount->ops->create) {
             res = fd->mount->ops->create(fd->mount->major, fd->mount->minor,
-                                         fd->native_path, 0644);
+                                         fd->native_path, mode & 07777);
             if (res != SUCCESS) {
                 kfree(fd->native_path);
                 fd->valid = 0;
@@ -247,8 +312,16 @@ status_t vfs_open(const char *path, int flags, vfs_file_descriptor_t *fd) {
 }
 
 
-/* Open a directory — like vfs_open but skips the fstat existence check so
-   filesystems that have implicit directories (e.g. x1fs) can be opened. */
+/* Open a directory — like vfs_open but doesn't honor O_CREAT/O_EXCL. Still
+   requires the path to resolve to something real: either a directory the
+   underlying filesystem reports via fstat (including filesystems like x1fs
+   that synthesize "implicit" directories for a path with children but no
+   explicit dirent — x1fs_fstat's own x1fs_is_directory() check covers that),
+   or a path with a mount nested inside it (e.g. /dev, via vfs_fstat's own
+   mount-overlay fallback). Without this check, vfs_find_mount's "/"
+   catch-all made this silently succeed for ANY path, e.g. /proc/self/fd on
+   a kernel with no /proc — only to fail on the first readdir(), which not
+   every libc's opendir()/readdir() split tolerates gracefully. */
 status_t vfs_open_dir(const char *path, vfs_file_descriptor_t *fd) {
     if (path == NULL) panic("vfs_open_dir: path is NULL");
     if (fd == NULL)   panic("vfs_open_dir: fd is NULL");
@@ -264,6 +337,14 @@ status_t vfs_open_dir(const char *path, vfs_file_descriptor_t *fd) {
     fd->native_path = vfs_get_native_path(path, mount);
     if (!fd->native_path) return FAILURE;
     fd->valid = 1;
+
+    vfs_stat_t stat_buf;
+    if (vfs_fstat(fd, &stat_buf) != SUCCESS) {
+        kfree(fd->native_path);
+        fd->valid = 0;
+        return FAILURE;
+    }
+
     return SUCCESS;
 }
 
@@ -320,6 +401,16 @@ ssize_t vfs_write(vfs_file_descriptor_t *fd, const void *buf, size_t count) {
         panic("vfs_write: Invalid mount or write operation");
     }
 
+    if (fd->flags & O_APPEND) {
+        /* Every O_APPEND write must land at the current end of file, not
+         * wherever this fd's position last was -- otherwise `>>` silently
+         * overwrites from offset 0 instead of appending. */
+        vfs_stat_t st;
+        if (vfs_fstat(fd, &st) == SUCCESS && (size_t)st.st_size > fd->position) {
+            fd->position = (size_t)st.st_size;
+        }
+    }
+
     ssize_t bytes_written = fd->mount->ops->write(fd->mount->major, fd->mount->minor, fd->native_path, fd->position, buf, count);
     if (bytes_written > 0) {
         fd->position += bytes_written;
@@ -342,6 +433,19 @@ status_t vfs_fstat(vfs_file_descriptor_t *fd, vfs_stat_t *buf) {
         panic("vfs_fstat: Invalid mount or fstat operation");
     }
     status_t res = fd->mount->ops->fstat(fd->mount->major, fd->mount->minor, fd->native_path, buf);
+
+    if (res != SUCCESS) {
+        char *abs = vfs_reconstruct_abs_path(fd);
+        if (abs) {
+            if (vfs_path_has_mount_inside(abs)) {
+                memset(buf, 0, sizeof(vfs_stat_t));
+                buf->st_mode = 0x41ED; /* S_IFDIR | rwxr-xr-x */
+                buf->st_nlink = 2;
+                res = SUCCESS;
+            }
+            kfree(abs);
+        }
+    }
 
     return res;
 }
@@ -461,6 +565,17 @@ status_t vfs_mkdir(const char *path, uint32_t mode) {
     return r;
 }
 
+status_t vfs_mkfifo(const char *path, uint32_t mode) {
+    if (!path) panic("vfs_mkfifo: path is NULL");
+    vfs_mount_t *mount = vfs_find_mount(path);
+    if (!mount) return FAILURE;
+    if (!mount->ops->mkfifo) return NOT_IMPLEMENTED;
+    char *native = vfs_get_native_path(path, mount);
+    status_t r = mount->ops->mkfifo(mount->major, mount->minor, native, mode);
+    kfree(native);
+    return r;
+}
+
 status_t vfs_unlink(const char *path) {
     if (!path) panic("vfs_unlink: path is NULL");
     vfs_mount_t *mount = vfs_find_mount(path);
@@ -493,6 +608,66 @@ status_t vfs_rmdir(const char *path) {
     if (!mount->ops->rmdir) return NOT_IMPLEMENTED;
     char *native = vfs_get_native_path(path, mount);
     status_t r = mount->ops->rmdir(mount->major, mount->minor, native);
+    kfree(native);
+    return r;
+}
+
+status_t vfs_symlink(const char *target, const char *linkpath) {
+    if (!target || !linkpath) panic("vfs_symlink: NULL argument");
+    vfs_mount_t *mount = vfs_find_mount(linkpath);
+    if (!mount) return FAILURE;
+    if (!mount->ops->symlink) return NOT_IMPLEMENTED;
+    char *native = vfs_get_native_path(linkpath, mount);
+    status_t r = mount->ops->symlink(mount->major, mount->minor, native, target);
+    kfree(native);
+    return r;
+}
+
+/* Like vfs_fstat, but takes a path directly and never follows a symlink at
+   the end of it -- used by follow_symlinks() (syscall.c) to test whether a
+   path prefix is itself a symlink. Deliberately skips vfs_fstat's mount-
+   overlay fallback (the "/dev is implicitly a directory" trick): a failed
+   lookup here is simply treated by the caller as "not a symlink". */
+status_t vfs_lstat_path(const char *path, vfs_stat_t *buf) {
+    if (!path) panic("vfs_lstat_path: path is NULL");
+    vfs_mount_t *mount = vfs_find_mount(path);
+    if (!mount) return FAILURE;
+    if (!mount->ops->fstat) return NOT_IMPLEMENTED;
+    char *native = vfs_get_native_path(path, mount);
+    status_t r = mount->ops->fstat(mount->major, mount->minor, native, buf);
+    kfree(native);
+    return r;
+}
+
+ssize_t vfs_readlink_path(const char *path, char *buf, size_t bufsz) {
+    if (!path) return -EINVAL;
+    vfs_mount_t *mount = vfs_find_mount(path);
+    if (!mount) return -ENOENT;
+    if (!mount->ops->readlink) return -EINVAL;
+    char *native = vfs_get_native_path(path, mount);
+    ssize_t r = mount->ops->readlink(mount->major, mount->minor, native, buf, bufsz);
+    kfree(native);
+    return r;
+}
+
+status_t vfs_chmod(const char *path, uint32_t mode) {
+    if (!path) panic("vfs_chmod: path is NULL");
+    vfs_mount_t *mount = vfs_find_mount(path);
+    if (!mount) return FAILURE;
+    if (!mount->ops->chmod) return NOT_IMPLEMENTED;
+    char *native = vfs_get_native_path(path, mount);
+    status_t r = mount->ops->chmod(mount->major, mount->minor, native, mode);
+    kfree(native);
+    return r;
+}
+
+status_t vfs_chown(const char *path, uint32_t uid, uint32_t gid) {
+    if (!path) panic("vfs_chown: path is NULL");
+    vfs_mount_t *mount = vfs_find_mount(path);
+    if (!mount) return FAILURE;
+    if (!mount->ops->chown) return NOT_IMPLEMENTED;
+    char *native = vfs_get_native_path(path, mount);
+    status_t r = mount->ops->chown(mount->major, mount->minor, native, uid, gid);
     kfree(native);
     return r;
 }

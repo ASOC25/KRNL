@@ -328,23 +328,24 @@ char *strcpy(char *dest, const char *src) {
 }
 
 void strncpy(char *dest, const char *src, uint64_t n) {
-    if (n == 0) return;
+    /* POSIX strncpy: copy up to n bytes from src, stopping at the source's
+     * NUL; zero-pad any remaining bytes up to n. If src is n bytes or
+     * longer, exactly n bytes are copied and dest is NOT NUL-terminated —
+     * callers that need an exact n-byte copy (e.g. into a pre-zeroed or
+     * explicitly-terminated buffer) rely on this. A previous version
+     * always reserved a byte for a trailing NUL, which silently dropped
+     * the last byte whenever n == strlen(src) (e.g. chdir("/dev") got
+     * stored as "/de", and x1fs_readdir truncated every subdirectory name
+     * by one character). */
     uint64_t i = 0;
-    uint64_t src_len = strlen(src);
-    if (src_len < n) {
-        /* src fits within n; copy all bytes then null-terminate */
-        while (i < src_len) {
-            dest[i] = src[i];
-            i++;
-        }
-    } else {
-        /* src is >= n bytes; copy n-1 bytes so we can null-terminate (BUG-50) */
-        while (i < n - 1) {
-            dest[i] = src[i];
-            i++;
-        }
+    while (i < n && src[i] != '\0') {
+        dest[i] = src[i];
+        i++;
     }
-    dest[i] = '\0';
+    while (i < n) {
+        dest[i] = '\0';
+        i++;
+    }
 }
 
 void *memcpy(void *dest, const void *src, uint64_t size) {
